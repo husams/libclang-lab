@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -I. -std=c11 -DMAX_SHAPES=64 -c shapes.c -o shapes.o",
+    "file": "shapes.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -std=c11 -c calls.c -o calls.o",
+    "file": "calls.c"
+  }
+]
