@@ -47,3 +47,16 @@
 - [ ] 6.5 — Parsing at scale
 - [ ] 6.6 — Limits of libclang
 - [ ] 6.7 — CAPSTONE: mini semantic indexer
+
+## Part 7 — Capstone Project: `cidx` (symbol indexer + PCH builder)
+- [ ] M1 — Index one project in-memory (no PCH, no parallelism)
+- [ ] M2 — Persist index to disk + query (def/refs/list)
+- [ ] M3 — PCH builder + `-include-pch` acceleration
+- [ ] M4 — Scale via multiprocessing (data-not-cursors)
+- [ ] M5 — Polish (macros/includes, stats, incremental reindex)
+
+## Part 8 — Compilation Databases in Depth (reference)
+- [ ] 8.1 — DB schema (`command` vs `arguments`, `directory` resolution)
+- [ ] 8.2 — Generating a DB (CMake/Bear/Ninja/Meson/Bazel)
+- [ ] 8.3 — Full flag-strip rule set + `clang_args()` merge
+- [ ] 8.4 — Getting flags for headers (includer / sibling / default resolver)
