@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from collections.abc import Sequence
 from functools import lru_cache
 from glob import glob
@@ -98,6 +99,23 @@ def _resource_include() -> str | None:
                 return inc
         except (OSError, subprocess.SubprocessError):
             continue
+    # last resort: well-known LLVM install prefixes, newest version first
+    found = []
+    for pattern in ("/opt/llvm*/lib*/clang/*/include",
+                    "/usr/lib/llvm-*/lib/clang/*/include",
+                    "/usr/local/llvm*/lib/clang/*/include",
+                    "/usr/lib*/clang/*/include"):
+        for cand in glob(pattern):
+            inc = _check(cand)
+            if inc:
+                ver = os.path.basename(os.path.dirname(cand))
+                try:
+                    key = tuple(int(p) for p in ver.split("."))
+                except ValueError:
+                    key = (0,)
+                found.append((key, inc))
+    if found:
+        return max(found)[1]
     return None
 
 
@@ -158,16 +176,30 @@ def driver_flags(driver: str, cpp: bool = False) -> list[str]:
     if not dirs:
         return []
     res = _resource_include()
+    if res is None:
+        # No clang builtin headers anywhere (pip-wheel libclang, no clang on
+        # PATH, no CIDX_RESOURCE_DIR). Dropping the driver's builtin dirs
+        # would make every <stddef.h> include fatal, so replicate the search
+        # list verbatim instead: gcc's own stddef.h/stdarg.h parse fine under
+        # libclang (only its intrinsics headers may not).
+        warnings.warn(
+            f"no clang builtin headers found (set {RESOURCE_ENV} or install "
+            f"clang); falling back to {driver}'s own builtin headers"
+        )
+        flags = ["-nostdinc"]
+        for d in dirs:
+            flags += ["-isystem", d]
+        return flags
     flags = ["-nostdinc"]
     substituted = False
     for d in dirs:
         if _BUILTIN_DIR_RE.search(d):
-            if res and not substituted:
+            if not substituted:
                 flags += ["-isystem", res]
                 substituted = True
             continue
         flags += ["-isystem", d]
-    if res and not substituted:
+    if not substituted:
         flags += ["-isystem", res]
     return flags
 
