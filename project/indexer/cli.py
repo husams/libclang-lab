@@ -111,6 +111,7 @@ def cmd_import(args) -> int:
                     mtime=mtime,
                     md5=md5_of(src),
                     compile_options=compiledb.strip_for_libclang(cmd),
+                    driver=compiledb.driver(cmd),
                 )
                 imported += 1
     print(f"imported {imported} file(s), skipped {skipped}")
@@ -140,7 +141,8 @@ def _index_one(db: Storage, rec: File, path: str) -> int:
     if rec.id is None:
         return 1
     try:
-        result = index_source(db, path, rec.compile_options or [], rec.id)
+        result = index_source(db, path, rec.compile_options or [], rec.id,
+                              driver=rec.driver)
     except ClangParseError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -385,6 +387,7 @@ def cmd_show_file(args) -> int:
             ("directory", (d.path or ".") if d else None),
             ("mtime", ts(rec.mtime)),
             ("md5", rec.md5),
+            ("driver", rec.driver),
             ("options", " ".join(rec.compile_options)
                         if rec.compile_options else
                         "(none -- header indexed via an including TU)"),

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# cidx -- launcher for the indexer package.
+#
+# Runs `python -m indexer` with the package directory on PYTHONPATH and, when
+# the caller hasn't already chosen one, points clang.cindex at the newest
+# libclang shared library on the system (the pip `libclang` wheel stops at
+# 18.1.1; real installs -- an LLVM release tarball in /opt, apt's
+# /usr/lib/llvm-NN -- carry newer ones, e.g. 21.1.1).
+#
+# Environment (all optional):
+#   CIDX_LIBCLANG       libclang shared library to load (skips auto-detect)
+#   CIDX_RESOURCE_DIR   matching clang resource dir, when it can't be derived
+#                       from the library path (see indexer/clang/util.py)
+#   CIDX_PYTHON         python interpreter to run (default: python3)
+#   INDEXER_CACHE       cache/index directory (default: ~/.cache/cidx)
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONPATH="${HERE}${PYTHONPATH:+:$PYTHONPATH}"
+
+_first_libclang() {            # newest libclang.so* / libclang.dylib in $1
+    for f in "$1"/libclang.so "$1"/libclang.so.* "$1"/libclang.dylib; do
+        if [ -e "$f" ]; then
+            echo "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_clang_major() {               # clang major version of the install owning $1
+    # every LLVM layout ships the resource dir as <libdir>/clang/<major>/...
+    ls "$1"/clang 2>/dev/null | grep -E "^[0-9]+" | sort -rn | head -1 | cut -d. -f1
+}
+
+_detect_libclang() {
+    # All candidates compete on version: llvm-config's install does NOT get
+    # priority (apt's llvm-config-18 must not shadow an /opt/llvm-21 tarball).
+    candidates=""
+    if command -v llvm-config >/dev/null 2>&1; then
+        candidates="$(llvm-config --libdir 2>/dev/null)"
+    fi
+    candidates="$candidates
+$(ls -d /opt/llvm*/lib /opt/llvm*/lib64 /usr/lib/llvm-*/lib \
+        /usr/local/llvm*/lib 2>/dev/null)"
+    best_lib="" best_ver=-1
+    for libdir in $candidates; do
+        lib="$(_first_libclang "$libdir")" || continue
+        ver="$(_clang_major "$libdir")"
+        [ -n "$ver" ] || ver=0
+        if [ "$ver" -gt "$best_ver" ]; then
+            best_ver="$ver"
+            best_lib="$lib"
+        fi
+    done
+    [ -n "$best_lib" ] && echo "$best_lib"
+}
+
+if [ -z "${CIDX_LIBCLANG:-}" ]; then
+    if lib="$(_detect_libclang)"; then
+        export CIDX_LIBCLANG="$lib"
+    fi
+    # else: fall through to the pip wheel's bundled libclang
+fi
+
+exec "${CIDX_PYTHON:-python3}" -m indexer "$@"

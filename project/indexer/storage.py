@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS file (
     mtime           REAL,               -- source mtime at index time
     md5             TEXT,               -- content hash at import time
     compile_options TEXT,               -- JSON list of stripped parse args
+    driver          TEXT,               -- argv[0] of the compile command; its
+                                        -- system include paths are replicated
+                                        -- at parse time (custom toolchains)
     indexed         INTEGER NOT NULL DEFAULT 0,
     indexed_at      TEXT,               -- ISO timestamp of last successful index
     UNIQUE (directory_id, name)
@@ -144,6 +147,7 @@ class File:
     mtime: Optional[float] = None
     md5: Optional[str] = None
     compile_options: Optional[list[str]] = None
+    driver: Optional[str] = None
     indexed: bool = False
     indexed_at: Optional[str] = None
     id: Optional[int] = None
@@ -213,6 +217,8 @@ class Storage:
         v3 -> v4: adds symbol.decl_file_id/decl_line/decl_col. For rows that
         are still declaration-only the stored location IS the declaration, so
         it is copied over; definition rows get their decl site on reindex.
+        v5 -> v6: adds file.driver (compile-command argv[0]); backfilled on
+        the next `import`.
         """
         tables = {r[0] for r in self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -251,6 +257,11 @@ class Storage:
             # No backfill possible from stored data -- reindex to populate.
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0")
+            changed = True
+        fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
+        if "file" in tables and "driver" not in fcols:
+            # No backfill possible from stored data -- re-import to populate.
+            self._conn.execute("ALTER TABLE file ADD COLUMN driver TEXT")
             changed = True
         if changed:
             self._conn.execute(
@@ -415,7 +426,8 @@ class Storage:
     def add_file(self, directory_id: int, name: str,
                  mtime: Optional[float] = None,
                  md5: Optional[str] = None,
-                 compile_options: Optional[list[str]] = None) -> int:
+                 compile_options: Optional[list[str]] = None,
+                 driver: Optional[str] = None) -> int:
         """Insert a file row; idempotent on (directory, name). Returns file id.
 
         Re-adding with a *different* md5 resets the indexed flag (the content
@@ -423,17 +435,18 @@ class Storage:
         """
         opts = json.dumps(compile_options) if compile_options is not None else None
         cur = self._conn.execute(
-            "INSERT INTO file (directory_id, name, mtime, md5, compile_options) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "INSERT INTO file (directory_id, name, mtime, md5, compile_options, driver) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(directory_id, name) DO UPDATE SET "
             "  mtime           = COALESCE(excluded.mtime, file.mtime), "
             "  compile_options = COALESCE(excluded.compile_options, file.compile_options), "
+            "  driver          = COALESCE(excluded.driver, file.driver), "
             "  indexed         = CASE WHEN excluded.md5 IS NOT NULL "
             "                          AND excluded.md5 IS NOT file.md5 "
             "                         THEN 0 ELSE file.indexed END, "
             "  md5             = COALESCE(excluded.md5, file.md5) "
             "RETURNING id",
-            (directory_id, name, mtime, md5, opts),
+            (directory_id, name, mtime, md5, opts, driver),
         )
         fid = cur.fetchone()["id"]
         self._commit()
@@ -441,7 +454,8 @@ class Storage:
 
     def add_file_path(self, abs_path: str, mtime: Optional[float] = None,
                       md5: Optional[str] = None,
-                      compile_options: Optional[list[str]] = None) -> int:
+                      compile_options: Optional[list[str]] = None,
+                      driver: Optional[str] = None) -> int:
         """Convenience: register an absolute path, creating the directory row.
 
         The owning component must already exist (add_component first).
@@ -449,7 +463,7 @@ class Storage:
         comp_id, rel_dir, name = self._split_path(abs_path)
         dir_id = self.add_directory(comp_id, rel_dir)
         return self.add_file(dir_id, name, mtime=mtime, md5=md5,
-                             compile_options=compile_options)
+                             compile_options=compile_options, driver=driver)
 
     def get_file(self, abs_path: str) -> Optional[File]:
         """File row for an absolute path, or None."""

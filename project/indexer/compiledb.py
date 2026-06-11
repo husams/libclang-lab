@@ -56,3 +56,15 @@ def strip_for_libclang(cmd) -> list[str]:
 def source_path(cmd) -> str:
     """Absolute path of the command's source file."""
     return _abs(cmd.filename, cmd.directory)
+
+
+def driver(cmd) -> str:
+    """The command's compiler driver (argv[0]).
+
+    A custom-toolchain driver (e.g. /opt/1A/toolchain/.../bin/g++) carries its
+    own header search paths; storing it lets parse() replicate them later.
+    Bare names ('cc', 'g++') are kept as-is and resolved via PATH at parse
+    time; relative paths are resolved against the command's directory.
+    """
+    argv0 = list(cmd.arguments)[0]
+    return _abs(argv0, cmd.directory) if os.sep in argv0 else argv0

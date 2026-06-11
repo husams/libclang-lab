@@ -227,7 +227,8 @@ def index_headers(db: Storage, tu: cx.TranslationUnit,
 
 
 def index_source(db: Storage, filename: str, args: Sequence[str], file_id: int,
-                 ignore_system: bool | None = None) -> dict[str, Any]:
+                 ignore_system: bool | None = None,
+                 driver: str | None = None) -> dict[str, Any]:
     """Parse one source file, index its symbols and its headers, free the TU.
 
     The translation unit exists only inside this call: nothing libclang-owned
@@ -235,7 +236,7 @@ def index_source(db: Storage, filename: str, args: Sequence[str], file_id: int,
     written to the database -- so dropping the last reference in the `finally`
     immediately runs clang_disposeTranslationUnit and returns the AST's memory.
     """
-    tu = parse(filename, args)
+    tu = parse(filename, args, driver=driver)
     try:
         stored, skipped = index_symbols(db, tu, file_id)
         headers = index_headers(db, tu, ignore_system=ignore_system)
