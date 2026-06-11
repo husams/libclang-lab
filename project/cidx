@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # cidx -- launcher for the indexer package.
 #
-# Runs `python -m indexer` with the package directory on PYTHONPATH and, when
-# the caller hasn't already chosen one, points clang.cindex at the newest
-# libclang shared library on the system (the pip `libclang` wheel stops at
-# 18.1.1; real installs -- an LLVM release tarball in /opt, apt's
+# Runs the `indexer` console script through uv (uv resolves the project env
+# from the repo's pyproject.toml, installing the package and its libclang
+# dependency on first use). When uv isn't installed, falls back to
+# `python -m indexer` with the package directory on PYTHONPATH.
+#
+# Unless the caller has already chosen one, points clang.cindex at the
+# newest libclang shared library on the system (the pip `libclang` wheel
+# stops at 18.1.1; real installs -- an LLVM release tarball in /opt, apt's
 # /usr/lib/llvm-NN -- carry newer ones, e.g. 21.1.1).
 #
 # Environment (all optional):
 #   CIDX_LIBCLANG       libclang shared library to load (skips auto-detect)
 #   CIDX_RESOURCE_DIR   matching clang resource dir, when it can't be derived
 #                       from the library path (see indexer/clang/util.py)
-#   CIDX_PYTHON         python interpreter to run (default: python3)
+#   CIDX_PYTHON         python interpreter for the no-uv fallback
+#                       (default: python3)
 #   INDEXER_CACHE       cache/index directory (default: ~/.cache/cidx)
 set -e
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-export PYTHONPATH="${HERE}${PYTHONPATH:+:$PYTHONPATH}"
+HERE="$(cd "$(dirname "$0")" && pwd)"        # .../project
+ROOT="$(dirname "$HERE")"                    # repo root (pyproject.toml)
 
 _first_libclang() {            # newest libclang.so* / libclang.dylib in $1
     for f in "$1"/libclang.so "$1"/libclang.so.* "$1"/libclang.dylib; do
@@ -63,4 +68,8 @@ if [ -z "${CIDX_LIBCLANG:-}" ]; then
     # else: fall through to the pip wheel's bundled libclang
 fi
 
+if command -v uv >/dev/null 2>&1; then
+    exec uv run --project "$ROOT" indexer "$@"
+fi
+export PYTHONPATH="${HERE}${PYTHONPATH:+:$PYTHONPATH}"
 exec "${CIDX_PYTHON:-python3}" -m indexer "$@"
