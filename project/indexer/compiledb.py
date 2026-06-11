@@ -24,6 +24,27 @@ def _abs(p: str, base: str) -> str:
     return p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
 
 
+#: Flags libclang must not see, beyond the driver/source/-c/-o basics.
+#: Dependency generation (-M*) writes build artifacts -- the obj/dep dir
+#: usually does not exist outside a real build, which surfaces as a fatal
+#: "error opening '...'" diagnostic. -Werror (and friends) promote benign
+#: warnings to errors, and the indexer treats error diagnostics as a failed
+#: parse -- a warning gcc never emitted must not abort indexing under clang.
+_DROP = frozenset({
+    "-c", "--",
+    "-M", "-MM", "-MD", "-MMD", "-MG", "-MP", "-MV",
+    "-Werror", "-pedantic-errors",
+})
+_DROP_WITH_ARG = frozenset({
+    "-o", "-MF", "-MT", "-MQ", "-dependency-file", "--serialize-diagnostics",
+})
+_DROP_PREFIX = (
+    "-Werror=",                 # -Werror=return-type: keep it a plain warning
+    "-Wp,-M",                   # -Wp,-MD,<file> / -Wp,-MMD,<file>
+    "-MF", "-MT", "-MQ",        # glued forms: -MF<file> etc.
+)
+
+
 def strip_for_libclang(cmd) -> list[str]:
     """Raw driver invocation -> flags parse() wants. Resolves relative includes."""
     raw, directory = list(cmd.arguments), cmd.directory
@@ -31,10 +52,12 @@ def strip_for_libclang(cmd) -> list[str]:
     out: list[str] = []
     it = iter(raw[1:])                          # drop argv[0] (the driver)
     for tok in it:
-        if tok in ("-c", "--"):
+        if tok in _DROP:
             continue
-        if tok == "-o":
+        if tok in _DROP_WITH_ARG:
             next(it, None)                      # drop flag + its argument
+            continue
+        if tok.startswith(_DROP_PREFIX):
             continue
         if tok in src:
             continue
