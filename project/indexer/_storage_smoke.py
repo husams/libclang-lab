@@ -133,6 +133,40 @@ def main():
         assert {s.usr for s in db.unresolved_symbols()} == {"c:a.c@F@multiply"}
         assert [s.usr for s in db.symbols_in_file(f1)] == ["c:@F@multiply"]
 
+        # -- list views --------------------------------------------------------
+        assert [c.name for c in db.list_components()] == ["libc", "myrepo"]
+        assert [c.name for c in db.list_components(name="myrp")] == \
+            ["myrepo"], "fuzzy: chars in order"
+        assert [c.name for c in db.list_components(kind="external")] == ["libc"]
+        assert db.list_components(name="zzz") == []
+
+        dirs = db.list_directories(component_id=comp)
+        assert [(d.path, n) for d, n in dirs] == \
+            [("", "myrepo"), ("src", "myrepo")]
+        assert [d.path for d, _ in db.list_directories(name="sr")] == ["src"]
+
+        assert [p for _, p in db.list_files(component_id=comp)] == [a_c]
+        assert [p for _, p in db.list_files(component_id=comp,
+                                            dir_path="src")] == [a_c]
+        assert [p for _, p in db.list_files(component_id=comp,
+                                            dir_path="")] == [a_c], \
+            "root subtree covers everything"
+        assert db.list_files(component_id=comp, dir_path="other") == []
+        assert [p for _, p in db.list_files(name="ac")] == [a_c], "fuzzy name"
+        assert db.list_files(indexed=False) == []
+        assert [p for _, p in db.list_files(indexed=True)] == [a_c]
+
+        assert [s.usr for s in db.list_symbols(component_id=comp)] == \
+            ["c:@F@multiply"], "scoped by definition/declaration site"
+        assert [s.usr for s in db.list_symbols(component_id=comp,
+                                               dir_path="src")] == \
+            ["c:@F@multiply"]
+        assert [s.usr for s in db.list_symbols(file_id=f1)] == ["c:@F@multiply"]
+        assert [s.usr for s in db.list_symbols(name="cfset")] == \
+            ["c:@N@rk@S@Conf@F@set"], "fuzzy hits the qualified name"
+        assert len(db.list_symbols(kind="struct")) == 50
+        assert db.list_symbols(component_id=comp, kind="struct") == []
+
         # -- stats -----------------------------------------------------------
         st = db.stats()
         assert st["components"] == 2 and st["files"] == 1

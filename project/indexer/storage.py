@@ -316,6 +316,33 @@ class Storage:
                     best = row
         return _row_to(Component, best)
 
+    @staticmethod
+    def _fuzzy_like(text: str) -> str:
+        """LIKE pattern for fzf-style fuzzy matching (use with ESCAPE '\\').
+
+        Every non-space character of `text` must appear in the column, in
+        order: 'shp' matches 'shapes.c'. LIKE is case-insensitive for ASCII.
+        """
+        chars = [c.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+                 for c in text if not c.isspace()]
+        return "%" + "%".join(chars) + "%"
+
+    def list_components(self, name: Optional[str] = None,
+                        kind: Optional[str] = None) -> list[Component]:
+        """All components, optionally fuzzy-filtered by name and/or kind."""
+        sql = "SELECT * FROM component"
+        where, args = [], []
+        if name:
+            where.append(r"name LIKE ? ESCAPE '\'")
+            args.append(self._fuzzy_like(name))
+        if kind is not None:
+            where.append("kind = ?")
+            args.append(kind)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY name, path"
+        return [_row_to(Component, r) for r in self._conn.execute(sql, args)]
+
     # -- directories ---------------------------------------------------------
 
     def add_directory(self, component_id: int, path: str) -> int:
@@ -339,6 +366,37 @@ class Storage:
             (component_id, os.path.normpath(path) if path not in ("", ".") else ""),
         ).fetchone()
         return _row_to(Directory, row)
+
+    def list_directories(self, component_id: Optional[int] = None,
+                         name: Optional[str] = None
+                         ) -> list[tuple[Directory, str]]:
+        """(Directory, component name) pairs, optionally scoped to one
+        component and/or fuzzy-filtered on the relative directory path."""
+        sql = ("SELECT d.*, c.name AS comp_name "
+               "FROM directory d JOIN component c ON c.id = d.component_id")
+        where, args = [], []
+        if component_id is not None:
+            where.append("d.component_id = ?")
+            args.append(component_id)
+        if name:
+            where.append(r"d.path LIKE ? ESCAPE '\'")
+            args.append(self._fuzzy_like(name))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY c.name, d.path"
+        return [(_row_to(Directory, r), r["comp_name"])
+                for r in self._conn.execute(sql, args)]
+
+    @staticmethod
+    def _dir_scope_sql(dir_path: str, args: list) -> str:
+        """WHERE fragment matching a directory and its whole subtree."""
+        rel = os.path.normpath(dir_path)
+        if rel in (".", ""):
+            rel = ""
+        esc = rel.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        # '' is the component root: its subtree is every directory.
+        args.extend([rel, esc + os.sep + "%" if rel else "%"])
+        return r"(d.path = ? OR d.path LIKE ? ESCAPE '\')"
 
     # -- files ----------------------------------------------------------------
 
@@ -404,6 +462,37 @@ class Storage:
         ).fetchall()
         out = []
         for row in rows:
+            abs_path = os.path.join(row["root"], row["rel"], row["name"]) \
+                if row["rel"] else os.path.join(row["root"], row["name"])
+            out.append((_row_to(File, row), abs_path))
+        return out
+
+    def list_files(self, component_id: Optional[int] = None,
+                   dir_path: Optional[str] = None,
+                   name: Optional[str] = None,
+                   indexed: Optional[bool] = None) -> list[tuple[File, str]]:
+        """Like files(), with optional filters: component, directory subtree,
+        fuzzy file name, and indexed state."""
+        sql = ("SELECT f.*, c.path AS root, d.path AS rel "
+               "FROM file f JOIN directory d ON d.id = f.directory_id "
+               "JOIN component c ON c.id = d.component_id")
+        where, args = [], []
+        if component_id is not None:
+            where.append("d.component_id = ?")
+            args.append(component_id)
+        if dir_path is not None:
+            where.append(self._dir_scope_sql(dir_path, args))
+        if name:
+            where.append(r"f.name LIKE ? ESCAPE '\'")
+            args.append(self._fuzzy_like(name))
+        if indexed is not None:
+            where.append("f.indexed = ?")
+            args.append(int(indexed))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY c.path, d.path, f.name"
+        out = []
+        for row in self._conn.execute(sql, args):
             abs_path = os.path.join(row["root"], row["rel"], row["name"]) \
                 if row["rel"] else os.path.join(row["root"], row["name"])
             out.append((_row_to(File, row), abs_path))
@@ -562,6 +651,49 @@ class Storage:
             sql += " AND kind = ?"
             args.append(kind)
         sql += " ORDER BY LENGTH(qual_name), qual_name"
+        return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
+
+    def list_symbols(self, component_id: Optional[int] = None,
+                     dir_path: Optional[str] = None,
+                     file_id: Optional[int] = None,
+                     name: Optional[str] = None,
+                     kind: Optional[str] = None) -> list[Symbol]:
+        """Symbols filtered by location and/or name.
+
+        Location scoping (component / directory subtree / file) matches a
+        symbol if EITHER its definition site or its declaration site falls
+        inside the scope -- so listing a header shows the prototypes whose
+        definitions live in a .c file. `name` is a free-text fuzzy match
+        against the qualified name (spelling when no qual_name is stored).
+        """
+        sql = "SELECT s.* FROM symbol s"
+        where, args = [], []
+        if component_id is not None or dir_path is not None:
+            scope, scope_args = ["d.component_id = ?"], [component_id]
+            if component_id is None:        # dir filter across all components
+                scope, scope_args = [], []
+            if dir_path is not None:
+                scope.append(self._dir_scope_sql(dir_path, scope_args))
+            where.append(
+                "EXISTS (SELECT 1 FROM file f "
+                "JOIN directory d ON d.id = f.directory_id "
+                "WHERE f.id IN (s.file_id, s.decl_file_id) AND "
+                + " AND ".join(scope) + ")")
+            args.extend(scope_args)
+        if file_id is not None:
+            where.append("(s.file_id = ? OR s.decl_file_id = ?)")
+            args.extend([file_id, file_id])
+        if name:
+            where.append(
+                r"COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'")
+            args.append(self._fuzzy_like(name))
+        if kind is not None:
+            where.append("s.kind = ?")
+            args.append(kind)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += (" ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)),"
+                " COALESCE(s.qual_name, s.spelling)")
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
     def symbols_in_file(self, file_id: int) -> list[Symbol]:

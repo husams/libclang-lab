@@ -9,6 +9,9 @@ Subcommands:
     search      fuzzy-search symbols by qualified name ('conf::set' matches
                 RdKafka::Conf::set); prints qual name + USR per match
     show        full details for one symbol, looked up by USR
+    list (ls)   browse the index: 'list components', 'list dirs', 'list
+                files', 'list symbols' -- scoped by --component / --dir /
+                --file, with an optional free-text fuzzy name PATTERN
 
 All generated files (the SQLite index, and later PCH/cache artifacts) live in
 the cache directory -- $INDEXER_CACHE if set, else ~/.cache/cidx -- never the
@@ -112,14 +115,22 @@ def cmd_import(args) -> int:
     return 0
 
 
-def _source_root(db: Storage, name: str | None) -> str | None:
-    """Component root for --source NAME; raises LookupError on an unknown name."""
+def _lookup_component(db: Storage, name: str | None):
+    """Component for a --component/--source NAME, or None when no name given.
+
+    Raises LookupError on an unknown name."""
     if not name:
         return None
     comp = db.get_component_by_name(name)
     if comp is None:
         raise LookupError(f"no component named {name!r}")
-    return comp.path
+    return comp
+
+
+def _source_root(db: Storage, name: str | None) -> str | None:
+    """Component root for --source NAME; raises LookupError on an unknown name."""
+    comp = _lookup_component(db, name)
+    return comp.path if comp else None
 
 
 def _index_one(db: Storage, rec: File, path: str) -> int:
@@ -186,21 +197,103 @@ def cmd_index(args) -> int:
         return _index_pending(db)
 
 
+def _print_symbols(db: Storage, hits, limit: int) -> None:
+    """The symbol table shared by 'search' and 'list symbols'."""
+    shown = hits[:limit] if limit else hits
+    width = max((len(s.qual_name or s.spelling) for s in shown), default=0)
+    for s in shown:
+        name = s.qual_name or s.spelling
+        mark = "pure" if s.is_pure else "def " if s.is_definition else "decl"
+        path = db.file_abs_path(s.file_id) if s.file_id is not None else "?"
+        print(f"{s.id:>6}  {name:<{width}}  {s.kind:<17} {mark}  {path}:{s.line}")
+        if s.is_definition and s.decl_file_id is not None:
+            dpath = db.file_abs_path(s.decl_file_id)
+            print(f"{'':>6}  {'':<{width}}  {'':<17} decl  {dpath}:{s.decl_line}")
+    extra = f" (showing {len(shown)})" if len(shown) < len(hits) else ""
+    print(f"{len(hits)} match(es){extra}")
+
+
 def cmd_search(args) -> int:
     with Storage(args.index) as db:
         hits = db.search_symbols(args.pattern, kind=args.kind)
-        shown = hits[: args.limit] if args.limit else hits
-        width = max((len(s.qual_name or s.spelling) for s in shown), default=0)
-        for s in shown:
-            name = s.qual_name or s.spelling
-            mark = "pure" if s.is_pure else "def " if s.is_definition else "decl"
-            path = db.file_abs_path(s.file_id) if s.file_id is not None else "?"
-            print(f"{s.id:>6}  {name:<{width}}  {s.kind:<17} {mark}  {path}:{s.line}")
-            if s.is_definition and s.decl_file_id is not None:
-                dpath = db.file_abs_path(s.decl_file_id)
-                print(f"{'':>6}  {'':<{width}}  {'':<17} decl  {dpath}:{s.decl_line}")
-    extra = f" (showing {len(shown)})" if len(shown) < len(hits) else ""
-    print(f"{len(hits)} match(es){extra}")
+        _print_symbols(db, hits, args.limit)
+    return 0 if hits else 1
+
+
+# -- list ---------------------------------------------------------------------
+
+def cmd_list_components(args) -> int:
+    with Storage(args.index) as db:
+        comps = db.list_components(name=args.pattern, kind=args.kind)
+        width = max((len(c.name) for c in comps), default=0)
+        for c in comps:
+            print(f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {c.path}")
+    print(f"{len(comps)} component(s)")
+    return 0 if comps else 1
+
+
+def cmd_list_dirs(args) -> int:
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        rows = db.list_directories(
+            component_id=comp.id if comp else None, name=args.pattern)
+        width = max((len(cname) for _, cname in rows), default=0)
+        for d, cname in rows:
+            print(f"{d.id:>4}  {cname:<{width}}  {d.path or '.'}")
+    print(f"{len(rows)} directory(ies)")
+    return 0 if rows else 1
+
+
+def cmd_list_files(args) -> int:
+    if args.dir is not None and not args.component:
+        print("error: --dir requires --component (directory paths are "
+              "relative to a component root)", file=sys.stderr)
+        return 1
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        indexed = True if args.indexed else False if args.pending else None
+        rows = db.list_files(
+            component_id=comp.id if comp else None,
+            dir_path=args.dir, name=args.pattern, indexed=indexed)
+        for rec, path in rows:
+            mark = "idx " if rec.indexed else "pend"
+            print(f"{rec.id:>4}  {mark}  {path}")
+    print(f"{len(rows)} file(s)")
+    return 0 if rows else 1
+
+
+def cmd_list_symbols(args) -> int:
+    if args.dir is not None and not args.component:
+        print("error: --dir requires --component (directory paths are "
+              "relative to a component root)", file=sys.stderr)
+        return 1
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        file_id = None
+        if args.file:
+            path = resolve_file_arg(args.file, comp.path if comp else None)
+            rec = db.get_file(path)
+            if rec is None:
+                print(f"error: not in index database: {path}", file=sys.stderr)
+                return 1
+            file_id = rec.id
+        hits = db.list_symbols(
+            component_id=comp.id if comp else None,
+            dir_path=args.dir, file_id=file_id,
+            name=args.pattern, kind=args.kind)
+        _print_symbols(db, hits, args.limit)
     return 0 if hits else 1
 
 
@@ -287,6 +380,57 @@ def main(argv=None) -> int:
                    help="numeric id (first column of 'search') or a clang USR; "
                         "USRs contain $ and * so single-quote them in the shell")
     p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("list", aliases=["ls"],
+                       help="browse the index: components, dirs, files, symbols")
+    lsub = p.add_subparsers(dest="what", required=True)
+    fuzzy = ("optional free-text fuzzy filter: characters must appear "
+             "in order, e.g. 'shp' matches shapes.c")
+
+    q = lsub.add_parser("components", help="list registered components")
+    q.add_argument("pattern", nargs="?", help=fuzzy)
+    q.add_argument("--kind", choices=("repo", "external"),
+                   help="restrict to one component kind")
+    q.set_defaults(fn=cmd_list_components)
+
+    q = lsub.add_parser("dirs", help="list directories (all, or one component's)")
+    q.add_argument("pattern", nargs="?", help=fuzzy)
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict to this component")
+    q.set_defaults(fn=cmd_list_dirs)
+
+    q = lsub.add_parser("files",
+                        help="list files for a component or a directory in it")
+    q.add_argument("pattern", nargs="?", help=fuzzy)
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict to this component")
+    q.add_argument("--dir", "-d", metavar="PATH",
+                   help="directory (relative to the component root) "
+                        "including its subtree; needs --component")
+    g = q.add_mutually_exclusive_group()
+    g.add_argument("--indexed", action="store_true",
+                   help="only files already indexed")
+    g.add_argument("--pending", action="store_true",
+                   help="only files not yet indexed")
+    q.set_defaults(fn=cmd_list_files)
+
+    q = lsub.add_parser("symbols",
+                        help="list symbols for a component, directory, or file")
+    q.add_argument("pattern", nargs="?",
+                   help=fuzzy + " (matched against the qualified name)")
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict to this component")
+    q.add_argument("--dir", "-d", metavar="PATH",
+                   help="directory (relative to the component root) "
+                        "including its subtree; needs --component")
+    q.add_argument("--file", "-f", metavar="FILE",
+                   help="one file; relative paths resolve against the "
+                        "--component root (else the current directory)")
+    q.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
+                   help="restrict to one symbol kind")
+    q.add_argument("--limit", type=int, default=50, metavar="N",
+                   help="show at most N matches (0 = all; default 50)")
+    q.set_defaults(fn=cmd_list_symbols)
 
     args = ap.parse_args(argv)
     args.index = index_path()
