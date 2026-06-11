@@ -45,6 +45,28 @@ _DROP_PREFIX = (
 )
 
 
+def sanitize(args: list[str]) -> list[str]:
+    """Re-apply the drop rules to already-stored options.
+
+    Options are stripped at import time, so an index written by an older
+    version may still carry flags the current rules would drop (-Werror,
+    -MF ...); sanitizing again at parse time heals such databases without
+    a re-import.
+    """
+    out: list[str] = []
+    it = iter(args)
+    for tok in it:
+        if tok in _DROP:
+            continue
+        if tok in _DROP_WITH_ARG:
+            next(it, None)
+            continue
+        if tok.startswith(_DROP_PREFIX):
+            continue
+        out.append(tok)
+    return out
+
+
 def strip_for_libclang(cmd) -> list[str]:
     """Raw driver invocation -> flags parse() wants. Resolves relative includes."""
     raw, directory = list(cmd.arguments), cmd.directory

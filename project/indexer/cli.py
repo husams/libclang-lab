@@ -141,8 +141,9 @@ def _index_one(db: Storage, rec: File, path: str) -> int:
     if rec.id is None:
         return 1
     try:
-        result = index_source(db, path, rec.compile_options or [], rec.id,
-                              driver=rec.driver)
+        result = index_source(db, path,
+                              compiledb.sanitize(rec.compile_options or []),
+                              rec.id, driver=rec.driver)
     except ClangParseError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
