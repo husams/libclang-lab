@@ -305,6 +305,12 @@ class Storage:
         ).fetchone()
         return _row_to(Component, row)
 
+    def get_component_by_id(self, component_id: int) -> Optional[Component]:
+        row = self._conn.execute(
+            "SELECT * FROM component WHERE id = ?", (component_id,)
+        ).fetchone()
+        return _row_to(Component, row)
+
     def component_for_path(self, abs_path: str) -> Optional[Component]:
         """Longest-prefix match: which component owns this absolute path?"""
         abs_path = os.path.abspath(abs_path)
@@ -387,6 +393,12 @@ class Storage:
         return [(_row_to(Directory, r), r["comp_name"])
                 for r in self._conn.execute(sql, args)]
 
+    def get_directory_by_id(self, directory_id: int) -> Optional[Directory]:
+        row = self._conn.execute(
+            "SELECT * FROM directory WHERE id = ?", (directory_id,)
+        ).fetchone()
+        return _row_to(Directory, row)
+
     @staticmethod
     def _dir_scope_sql(dir_path: str, args: list) -> str:
         """WHERE fragment matching a directory and its whole subtree."""
@@ -449,6 +461,12 @@ class Storage:
             "SELECT f.* FROM file f JOIN directory d ON d.id = f.directory_id "
             "WHERE d.component_id = ? AND d.path = ? AND f.name = ?",
             (comp_id, rel_dir, name),
+        ).fetchone()
+        return _row_to(File, row)
+
+    def get_file_by_id(self, file_id: int) -> Optional[File]:
+        row = self._conn.execute(
+            "SELECT * FROM file WHERE id = ?", (file_id,)
         ).fetchone()
         return _row_to(File, row)
 

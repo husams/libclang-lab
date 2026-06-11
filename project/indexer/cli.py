@@ -8,7 +8,8 @@ Subcommands:
                 headers; already-indexed files are skipped via md5)
     search      fuzzy-search symbols by qualified name ('conf::set' matches
                 RdKafka::Conf::set); prints qual name + USR per match
-    show        full details for one symbol, looked up by USR
+    show        full details for one record: 'show symbol' by id or USR,
+                'show file' by id or path (import state, options, symbols)
     list (ls)   browse the index: 'list components', 'list dirs', 'list
                 files', 'list symbols' -- scoped by --component / --dir /
                 --file, with an optional free-text fuzzy name PATTERN
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime
 
 if __package__ in (None, ""):                       # direct execution
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -297,7 +299,7 @@ def cmd_list_symbols(args) -> int:
     return 0 if hits else 1
 
 
-def cmd_show(args) -> int:
+def cmd_show_symbol(args) -> int:
     with Storage(args.index) as db:
         ref = args.symbol
         s = db.lookup_symbol_by_id(int(ref)) if ref.isdigit() \
@@ -342,6 +344,64 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_show_file(args) -> int:
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        ref = args.file
+        if ref.isdigit():                       # first column of 'list files'
+            rec = db.get_file_by_id(int(ref))
+            path = db.file_abs_path(rec.id) if rec and rec.id else None
+        else:
+            path = resolve_file_arg(ref, comp.path if comp else None)
+            rec = db.get_file(path)
+        if rec is None or rec.id is None or path is None:
+            print(f"error: not in index database: {ref}", file=sys.stderr)
+            return 1
+
+        d = db.get_directory_by_id(rec.directory_id)
+        owner = db.get_component_by_id(d.component_id) if d else None
+        syms = db.list_symbols(file_id=rec.id)
+        defined = sum(1 for s in syms
+                      if s.file_id == rec.id and s.is_definition)
+        declared = sum(1 for s in syms if s.decl_file_id == rec.id)
+        by_kind = {}
+        for s in syms:
+            by_kind[s.kind] = by_kind.get(s.kind, 0) + 1
+
+        def ts(epoch):
+            if epoch is None:
+                return None
+            return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+
+        fields = [
+            ("id", rec.id),
+            ("path", path),
+            ("component", f"{owner.name} ({owner.kind})  {owner.path}"
+                          if owner else None),
+            ("directory", (d.path or ".") if d else None),
+            ("mtime", ts(rec.mtime)),
+            ("md5", rec.md5),
+            ("options", " ".join(rec.compile_options)
+                        if rec.compile_options else
+                        "(none -- header indexed via an including TU)"),
+            ("indexed", index_status(rec, path)[1]),
+            ("indexed at", f"{rec.indexed_at} UTC" if rec.indexed_at else None),
+            ("symbols", f"{len(syms)} ({defined} defined here, "
+                        f"{declared} declared here)"),
+            ("by kind", ", ".join(f"{k}: {n}"
+                                  for k, n in sorted(by_kind.items()))
+                        if by_kind else None),
+        ]
+        for key, value in fields:
+            if value is not None:
+                print(f"{key:<12} {value}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx",
                                  description="cidx command-line skeleton")
@@ -375,11 +435,23 @@ def main(argv=None) -> int:
                    help="show at most N matches (0 = all; default 25)")
     p.set_defaults(fn=cmd_search)
 
-    p = sub.add_parser("show", help="show full details of one symbol by id or USR")
-    p.add_argument("symbol",
+    p = sub.add_parser("show", help="show full details of one symbol or file")
+    ssub = p.add_subparsers(dest="what", required=True)
+
+    q = ssub.add_parser("symbol", help="one symbol, by id or USR")
+    q.add_argument("symbol",
                    help="numeric id (first column of 'search') or a clang USR; "
                         "USRs contain $ and * so single-quote them in the shell")
-    p.set_defaults(fn=cmd_show)
+    q.set_defaults(fn=cmd_show_symbol)
+
+    q = ssub.add_parser("file", help="one file, by id or path")
+    q.add_argument("file",
+                   help="numeric id (first column of 'list files') or a path; "
+                        "relative paths resolve against the --component root "
+                        "(else the current directory)")
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="component root for resolving a relative path")
+    q.set_defaults(fn=cmd_show_file)
 
     p = sub.add_parser("list", aliases=["ls"],
                        help="browse the index: components, dirs, files, symbols")

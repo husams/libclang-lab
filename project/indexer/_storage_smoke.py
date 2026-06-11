@@ -133,6 +133,16 @@ def main():
         assert {s.usr for s in db.unresolved_symbols()} == {"c:a.c@F@multiply"}
         assert [s.usr for s in db.symbols_in_file(f1)] == ["c:@F@multiply"]
 
+        # -- by-id getters -----------------------------------------------------
+        assert db.get_component_by_id(comp).name == "myrepo"
+        assert db.get_component_by_id(99999) is None
+        assert db.get_directory_by_id(d_src).path == "src"
+        assert db.get_directory_by_id(d_src).component_id == comp
+        assert db.get_directory_by_id(99999) is None
+        assert db.get_file_by_id(f1).name == "a.c"
+        assert db.get_file_by_id(f1).directory_id == d_src
+        assert db.get_file_by_id(99999) is None
+
         # -- list views --------------------------------------------------------
         assert [c.name for c in db.list_components()] == ["libc", "myrepo"]
         assert [c.name for c in db.list_components(name="myrp")] == \
