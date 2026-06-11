@@ -38,7 +38,7 @@ libclang-lab/
 │   ├── part_4_preprocessor_diagnostics.md  ← Part 4 — Preprocessor, Diagnostics & Flags
 │   ├── part_5_building_tools.md       ← Part 5 — Building Real Tools
 │   ├── part_6_advanced_production.md  ← Part 6 — Advanced & Production
-│   ├── part_7_capstone_project.md     ← Part 7 — Capstone Project brief (cidx: indexer + PCH builder; no scripts)
+│   ├── part_7_capstone_project.md     ← Part 7 — Capstone Project brief (cidx: symbol indexer + call-graph builder; no scripts)
 │   └── part_8_compile_db_headers.md   ← Part 8 — Compilation Databases in Depth + getting flags for headers (reference; no scripts)
 ├── manifests/                         ← Sample C/C++ sources + a multi-file project
 │   ├── shapes.h                       ← Struct/enum/typedef decls + function prototypes (Parts 1–5)

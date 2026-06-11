@@ -48,12 +48,12 @@
 - [ ] 6.6 — Limits of libclang
 - [ ] 6.7 — CAPSTONE: mini semantic indexer
 
-## Part 7 — Capstone Project: `cidx` (symbol indexer + PCH builder)
-- [ ] M1 — Index one project in-memory (no PCH, no parallelism)
-- [ ] M2 — Persist index to disk + query (def/refs/list)
-- [ ] M3 — PCH builder + `-include-pch` acceleration
-- [ ] M4 — Scale via multiprocessing (data-not-cursors)
-- [ ] M5 — Polish (macros/includes, stats, incremental reindex)
+## Part 7 — Capstone Project: `cidx` (symbol indexer + call-graph builder)
+- [ ] M1 — Index one project in-memory (symbols + xrefs)
+- [ ] M2 — Call edges: USR-keyed caller→callee, merged cross-TU
+- [ ] M3 — Persist index + graph to SQLite + query (def/refs/list, flat callers/callees)
+- [ ] M4 — Graph algorithms (transitive callers/callees, path, cycles, dead code, DOT)
+- [ ] M5 — Scale via multiprocessing (data-not-cursors) + stats
 
 ## Part 8 — Compilation Databases in Depth (reference)
 - [ ] 8.1 — DB schema (`command` vs `arguments`, `directory` resolution)
