@@ -37,6 +37,7 @@ import clang.cindex as cx
 
 LIBCLANG_ENV = "CIDX_LIBCLANG"
 RESOURCE_ENV = "CIDX_RESOURCE_DIR"
+GNUC_ENV = "CIDX_GNUC_VERSION"
 
 if os.environ.get(LIBCLANG_ENV) and not cx.Config.loaded:
     cx.Config.set_library_file(os.path.expanduser(os.environ[LIBCLANG_ENV]))
@@ -152,6 +153,109 @@ def _driver_search_dirs(driver: str, lang: str) -> tuple[str, ...]:
     return tuple(dirs)
 
 
+_GCC_DRIVER_RE = re.compile(r"(^|-)(gcc|g\+\+)(-[\d.]+)?$")
+
+
+@lru_cache(maxsize=None)
+def _gcc_version(driver: str) -> str | None:
+    """`driver`'s full gcc version (e.g. '13.4.1'), or None for non-gcc."""
+    if not _GCC_DRIVER_RE.search(os.path.basename(driver)):
+        return None
+    for flag in ("-dumpfullversion", "-dumpversion"):
+        try:
+            v = subprocess.check_output(
+                [driver, flag], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if re.fullmatch(r"\d+(\.\d+)*", v):
+            return v
+    return None
+
+
+@lru_cache(maxsize=1)
+def _libclang_major() -> int:
+    """Major version of the LOADED libclang (0 when undeterminable)."""
+    try:
+        from clang.cindex import _CXString
+        fn = cx.conf.lib.clang_getClangVersion
+        fn.restype = _CXString
+        s = cx.conf.lib.clang_getCString(fn())
+        if isinstance(s, bytes):
+            s = s.decode(errors="replace")
+        m = re.search(r"version (\d+)", s or "")
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
+@lru_cache(maxsize=None)
+def _glibc_probe(driver: str, cpp: bool) -> tuple[bool, bool]:
+    """(cxx13_floatn_keywords, malloc_attr_args) of the driver's libc.
+
+    glibc >= 2.38 treats _FloatN as KEYWORDS in C++ once the compiler claims
+    gcc 13 (detectable: floatn-common.h mentions __GNUC_PREREQ (13)); glibc
+    >= 2.34 decorates allocators with __attribute__((malloc(deallocator)))
+    once it claims gcc 11 (detectable: sys/cdefs.h defines __attr_dealloc).
+    """
+    floatn13 = malloc_args = False
+    for d in _driver_search_dirs(driver, "c++" if cpp else "c"):
+        f = os.path.join(d, "bits", "floatn-common.h")
+        if not floatn13 and os.path.exists(f):
+            with open(f, errors="ignore") as fh:
+                floatn13 = bool(re.search(r"__GNUC_PREREQ\s*\(13", fh.read()))
+        c = os.path.join(d, "sys", "cdefs.h")
+        if not malloc_args and os.path.exists(c):
+            with open(c, errors="ignore") as fh:
+                malloc_args = "__attr_dealloc" in fh.read()
+    return floatn13, malloc_args
+
+
+#: _Float32 & co are gcc keywords clang doesn't implement; alias them to
+#: plain types where glibc's declarations would otherwise be unparseable.
+#: Parse-fidelity only -- no codegen ever happens here.
+_FLOATN_ALIASES = [
+    "-D_Float32=float", "-D_Float64=double", "-D_Float128=long double",
+    "-D_Float32x=double", "-D_Float64x=long double",
+]
+
+
+def _gnuc_version_flag(driver: str, cpp: bool = False) -> list[str]:
+    """clang's __GNUC__ masquerade (default: gcc 4.2) hides any code behind
+    `#if __GNUC__ >= N` guards that the real driver compiles -- symptoms range
+    from missing declarations to incomplete types. -fgnuc-version= makes the
+    parse report the driver's own version, with two glibc landmines probed
+    and defused (see _glibc_probe):
+
+      * malloc(deallocator) attributes: parseable only by libclang >= 21;
+        with an older parser the claimed version is capped below 11.
+      * _FloatN: in C (claimed >= 7), and in C++ on glibc >= 2.38 (claimed
+        >= 13), glibc uses gcc-only keywords -- aliased away via -D. C++ on
+        older glibc instead typedefs them, where the aliases would mangle
+        the typedefs -- so there they are NOT added.
+
+    $CIDX_GNUC_VERSION overrides the derived version (capping included);
+    'off' / '0' disables the flag entirely.
+    """
+    env = os.environ.get(GNUC_ENV, "").strip()
+    if env.lower() in ("0", "off", "none", "false"):
+        return []
+    ver = env or _gcc_version(driver)
+    if not ver:
+        return []
+    try:
+        major = int(ver.split(".")[0])
+    except ValueError:
+        major = 0
+    floatn13, malloc_args = _glibc_probe(driver, cpp)
+    if not env and major >= 11 and malloc_args and _libclang_major() < 21:
+        ver, major = "10.9", 10
+    flags = [f"-fgnuc-version={ver}"]
+    if (major >= 7 and not cpp) or (major >= 13 and cpp and floatn13):
+        flags += _FLOATN_ALIASES
+    return flags
+
+
 #: A compiler's private header dirs inside its search list -- gcc's
 #: lib/gcc/<triple>/<ver>/include + include-fixed, or clang's
 #: lib/clang/<ver>/include. These must NOT be fed to libclang: gcc's
@@ -175,6 +279,7 @@ def driver_flags(driver: str, cpp: bool = False) -> list[str]:
     dirs = _driver_search_dirs(driver, "c++" if cpp else "c")
     if not dirs:
         return []
+    gnuc = _gnuc_version_flag(driver, cpp=cpp)
     res = _resource_include()
     if res is None:
         # No clang builtin headers anywhere (pip-wheel libclang, no clang on
@@ -186,11 +291,11 @@ def driver_flags(driver: str, cpp: bool = False) -> list[str]:
             f"no clang builtin headers found (set {RESOURCE_ENV} or install "
             f"clang); falling back to {driver}'s own builtin headers"
         )
-        flags = ["-nostdinc"]
+        flags = ["-nostdinc", *gnuc]
         for d in dirs:
             flags += ["-isystem", d]
         return flags
-    flags = ["-nostdinc"]
+    flags = ["-nostdinc", *gnuc]
     substituted = False
     for d in dirs:
         if _BUILTIN_DIR_RE.search(d):
