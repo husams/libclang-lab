@@ -360,6 +360,22 @@ def toolchain_flags(cpp: bool = False, driver: str | None = None) -> list[str]:
 
 STRICT_ENV = "CIDX_STRICT"
 
+#: Per-file cap on individual diagnostic lines written to the log, so one
+#: rotten TU can't flood cidx.log.
+_DIAG_LOG_CAP = 25
+
+
+def _log_diagnostics(filename: str, diags: Sequence["cx.Diagnostic"]) -> None:
+    """Write each diagnostic to the log at INFO -- the per-file summary line
+    carries the WARNING/ERROR level, so the CLI's warning counter stays
+    one-per-file instead of one-per-diagnostic."""
+    for d in diags[:_DIAG_LOG_CAP]:
+        _log.info("%s: diag %s:%d: %s",
+                  filename, d.location.file, d.location.line, d.spelling)
+    if len(diags) > _DIAG_LOG_CAP:
+        _log.info("%s: ... %d more diagnostic(s) suppressed",
+                  filename, len(diags) - _DIAG_LOG_CAP)
+
 
 def fatal_diagnostics(tu: cx.TranslationUnit,
                       level: int | None = None) -> list[cx.Diagnostic]:
@@ -402,8 +418,12 @@ def parse(
     defaults. With check=True (default), raise ClangParseError if the parse
     has fatal diagnostics; pass check=False to inspect a broken TU yourself.
     """
-    flags = list(args) + toolchain_flags(cpp=is_cpp(filename, args),
-                                         driver=driver)
+    # -ferror-limit=0 lifts clang's default 20-error cap: hitting the cap
+    # emits a FATAL 'too many errors emitted, stopping now' that aborts an
+    # otherwise indexable TU while naming none of the real errors.
+    flags = (list(args)
+             + toolchain_flags(cpp=is_cpp(filename, args), driver=driver)
+             + ["-ferror-limit=0"])
     index = cx.Index.create()
     try:
         tu = index.parse(filename, args=flags, options=options)
@@ -421,15 +441,16 @@ def parse(
             # exception message the CLI shows on screen.
             _log.error("%s: failed parse flags: %s; libclang: %s",
                        filename, " ".join(flags), _libclang_major() or "?")
+            _log_diagnostics(filename, fatal_diagnostics(tu,
+                                                         cx.Diagnostic.Error))
             raise ClangParseError(
                 f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}"
             )
         if level > cx.Diagnostic.Error:
             errors = fatal_diagnostics(tu, cx.Diagnostic.Error)
             if errors:
-                d = errors[0]
                 _log.warning(
-                    "%s: %d error diagnostic(s) ignored (%s=1 to abort), "
-                    "first: %s:%d: %s", filename, len(errors), STRICT_ENV,
-                    d.location.file, d.location.line, d.spelling)
+                    "%s: %d error diagnostic(s) ignored (%s=1 to abort)",
+                    filename, len(errors), STRICT_ENV)
+                _log_diagnostics(filename, errors)
     return tu
