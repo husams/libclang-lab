@@ -186,9 +186,13 @@ def _libclang_major() -> int:
         from clang.cindex import _CXString
         fn = cx.conf.lib.clang_getClangVersion
         fn.restype = _CXString
-        s = cx.conf.lib.clang_getCString(fn())
-        if isinstance(s, bytes):
+        cxstr = fn()                # MUST outlive the getCString copy below:
+        s = cx.conf.lib.clang_getCString(cxstr)  # points INTO cxstr, and the
+        if hasattr(s, "value"):     # _CXString destructor disposes the buffer
+            s = s.value             # (official clang>=17 bindings return a
+        if isinstance(s, bytes):    # c_interop_string here, not str)
             s = s.decode(errors="replace")
+        del cxstr
         m = re.search(r"version (\d+)", s or "")
         return int(m.group(1)) if m else 0
     except Exception:

@@ -4,8 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
+# macOS: the `libclang` wheel bundles a native dylib (18.1.1 is its newest
+# release) -- works out of the box. Linux boxes: the official `clang` bindings
+# (21.x) ship NO native library, so $CIDX_LIBCLANG must point at one
+# (e.g. /opt/llvm-21.1.1/lib/libclang.so).
 dependencies = [
-    "libclang>=18.1.1",
+    "libclang>=18.1.1; sys_platform == 'darwin'",
+    "clang>=21.1.7; sys_platform != 'darwin'",
 ]
 
 [project.scripts]
