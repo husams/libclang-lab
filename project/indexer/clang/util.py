@@ -348,9 +348,32 @@ def toolchain_flags(cpp: bool = False, driver: str | None = None) -> list[str]:
     return flags
 
 
-def fatal_diagnostics(tu: cx.TranslationUnit) -> list[cx.Diagnostic]:
-    """Error/fatal diagnostics (severity >= ERROR) for a translation unit."""
-    return [d for d in tu.diagnostics if d.severity >= cx.Diagnostic.Error]
+STRICT_ENV = "CIDX_STRICT"
+
+
+def fatal_diagnostics(tu: cx.TranslationUnit,
+                      level: int | None = None) -> list[cx.Diagnostic]:
+    """Diagnostics at/above `level` (default: severity >= ERROR)."""
+    if level is None:
+        level = cx.Diagnostic.Error
+    return [d for d in tu.diagnostics if d.severity >= level]
+
+
+def _abort_level() -> int:
+    """Severity that aborts a parse.
+
+    clang grades unrecoverable environment problems (a header not found)
+    FATAL -- those truncate the AST and the parse must be rejected. Plain
+    ERRORs are semantic disagreements (clang is stricter than the gcc the
+    code was written for: eager template instantiation, gcc-only constructs
+    behind compiler-detection guards); the AST around them is intact, so by
+    default the indexer reports them and keeps the TU. $CIDX_STRICT=1
+    restores abort-on-error.
+    """
+    strict = os.environ.get(STRICT_ENV, "").strip().lower()
+    if strict in ("", "0", "off", "none", "false"):
+        return cx.Diagnostic.Fatal
+    return cx.Diagnostic.Error
 
 
 def parse(
@@ -377,7 +400,8 @@ def parse(
     except cx.TranslationUnitLoadError as e:
         raise ClangParseError(f"cannot parse {filename}") from e
     if check:
-        fatals = fatal_diagnostics(tu)
+        level = _abort_level()
+        fatals = fatal_diagnostics(tu, level)
         if fatals:
             summary = "; ".join(
                 f"{d.location.file}:{d.location.line}: {d.spelling}"
@@ -388,4 +412,12 @@ def parse(
                 f"  parse flags: {' '.join(flags)}\n"
                 f"  libclang: {_libclang_major() or '?'}"
             )
+        if level > cx.Diagnostic.Error:
+            errors = fatal_diagnostics(tu, cx.Diagnostic.Error)
+            if errors:
+                d = errors[0]
+                print(f"  note: {len(errors)} error diagnostic(s) ignored "
+                      f"({STRICT_ENV}=1 to abort), first: "
+                      f"{d.location.file}:{d.location.line}: {d.spelling}",
+                      file=sys.stderr)
     return tu
