@@ -241,7 +241,7 @@ def cmd_index(args) -> int:
         rc = (_index_files(db, args.files, root) if args.files
               else _index_pending(db))
     if _warnings.count:
-        print(f"{_warnings.count} warning(s) logged to {log_path()}")
+        print(f"{_warnings.count} warning(s)/error(s) logged to {log_path()}")
     return rc
 
 

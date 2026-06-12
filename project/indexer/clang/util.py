@@ -413,10 +413,12 @@ def parse(
                 f"{d.location.file}:{d.location.line}: {d.spelling}"
                 for d in fatals[:3]
             )
+            # The flag dump is debugging detail -- log it, keep it out of the
+            # exception message the CLI shows on screen.
+            _log.error("%s: failed parse flags: %s; libclang: %s",
+                       filename, " ".join(flags), _libclang_major() or "?")
             raise ClangParseError(
-                f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}\n"
-                f"  parse flags: {' '.join(flags)}\n"
-                f"  libclang: {_libclang_major() or '?'}"
+                f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}"
             )
         if level > cx.Diagnostic.Error:
             errors = fatal_diagnostics(tu, cx.Diagnostic.Error)
