@@ -384,6 +384,8 @@ def parse(
                 for d in fatals[:3]
             )
             raise ClangParseError(
-                f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}"
+                f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}\n"
+                f"  parse flags: {' '.join(flags)}\n"
+                f"  libclang: {_libclang_major() or '?'}"
             )
     return tu
