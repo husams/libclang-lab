@@ -24,16 +24,22 @@ Environment:
                         (derived automatically from CIDX_LIBCLANG when unset)
 """
 
+import logging
 import os
 import re
 import subprocess
 import sys
-import warnings
 from collections.abc import Sequence
 from functools import lru_cache
 from glob import glob
 
 import clang.cindex as cx
+
+#: Parse warnings (tolerated error diagnostics, toolchain fallbacks) go here;
+#: the cidx CLI attaches a file handler ($INDEXER_CACHE/cidx.log). Without a
+#: handler (library use, lab scripts) logging's last-resort handler keeps
+#: printing them to stderr.
+_log = logging.getLogger("cidx.clang")
 
 LIBCLANG_ENV = "CIDX_LIBCLANG"
 RESOURCE_ENV = "CIDX_RESOURCE_DIR"
@@ -287,9 +293,9 @@ def driver_flags(driver: str, cpp: bool = False) -> list[str]:
         # would make every <stddef.h> include fatal, so replicate the search
         # list verbatim instead: gcc's own stddef.h/stdarg.h parse fine under
         # libclang (only its intrinsics headers may not).
-        warnings.warn(
-            f"no clang builtin headers found (set {RESOURCE_ENV} or install "
-            f"clang); falling back to {driver}'s own builtin headers"
+        _log.warning(
+            "no clang builtin headers found (set %s or install clang); "
+            "falling back to %s's own builtin headers", RESOURCE_ENV, driver
         )
         flags = ["-nostdinc", *gnuc]
         for d in dirs:
@@ -416,8 +422,8 @@ def parse(
             errors = fatal_diagnostics(tu, cx.Diagnostic.Error)
             if errors:
                 d = errors[0]
-                print(f"  note: {len(errors)} error diagnostic(s) ignored "
-                      f"({STRICT_ENV}=1 to abort), first: "
-                      f"{d.location.file}:{d.location.line}: {d.spelling}",
-                      file=sys.stderr)
+                _log.warning(
+                    "%s: %d error diagnostic(s) ignored (%s=1 to abort), "
+                    "first: %s:%d: %s", filename, len(errors), STRICT_ENV,
+                    d.location.file, d.location.line, d.spelling)
     return tu

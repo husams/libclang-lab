@@ -14,9 +14,9 @@ Subcommands:
                 files', 'list symbols' -- scoped by --component / --dir /
                 --file, with an optional free-text fuzzy name PATTERN
 
-All generated files (the SQLite index, and later PCH/cache artifacts) live in
-the cache directory -- $INDEXER_CACHE if set, else ~/.cache/cidx -- never the
-current directory:
+All generated files (the SQLite index, the cidx.log warning log, and later
+PCH/cache artifacts) live in the cache directory -- $INDEXER_CACHE if set,
+else ~/.cache/cidx -- never the current directory:
 
     python3 -m indexer add-source --path /path/to/repo [--name myrepo]
     python3 -m indexer import --db /path/to/build/compile_commands.json
@@ -26,6 +26,7 @@ current directory:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from datetime import datetime
@@ -47,6 +48,7 @@ else:
 CACHE_ENV = "INDEXER_CACHE"
 DEFAULT_CACHE = "~/.cache/cidx"
 INDEX_NAME = "index.db"
+LOG_NAME = "cidx.log"
 
 
 def cache_dir() -> str:
@@ -56,6 +58,45 @@ def cache_dir() -> str:
 
 def index_path() -> str:
     return os.path.join(cache_dir(), INDEX_NAME)
+
+
+def log_path() -> str:
+    return os.path.join(cache_dir(), LOG_NAME)
+
+
+class _WarningCounter(logging.Filter):
+    """Counts warning records passing the file handler, so the index summary
+    can point at the log without re-reading it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            self.count += 1
+        return True
+
+
+_warnings = _WarningCounter()
+
+
+def _setup_logging() -> None:
+    """Send indexer warnings (tolerated diagnostics, toolchain fallbacks) to
+    $INDEXER_CACHE/cidx.log instead of dumping them on the terminal.
+
+    delay=True keeps read-only subcommands from creating an empty log file.
+    """
+    logger = logging.getLogger("cidx")
+    if logger.handlers:                             # already configured
+        return
+    os.makedirs(cache_dir(), exist_ok=True)
+    handler = logging.FileHandler(log_path(), delay=True)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.addFilter(_warnings)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 # -- subcommands -----------------------------------------------------------------
@@ -197,9 +238,11 @@ def cmd_index(args) -> int:
         except LookupError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
-        if args.files:
-            return _index_files(db, args.files, root)
-        return _index_pending(db)
+        rc = (_index_files(db, args.files, root) if args.files
+              else _index_pending(db))
+    if _warnings.count:
+        print(f"{_warnings.count} warning(s) logged to {log_path()}")
+    return rc
 
 
 def _print_symbols(db: Storage, hits, limit: int) -> None:
@@ -510,6 +553,7 @@ def main(argv=None) -> int:
 
     args = ap.parse_args(argv)
     args.index = index_path()
+    _setup_logging()
     return args.fn(args)
 
 
