@@ -554,3 +554,59 @@ TEST_CASE("commit() propagates failure — not silently swallowed (R2)") {
   }
   CHECK(db.list_files().size() == 1);
 }
+
+// delete_component (import --force): the component, its directories and files
+// (ON DELETE CASCADE) and every symbol indexed from those files (explicit --
+// symbol file refs are ON DELETE SET NULL) must vanish, leaving other
+// components fully intact.
+TEST_CASE("delete_component removes files (cascade) and symbols (explicit)") {
+  cidx::Storage db(":memory:");
+
+  // Component A: one file, one symbol defined+declared in it.
+  const int64_t a = db.add_component("a", "/repo/a");
+  const int64_t da = db.add_directory(a, "");
+  const int64_t fa = db.add_file(da, "a.c");
+  cidx::Symbol sa;
+  sa.usr = "c:@F@a_fn";
+  sa.spelling = "a_fn";
+  sa.kind = "function";
+  sa.file_id = fa;
+  sa.decl_file_id = fa;
+  db.add_symbol(sa);
+
+  // Component B: untouched bystander with its own file + symbol.
+  const int64_t b = db.add_component("b", "/repo/b");
+  const int64_t dbdir = db.add_directory(b, "");
+  const int64_t fb = db.add_file(dbdir, "b.c");
+  cidx::Symbol sb;
+  sb.usr = "c:@F@b_fn";
+  sb.spelling = "b_fn";
+  sb.kind = "function";
+  sb.file_id = fb;
+  sb.decl_file_id = fb;
+  db.add_symbol(sb);
+
+  // Cross symbol: defined in B but DECLARED in A's file -> the decl_file_id
+  // match means it is "related" to A and is removed when A is deleted.
+  cidx::Symbol cross;
+  cross.usr = "c:@F@cross";
+  cross.spelling = "cross";
+  cross.kind = "function";
+  cross.file_id = fb;
+  cross.decl_file_id = fa;
+  db.add_symbol(cross);
+
+  db.delete_component(a);
+
+  CHECK_FALSE(db.get_component("/repo/a").has_value());
+  CHECK_FALSE(db.get_file("/repo/a/a.c").has_value());
+  CHECK_MESSAGE(!db.lookup_symbol("c:@F@a_fn").has_value(),
+                "A's symbol deleted, not orphaned");
+  CHECK_MESSAGE(!db.lookup_symbol("c:@F@cross").has_value(),
+                "decl-site-in-A symbol deleted too");
+
+  CHECK(db.get_component("/repo/b").has_value());
+  REQUIRE(db.get_file("/repo/b/b.c").has_value());
+  CHECK_MESSAGE(db.lookup_symbol("c:@F@b_fn").has_value(),
+                "bystander component B untouched");
+}

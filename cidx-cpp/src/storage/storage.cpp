@@ -505,6 +505,24 @@ Storage::component_for_path(const std::string &abs_path) {
   return best;
 }
 
+void Storage::delete_component(int64_t component_id) {
+  // Symbols reference files with ON DELETE SET NULL, so remove them before the
+  // cascade nulls their file ids -- otherwise they linger as file-less orphans.
+  // Directories and files then vanish via the component's ON DELETE CASCADE.
+  static const char kSub[] =
+      "SELECT f.id FROM file f JOIN directory d ON f.directory_id = d.id "
+      "WHERE d.component_id = ?";
+  auto del_sym =
+      db_.prepare(std::string("DELETE FROM symbol WHERE file_id IN (") + kSub +
+                  ") OR decl_file_id IN (" + kSub + ")");
+  del_sym.bind(1, component_id);
+  del_sym.bind(2, component_id);
+  del_sym.step_done();
+  auto del_comp = db_.prepare("DELETE FROM component WHERE id = ?");
+  del_comp.bind(1, component_id);
+  del_comp.step_done();
+}
+
 std::vector<Component>
 Storage::list_components(const std::optional<std::string> &name,
                          const std::optional<std::string> &kind) {

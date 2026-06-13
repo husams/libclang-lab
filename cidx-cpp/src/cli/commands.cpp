@@ -270,10 +270,15 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
     return 1;
   }
 
-  // Component root: the git repo owning the sources, else their common dir.
+  // Component root: the git repo owning the sources, else the directory
+  // holding compile_commands.json (its basename names the component). The db
+  // dir — not the first source's dir — keeps git-worktree checkouts, whose
+  // `.git` is a file rather than a directory, rooted where their build db lives.
   const std::string first_src = source_path(commands[0]);
   const std::optional<std::string> groot = repo::git_root(first_src);
-  const std::string root = groot ? *groot : pathutil::dirname(first_src);
+  const std::string root =
+      groot ? *groot
+            : pathutil::abspath(CompileDb::db_dir_from_arg(args.db));
   const std::string name =
       args.name ? *args.name
                 : (groot ? repo::repo_name(root) : pathutil::basename(root));
@@ -281,6 +286,14 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   int imported = 0;
   int skipped = 0;
   Storage db(ctx.index_path);
+  if (args.force) {
+    const std::optional<Component> existing = db.get_component(root);
+    if (existing) {
+      db.delete_component(existing->id);
+      *ctx.out << "force: removed existing component #" << existing->id
+               << " at " << root << " (files and indexed symbols)\n";
+    }
+  }
   const int64_t cid = db.add_component(name, root); // kind default "repo"
   *ctx.out << "component #" << cid << ": " << name << " at " << root << "\n";
   {

@@ -72,6 +72,10 @@ public:
   std::vector<Component>
   list_components(const std::optional<std::string> &name = std::nullopt,
                   const std::optional<std::string> &kind = std::nullopt);
+  // Remove a component and everything derived from it: directories and files
+  // via ON DELETE CASCADE, plus symbols indexed from those files (deleted
+  // explicitly -- symbol file refs are ON DELETE SET NULL). For import --force.
+  void delete_component(int64_t component_id);
 
   // -- directories -----------------------------------------------------------
   int64_t add_directory(int64_t component_id, const std::string &path);

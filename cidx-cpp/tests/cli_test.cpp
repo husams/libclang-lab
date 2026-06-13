@@ -416,7 +416,7 @@ TEST_CASE("args: missing required option -> exit 2 (add-source, import)") {
   // $ python3 -m indexer import
   f = parse_fail({"import"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx import [-h] --db DB [--name NAME]\n"
+  CHECK(f.msg == "usage: cidx import [-h] --db DB [--name NAME] [--force]\n"
                  "cidx import: error: the following arguments are required: "
                  "--db\n");
 }
@@ -1253,11 +1253,14 @@ TEST_SUITE("clang") {
     const std::string t = make_temp_dir();
     makedirs(t + "/proj/sub");
     makedirs(t + "/other");
-    makedirs(t + "/build");
     write_file(t + "/proj/a.c", "int a;\n");
     write_file(t + "/proj/sub/b.c", "int b;\n");
     write_file(t + "/other/c.c", "int c;\n");
-    write_file(t + "/build/compile_commands.json",
+    // No .git anywhere: the component root falls back to the directory holding
+    // compile_commands.json (here <t>/proj), and its basename names the
+    // component. Sources outside that dir (other/c.c) fall outside the
+    // component and are skipped.
+    write_file(t + "/proj/compile_commands.json",
                "[\n"
                "  {\"directory\": \"" +
                    t +
@@ -1274,12 +1277,12 @@ TEST_SUITE("clang") {
                    "\"cc -c c.c\", \"file\": \"c.c\"}\n"
                    "]\n");
 
-    // $ python3 -m indexer import --db <t>/build/compile_commands.json
+    // $ python3 -m indexer import --db <t>/proj/compile_commands.json
     // component #1: proj at <t>/proj
     // imported 2 file(s), skipped 1
     //   skip (outside any component): <t>/other/c.c        (stderr)
     const CmdResult r =
-        run_cli({"import", "--db", t + "/build/compile_commands.json"}, t);
+        run_cli({"import", "--db", t + "/proj/compile_commands.json"}, t);
     CHECK(r.rc == 0);
     CHECK(r.out == "component #1: proj at " + t +
                        "/proj\n"

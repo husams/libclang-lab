@@ -12,11 +12,16 @@ import os
 from clang.cindex import CompilationDatabase
 
 
-def load_commands(db_path: str):
-    """All compile commands from a compile_commands.json (file or its directory)."""
+def db_directory(db_path: str) -> str:
+    """Absolute directory holding compile_commands.json (db_path is the file or its dir)."""
     db_dir = db_path[:-len("compile_commands.json")] or "." \
         if db_path.endswith("compile_commands.json") else db_path
-    cdb = CompilationDatabase.fromDirectory(os.path.abspath(db_dir))
+    return os.path.abspath(db_dir)
+
+
+def load_commands(db_path: str):
+    """All compile commands from a compile_commands.json (file or its directory)."""
+    cdb = CompilationDatabase.fromDirectory(db_directory(db_path))
     return list(cdb.getAllCompileCommands())
 
 

@@ -194,6 +194,13 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols sq
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --kind function
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols -f "$PROJECT_DIR/mathlib.h"
+  # import --force: delete the existing component (its files + indexed symbols)
+  # and rebuild from the same DB, then re-index. Both tools must emit the same
+  # force/component/counts lines and produce an identical rebuilt index.db.
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- import --force --db "$FIXTURE_DB" --name parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files --pending
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --limit 2
 }
 
 echo "parity_check: running Python cidx (cache: $PY_CACHE)"

@@ -189,6 +189,32 @@ def main():
     with Storage(db_path) as db:
         assert db.lookup_symbol("c:@F@multiply").display_name == "multiply(int, int)"
 
+    # -- delete_component (import --force): cascade files + explicit symbols ----
+    with Storage(":memory:") as db:
+        a = db.add_component("a", "/repo/a")
+        da = db.add_directory(a, "")
+        fa = db.add_file(da, "a.c")
+        db.add_symbol(Symbol(usr="c:@F@a_fn", spelling="a_fn", kind="function",
+                             file_id=fa, decl_file_id=fa))
+        b = db.add_component("b", "/repo/b")
+        dbdir = db.add_directory(b, "")
+        fb = db.add_file(dbdir, "b.c")
+        db.add_symbol(Symbol(usr="c:@F@b_fn", spelling="b_fn", kind="function",
+                             file_id=fb, decl_file_id=fb))
+        # Defined in B but declared in A's file -> related to A, removed with A.
+        db.add_symbol(Symbol(usr="c:@F@cross", spelling="cross", kind="function",
+                             file_id=fb, decl_file_id=fa))
+
+        db.delete_component(a)
+
+        assert db.get_component("/repo/a") is None
+        assert db.get_file("/repo/a/a.c") is None
+        assert db.lookup_symbol("c:@F@a_fn") is None, "A's symbol deleted"
+        assert db.lookup_symbol("c:@F@cross") is None, "decl-site-in-A deleted"
+        assert db.get_component("/repo/b") is not None, "B untouched"
+        assert db.get_file("/repo/b/b.c") is not None
+        assert db.lookup_symbol("c:@F@b_fn") is not None
+
     print("storage smoke: ALL OK")
     for k, v in st.items():
         print(f"  {k}: {v}")

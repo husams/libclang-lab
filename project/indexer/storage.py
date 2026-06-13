@@ -333,6 +333,25 @@ class Storage:
                     best = row
         return _row_to(Component, best)
 
+    def delete_component(self, component_id: int) -> None:
+        """Remove a component and everything derived from it.
+
+        Directories and files vanish via ON DELETE CASCADE; symbols reference
+        files with ON DELETE SET NULL, so symbols indexed from this component's
+        files are deleted explicitly first -- otherwise they would linger as
+        file-less orphans. Used by `import --force` to rebuild from scratch."""
+        sub = ("SELECT f.id FROM file f "
+               "JOIN directory d ON f.directory_id = d.id "
+               "WHERE d.component_id = ?")
+        self._conn.execute(
+            f"DELETE FROM symbol WHERE file_id IN ({sub}) "
+            f"OR decl_file_id IN ({sub})",
+            (component_id, component_id),
+        )
+        self._conn.execute(
+            "DELETE FROM component WHERE id = ?", (component_id,))
+        self._commit()
+
     @staticmethod
     def _fuzzy_like(text: str) -> str:
         """LIKE pattern for fzf-style fuzzy matching (use with ESCAPE '\\').

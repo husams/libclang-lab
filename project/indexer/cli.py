@@ -101,6 +101,26 @@ def _setup_logging() -> None:
 
 # -- subcommands -----------------------------------------------------------------
 
+def cmd_init(args) -> int:
+    """Create a blank index database (schema v6, no rows) in the cache dir.
+
+    Opening a Storage applies the schema, so this just materializes an empty
+    index.db. Refuses to clobber an existing database unless --force."""
+    path = args.index
+    existed = os.path.exists(path)
+    if existed and not args.force:
+        print(f"error: index database already exists at {path} "
+              f"(use --force to recreate)", file=sys.stderr)
+        return 1
+    if existed:
+        os.remove(path)
+    with Storage(path):
+        pass                # constructing Storage applies the schema
+    action = "recreated" if existed else "initialized"
+    print(f"{action} empty index database at {path}")
+    return 0
+
+
 def cmd_add_source(args) -> int:
     path = os.path.abspath(args.path)
     if not os.path.isdir(path):
@@ -128,14 +148,24 @@ def cmd_import(args) -> int:
         print("error: compilation database is empty", file=sys.stderr)
         return 1
 
-    # Component root: the git repo owning the sources, else their common dir.
+    # Component root: the git repo owning the sources, else the directory
+    # holding compile_commands.json (its basename names the component). The
+    # db dir — not the first source's dir — keeps git-worktree checkouts, whose
+    # `.git` is a file rather than a directory, rooted where their build db lives.
     first_src = compiledb.source_path(commands[0])
-    root = git_root(first_src) or os.path.dirname(first_src)
-    name = args.name or (repo_name(root) if git_root(first_src)
+    groot = git_root(first_src)
+    root = groot or compiledb.db_directory(args.db)
+    name = args.name or (repo_name(root) if groot
                          else os.path.basename(root))
 
     imported, skipped = 0, 0
     with Storage(args.index) as db:
+        if args.force:
+            existing = db.get_component(root)
+            if existing is not None:
+                db.delete_component(existing.id)
+                print(f"force: removed existing component #{existing.id} "
+                      f"at {root} (files and indexed symbols)")
         cid = db.add_component(name, root)
         print(f"component #{cid}: {name} at {root}")
         with db.transaction():
@@ -454,6 +484,11 @@ def main(argv=None) -> int:
                                  description="cidx command-line skeleton")
     sub = ap.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("init", help="create a blank index database")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing index database")
+    p.set_defaults(fn=cmd_init)
+
     p = sub.add_parser("add-source", help="register a component")
     p.add_argument("--path", required=True, help="repo root or library header dir")
     p.add_argument("--name", help="component name (default: from .git/config)")
@@ -464,6 +499,9 @@ def main(argv=None) -> int:
     p.add_argument("--db", required=True,
                    help="compile_commands.json (or the directory holding it)")
     p.add_argument("--name", help="component name override")
+    p.add_argument("--force", action="store_true",
+                   help="reimport: delete the existing component (its files "
+                        "and indexed symbols) before importing")
     p.set_defaults(fn=cmd_import)
 
     p = sub.add_parser("index", help="index imported C/C++ files")
