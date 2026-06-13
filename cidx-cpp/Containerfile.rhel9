@@ -1,0 +1,64 @@
+# Build + run cidx in a RHEL 9.6-compatible environment (AlmaLinux 9.6, RHEL 9.6
+# ABI). Multi-stage: a toolchain stage builds cidx, a slim runtime stage carries
+# only the binary + the one runtime dependency (clang-libs => libclang.so).
+#
+#   podman build -f Containerfile.rhel9 -t cidx-rhel9 .
+#   podman run --rm cidx-rhel9 --version
+#   # extract just the binary to run on a RHEL 9.6 host that has clang-libs:
+#   id=$(podman create cidx-rhel9); podman cp $id:/usr/local/bin/cidx ./cidx; podman rm $id
+#
+# Linkage (see CMakeLists CIDX_STATIC): SQLite3 and the C++ runtime are linked
+# STATICALLY; libclang is DYNAMIC. RHEL 9 ships static LLVM but NO static clang
+# libraries (clang-devel has zero .a's) and no static libsqlite3.a, so a fully
+# static libclang would require building clang from source. Instead we:
+#   * build a static libsqlite3.a from the SQLite amalgamation,
+#   * -static-libstdc++/-libgcc so the gcc-13-built cidx does NOT need a newer
+#     libstdc++ than RHEL 9's (its system libstdc++ is gcc-11 / GLIBCXX_3.4.29),
+#   * link libclang.so dynamically; the runtime needs `clang-libs` (libclang.so
+#     + libLLVM.so + their deps), which the runtime stage installs.
+# C++23 needs gcc >= 13; RHEL 9's system gcc is 11, so we use gcc-toolset-13.
+
+# ============================================================ build stage =====
+FROM almalinux:9.6 AS build
+
+# crb carries the static libstdc++; appstream carries gcc-toolset-13, cmake and
+# the clang/llvm dev packages (clang-devel for libclang.so to link against).
+RUN dnf -y install dnf-plugins-core \
+ && dnf config-manager --set-enabled crb \
+ && dnf -y install \
+      gcc-toolset-13 gcc-toolset-13-libstdc++-devel \
+      cmake make git tar xz unzip which \
+      clang-devel llvm-devel \
+ && dnf clean all
+
+# RHEL ships no static libsqlite3.a — build one from the amalgamation.
+ARG SQLITE_AMALGAMATION_URL=https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip
+RUN curl -fsSL -o /tmp/sqlite.zip "$SQLITE_AMALGAMATION_URL" \
+ && cd /tmp && unzip -q sqlite.zip && cd sqlite-amalgamation-* \
+ && gcc -O2 -fPIC -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 \
+        -DSQLITE_ENABLE_RTREE -c sqlite3.c -o sqlite3.o \
+ && ar rcs /usr/lib64/libsqlite3.a sqlite3.o \
+ && install -m 0644 sqlite3.h sqlite3ext.h /usr/include/ \
+ && rm -rf /tmp/sqlite.zip /tmp/sqlite-amalgamation-*
+
+COPY . /src/cidx-cpp
+WORKDIR /src/cidx-cpp
+
+RUN source /opt/rh/gcc-toolset-13/enable \
+ && rm -rf build-static \
+ && cmake -S . -B build-static -DCIDX_STATIC=ON \
+      -DCIDX_LIBCLANG="$(llvm-config --libdir)/libclang.so" \
+ && cmake --build build-static -j"$(nproc)" --target cidx \
+ && ./build-static/cidx --help >/dev/null && echo "cidx built OK"
+
+# ========================================================== runtime stage =====
+# clang-libs pulls libclang.so + libLLVM.so + their deps (libedit, libffi,
+# libxml2, ...) at versions matched to this RHEL 9.6's glibc — no manual
+# bundling, no version skew. cidx's static C++ runtime means RHEL 9's older
+# system libstdc++ is irrelevant to it.
+FROM almalinux:9.6 AS runtime
+RUN dnf -y install clang-libs && dnf clean all
+COPY --from=build /src/cidx-cpp/build-static/cidx /usr/local/bin/cidx
+RUN /usr/local/bin/cidx --help >/dev/null && echo "runtime cidx OK"
+ENTRYPOINT ["/usr/local/bin/cidx"]
+CMD ["--help"]
