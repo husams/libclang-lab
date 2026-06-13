@@ -276,5 +276,40 @@ if ! diff -u "$WORK/py.dump" "$WORK/cpp.dump" >"$WORK/dump.diff"; then
 fi
 echo "parity_check: DB dumps identical (mtime/indexed_at excluded)"
 
+# --- diff 3: CIDX_MEM per-TU memory report ------------------------------------
+# Both tools call clang_getCXTUResourceUsage on the SAME linked libclang over
+# the SAME sources, so the per-TU byte amounts are deterministic and identical.
+# Re-index the fixture under CIDX_MEM=1 in a throwaway cache per tool and diff
+# the "TU memory" log lines (the leading timestamp is stripped; absolute source
+# paths are identical for both tools).
+mem_report() {
+  local cache=$1 is_py=$2 out=$3; shift 3
+  local -a tool=("$@")
+  rm -rf "$cache"; mkdir -p "$cache"
+  if [ "$is_py" = "1" ]; then
+    INDEXER_CACHE="$cache" CIDX_LIBCLANG="$PY_LIBCLANG" \
+      "${tool[@]}" import --db "$FIXTURE_DB" --name memproj >/dev/null 2>&1
+    INDEXER_CACHE="$cache" CIDX_LIBCLANG="$PY_LIBCLANG" CIDX_MEM=1 \
+      "${tool[@]}" index >/dev/null 2>&1
+  else
+    INDEXER_CACHE="$cache" env -u CIDX_LIBCLANG \
+      "${tool[@]}" import --db "$FIXTURE_DB" --name memproj >/dev/null 2>&1
+    INDEXER_CACHE="$cache" env -u CIDX_LIBCLANG CIDX_MEM=1 \
+      "${tool[@]}" index >/dev/null 2>&1
+  fi
+  # Drop the "<date> <time>,<ms> INFO " prefix; keep "<src>: TU memory ...".
+  grep -h "TU memory" "$cache/cidx.log" | sed -E 's/^[0-9-]+ [0-9:,]+ INFO //' \
+    | sort >"$out"
+}
+mem_report "$WORK/py-mem"  "1" "$WORK/py.mem"  "$PY_CIDX"
+mem_report "$WORK/cpp-mem" "0" "$WORK/cpp.mem" "$CPP_BIN"
+[ -s "$WORK/py.mem" ] || fail "CIDX_MEM produced no Python memory lines"
+if ! diff -u "$WORK/py.mem" "$WORK/cpp.mem" >"$WORK/mem.diff"; then
+  echo "parity_check: CIDX_MEM REPORT DIFF (python vs cpp):" >&2
+  cat "$WORK/mem.diff" >&2
+  fail "CIDX_MEM memory reports differ (work dir kept: $WORK)"
+fi
+echo "parity_check: CIDX_MEM memory reports identical ($(wc -l <"$WORK/py.mem" | tr -d ' ') TUs)"
+
 rm -rf "$WORK"
 echo "parity_check: PASS"

@@ -24,6 +24,7 @@ Environment:
                         (derived automatically from CIDX_LIBCLANG when unset)
 """
 
+import ctypes
 import logging
 import os
 import re
@@ -402,6 +403,72 @@ def _abort_level() -> int:
     return cx.Diagnostic.Error
 
 
+#: CIDX_MEM=1 logs one per-TU memory line (clang_getCXTUResourceUsage) after a
+#: successful parse. Pure observability: the libclang C API exposes no
+#: allocator hook, only this usage breakdown + the dispose lifecycle.
+MEM_ENV = "CIDX_MEM"
+
+
+class _CXTUResourceUsageEntry(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_int), ("amount", ctypes.c_ulong)]
+
+
+class _CXTUResourceUsage(ctypes.Structure):
+    _fields_ = [("data", ctypes.c_void_p),
+                ("numEntries", ctypes.c_uint),
+                ("entries", ctypes.POINTER(_CXTUResourceUsageEntry))]
+
+
+#: Cached (get, dispose, name) ctypes bindings. clang.cindex does NOT register
+#: clang_getCXTUResourceUsage, and its shared library handle carries a global
+#: errcheck, so we bind these on our OWN handle to the same dylib.
+_RU_FNS = None
+
+
+def _resource_usage_fns():
+    global _RU_FNS
+    if _RU_FNS is None:
+        lib = ctypes.CDLL(cx.conf.get_filename())
+        get = lib.clang_getCXTUResourceUsage
+        get.restype = _CXTUResourceUsage
+        get.argtypes = [ctypes.c_void_p]
+        dispose = lib.clang_disposeCXTUResourceUsage
+        dispose.argtypes = [_CXTUResourceUsage]
+        name = lib.clang_getTUResourceUsageName
+        name.argtypes = [ctypes.c_int]
+        name.restype = ctypes.c_char_p
+        _RU_FNS = (get, dispose, name)
+    return _RU_FNS
+
+
+def _mem_reporting_enabled() -> bool:
+    """CIDX_MEM truthy (same falsy spellings as CIDX_STRICT) -> emit the
+    per-TU memory report. Default OFF, so a clean parse still writes nothing."""
+    mem = os.environ.get(MEM_ENV, "").strip().lower()
+    return mem not in ("", "0", "off", "none", "false")
+
+
+def _log_resource_usage(filename: str, tu: cx.TranslationUnit) -> None:
+    """Log one INFO line: total bytes (+ KiB) and every non-zero category from
+    clang_getCXTUResourceUsage. All kinds 1..14 are MEMORY_IN_BYTES, so
+    `amount` is bytes. The CX-owned buffer is disposed before returning."""
+    get, dispose, name = _resource_usage_fns()
+    usage = get(tu.obj)
+    try:
+        total = 0
+        parts = []
+        for i in range(usage.numEntries):
+            entry = usage.entries[i]
+            total += entry.amount
+            if entry.amount:
+                nm = name(entry.kind)
+                parts.append(f"{nm.decode() if nm else '?'}={entry.amount}")
+    finally:
+        dispose(usage)
+    _log.info("%s: TU memory total=%d bytes (%d KiB); %s",
+              filename, total, total // 1024, ", ".join(parts))
+
+
 def parse(
     filename: str,
     args: Sequence[str] = (),
@@ -453,4 +520,6 @@ def parse(
                     "%s: %d error diagnostic(s) ignored (%s=1 to abort)",
                     filename, len(errors), STRICT_ENV)
                 _log_diagnostics(filename, errors)
+    if _mem_reporting_enabled():
+        _log_resource_usage(filename, tu)
     return tu
