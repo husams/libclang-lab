@@ -1,0 +1,71 @@
+// Plain row structs mirroring the Python dataclasses (design §5.1).
+// compile_options is the decoded JSON array (util/json_min); id fields hold
+// the SQLite rowid once a row has been read back.
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace cidx {
+
+struct Component {
+  int64_t id = -1;
+  std::string name;
+  std::string path; // absolute repo/header root
+  std::string kind; // 'repo' | 'external'
+};
+
+struct Directory {
+  int64_t id = -1;
+  int64_t component_id = -1;
+  std::string path; // relative to component.path; '' = root
+};
+
+struct File {
+  int64_t id = -1;
+  int64_t directory_id = -1;
+  std::string name;
+  std::optional<double> mtime;
+  std::optional<std::string> md5;
+  std::optional<std::vector<std::string>> compile_options; // decoded JSON
+  std::optional<std::string> driver;
+  bool indexed = false;
+  std::optional<std::string> indexed_at;
+};
+
+struct Symbol {
+  std::string usr;
+  std::string spelling;
+  std::string kind; // one of the 17 kSymbolKinds
+  std::optional<std::string> qual_name;
+  std::optional<std::string> display_name;
+  std::optional<std::string> type_info;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  std::optional<int64_t> decl_file_id;
+  std::optional<int64_t> decl_line;
+  std::optional<int64_t> decl_col;
+  bool is_definition = false;
+  bool is_pure = false;
+  std::optional<std::string> linkage;
+  std::optional<std::string> access;
+  std::optional<std::string> parent_usr;
+  bool resolved = false;
+  int64_t id = -1;
+};
+
+struct Stats {
+  int64_t components = 0;
+  int64_t directories = 0;
+  int64_t files = 0;
+  int64_t files_indexed = 0;
+  int64_t symbols = 0;
+  int64_t symbols_unresolved = 0;
+  std::map<std::string, int64_t> symbols_by_kind;
+};
+
+} // namespace cidx

@@ -1,0 +1,65 @@
+#!/bin/sh
+# fake-driver — gcc/clang driver mock for toolchain_test (story S04).
+#
+# Tests symlink this script under driver-shaped names (gcc-8.5, g++-13, mycc)
+# in a temp dir and configure it through the environment:
+#   FAKE_DRIVER_LOG        append each invocation's "$*" here (probe counting)
+#   FAKE_SEARCH_DIRS       colon-separated dirs for the `-v` search list
+#   FAKE_FRAMEWORK_DIR     extra dir emitted with the "(framework directory)"
+#                          suffix (must be skipped by the parser)
+#   FAKE_NO_SEARCH_OUTPUT  when set, `-v` prints nothing (mute driver)
+#   FAKE_DUMPFULLVERSION   stdout for -dumpfullversion (unset -> exit 1)
+#   FAKE_DUMPVERSION       stdout for -dumpversion     (unset -> exit 1)
+
+if [ -n "$FAKE_DRIVER_LOG" ]; then
+  printf '%s\n' "$*" >> "$FAKE_DRIVER_LOG"
+fi
+
+case " $* " in
+  *" -dumpfullversion "*)
+    if [ -n "$FAKE_DUMPFULLVERSION" ]; then
+      printf '%s\n' "$FAKE_DUMPFULLVERSION"
+      exit 0
+    fi
+    exit 1
+    ;;
+  *" -dumpversion "*)
+    if [ -n "$FAKE_DUMPVERSION" ]; then
+      printf '%s\n' "$FAKE_DUMPVERSION"
+      exit 0
+    fi
+    exit 1
+    ;;
+esac
+
+case " $* " in
+  *" -v "*)
+    if [ -n "$FAKE_NO_SEARCH_OUTPUT" ]; then
+      exit 0
+    fi
+    {
+      echo "Using built-in specs (fake driver)."
+      echo "ignoring nonexistent directory \"/nonexistent\""
+      echo "#include \"...\" search starts here:"
+      echo "#include <...> search starts here:"
+      if [ -n "$FAKE_SEARCH_DIRS" ]; then
+        OLDIFS=$IFS
+        IFS=':'
+        for d in $FAKE_SEARCH_DIRS; do
+          printf ' %s\n' "$d"
+        done
+        IFS=$OLDIFS
+      fi
+      if [ -n "$FAKE_FRAMEWORK_DIR" ]; then
+        printf ' %s (framework directory)\n' "$FAKE_FRAMEWORK_DIR"
+      fi
+      echo "End of search list."
+      # An EXISTING dir after the end marker: a parser that fails to stop at
+      # the marker would pick "/" up (it survives the exists-filter).
+      echo " /"
+    } >&2
+    exit 0
+    ;;
+esac
+
+exit 0

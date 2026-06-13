@@ -1,0 +1,8 @@
+# Build trees live under cidx-cpp/build*/ (design §3 — git-ignored).
+build*/
+
+# clangd index cache (machine-local).
+.cache/
+
+# clangd compile DB symlink -> build/compile_commands.json (machine-local; build/ is ignored).
+/compile_commands.json

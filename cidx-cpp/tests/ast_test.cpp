@@ -1,0 +1,908 @@
+// ast_test — S05: Parser + diagnostic policy (design §5.7; analysis
+// §5.2-§5.3; G5, G6, G27, G28). S06 extends this same file with the
+// walk/extraction suites.
+//
+// The final-argv assembly case is hermetic (resource include injected via
+// the S04 test seam) and runs under the "default" label. Everything else
+// performs real parses, lives in doctest suite "clang", and runtime-SKIPs
+// (exit 77) when no libclang loads — same pattern as toolchain_test. All
+// sources are synthesized in temp dirs; manifests/ is never touched.
+#define DOCTEST_CONFIG_IMPLEMENT
+#include "doctest/doctest.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <fcntl.h>
+#include <unistd.h>
+
+#include "clangx/ast.hpp"
+#include "clangx/libclang.hpp"
+#include "clangx/parse.hpp"
+#include "clangx/toolchain.hpp"
+#include "storage/records.hpp"
+#include "storage/storage.hpp"
+#include "util/errors.hpp"
+#include "util/logger.hpp"
+
+namespace fs = std::filesystem;
+using cidx::AstIndexer;
+using cidx::ClangParseError;
+using cidx::HeaderStats;
+using cidx::LibClang;
+using cidx::Logger;
+using cidx::ParsedTu;
+using cidx::Parser;
+using cidx::Storage;
+using cidx::Symbol;
+using cidx::Toolchain;
+
+namespace {
+
+bool g_clang_skipped = false;
+
+// Returns true when CIDX_MANIFESTS_DIR points at an existing directory.
+// On a host without the lab checkout (e.g. the e2e box that only rsyncs
+// cidx-cpp/) the fixture cases should SKIP rather than fail.
+bool require_manifests() {
+  if (!fs::is_directory(CIDX_MANIFESTS_DIR)) {
+    g_clang_skipped = true;
+    MESSAGE("SKIP: lab fixtures not found at " << CIDX_MANIFESTS_DIR);
+    return false;
+  }
+  return true;
+}
+
+LibClang *require_libclang() {
+  LibClang &lib = LibClang::instance();
+  try {
+    lib.load();
+  } catch (const cidx::CidxError &e) {
+    g_clang_skipped = true;
+    MESSAGE("SKIP: no loadable libclang: " << std::string(e.what()));
+    return nullptr;
+  }
+  return &lib;
+}
+
+std::string make_temp_dir() {
+  char tmpl[] = "/tmp/cidx_ast_XXXXXX";
+  char *d = ::mkdtemp(tmpl);
+  REQUIRE(d != nullptr);
+  return d;
+}
+
+void write_file(const std::string &path, const std::string &content) {
+  fs::create_directories(fs::path(path).parent_path());
+  std::ofstream out(path, std::ios::binary);
+  REQUIRE(out.good());
+  out << content;
+}
+
+std::string read_file(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  std::string s((std::istreambuf_iterator<char>(in)),
+                std::istreambuf_iterator<char>());
+  return s;
+}
+
+std::size_t count_occurrences(const std::string &haystack,
+                              const std::string &needle) {
+  std::size_t n = 0;
+  for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+       pos = haystack.find(needle, pos + needle.size())) {
+    ++n;
+  }
+  return n;
+}
+
+// setenv/unsetenv with restore-on-destruction. value == nullptr unsets.
+class ScopedEnv {
+public:
+  ScopedEnv(const char *name, const char *value) : name_(name) {
+    const char *prev = std::getenv(name);
+    if (prev != nullptr) {
+      prev_ = prev;
+    }
+    if (value != nullptr) {
+      ::setenv(name, value, 1);
+    } else {
+      ::unsetenv(name);
+    }
+  }
+  ~ScopedEnv() {
+    if (prev_) {
+      ::setenv(name_, prev_->c_str(), 1);
+    } else {
+      ::unsetenv(name_);
+    }
+  }
+  ScopedEnv(const ScopedEnv &) = delete;
+  ScopedEnv &operator=(const ScopedEnv &) = delete;
+
+private:
+  const char *name_;
+  std::optional<std::string> prev_;
+};
+
+// Redirect an fd into a temp file; stop() restores the fd and returns what
+// was captured. Used to prove the fatal flag dump never hits the terminal
+// (G28).
+class CaptureFd {
+public:
+  CaptureFd(int fd, const std::string &path) : fd_(fd), path_(path) {
+    ::fflush(nullptr);
+    saved_ = ::dup(fd_);
+    const int sink = ::open(path_.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    ::dup2(sink, fd_);
+    ::close(sink);
+  }
+  std::string stop() {
+    if (saved_ != -1) {
+      ::fflush(nullptr);
+      ::dup2(saved_, fd_);
+      ::close(saved_);
+      saved_ = -1;
+    }
+    return read_file(path_);
+  }
+  ~CaptureFd() { stop(); }
+  CaptureFd(const CaptureFd &) = delete;
+  CaptureFd &operator=(const CaptureFd &) = delete;
+
+private:
+  int fd_;
+  std::string path_;
+  int saved_ = -1;
+};
+
+// One temp dir + private Logger (file sink on a tmp cidx.log) + per-run
+// Toolchain + Parser. CIDX_STRICT is neutralized; the strict test overrides
+// it with its own ScopedEnv.
+struct ParseFixture {
+  ScopedEnv strict{"CIDX_STRICT", nullptr};
+  std::string tmp = make_temp_dir();
+  std::string log_path = tmp + "/cidx.log";
+  Logger log;
+  Toolchain tc{log};
+  Parser parser{tc, log};
+
+  ParseFixture() { log.set_file(log_path); }
+  std::string logged() const { return read_file(log_path); }
+};
+
+// N distinct semantic errors, one per line: line i+1 holds
+// "use of undeclared identifier 'no_such_<i>'". No fatals.
+std::string write_error_source(const std::string &dir, int n) {
+  std::string src;
+  for (int i = 0; i < n; ++i) {
+    src += "int f" + std::to_string(i) + "(void) { return no_such_" +
+           std::to_string(i) + "; }\n";
+  }
+  const std::string path = dir + "/errors_" + std::to_string(n) + ".c";
+  write_file(path, src);
+  return path;
+}
+
+std::string diag_line(const std::string &tu_path, const std::string &file,
+                      unsigned line, const std::string &msg) {
+  return tu_path + ": diag " + file + ":" + std::to_string(line) + ": " + msg;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// hermetic: final argv assembly (G5) — no libclang needed
+
+TEST_CASE("final argv = stored args + toolchain_flags(cpp, driver) + "
+          "-ferror-limit=0, in that order") {
+  ScopedEnv strict("CIDX_STRICT", nullptr);
+  const std::string tmp = make_temp_dir();
+  const std::string res = tmp + "/res";
+  fs::create_directories(res);
+
+  Logger log;
+  Toolchain tc(log);
+  tc.set_resource_include_for_test(res);
+  Parser parser(tc, log);
+
+  const std::vector<std::string> stored = {"-DFOO=1", "-I/tmp/x"};
+  const std::vector<std::string> argv =
+      parser.final_args("/tmp/foo.c", stored, std::nullopt);
+
+  REQUIRE(argv.size() >= 3);
+  CHECK(argv[0] == "-DFOO=1");
+  CHECK(argv[1] == "-I/tmp/x");
+  CHECK(argv.back() == "-ferror-limit=0"); // G5: always appended last
+  // -ferror-limit=0 appears exactly once
+  CHECK(std::count(argv.begin(), argv.end(), std::string("-ferror-limit=0")) ==
+        1);
+  // the middle block is toolchain_flags(cpp=false for .c, no driver) verbatim
+  const std::vector<std::string> toolchain =
+      tc.toolchain_flags(false, std::nullopt);
+  const std::vector<std::string> middle(argv.begin() + 2, argv.end() - 1);
+  CHECK(middle == toolchain);
+  CHECK(std::find(middle.begin(), middle.end(), res) != middle.end());
+}
+
+// ---------------------------------------------------------------------------
+// real parses
+
+TEST_SUITE("clang") {
+
+  TEST_CASE("clean parse: TU produced, spelling = path as passed, no log "
+            "records at all") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ParseFixture f;
+    const std::string path = f.tmp + "/ok.c";
+    write_file(path, "int the_answer(void) { return 42; }\n");
+
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    CHECK(tu.tu != nullptr);
+    CHECK(tu.index != nullptr);
+    CHECK(tu.spelling == path); // G24 prerequisite
+    CHECK(f.log.warning_count() == 0);
+    // delay=True parity (G27): a clean parse writes nothing, so the lazily
+    // created log file must not even exist.
+    CHECK_FALSE(fs::exists(f.log_path));
+  }
+
+  TEST_CASE("nonexistent source -> ClangParseError(\"cannot parse <file>\")") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ParseFixture f;
+    const std::string path = f.tmp + "/does-not-exist.c";
+    CHECK_THROWS_WITH_AS(f.parser.parse(path, {}, std::nullopt),
+                         ("cannot parse " + path).c_str(), ClangParseError);
+  }
+
+  TEST_CASE("semantic errors, default mode: parse succeeds, ONE warning, "
+            "exact summary + INFO diag lines in the log") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ParseFixture f;
+    const std::string path = write_error_source(f.tmp, 3);
+
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    CHECK(tu.tu != nullptr);
+    // G27: the summary alone carries WARNING — counter +1 for the file
+    CHECK(f.log.warning_count() == 1);
+
+    const std::string logged = f.logged();
+    CHECK(logged.find("WARNING cidx.clang: " + path +
+                      ": 3 error diagnostic(s) ignored (CIDX_STRICT=1 to "
+                      "abort)") != std::string::npos);
+    // per-diag INFO lines, exact format "<TU>: diag <file>:<line>: <msg>"
+    for (unsigned i = 0; i < 3; ++i) {
+      CHECK(logged.find("INFO cidx.clang: " +
+                        diag_line(path, path, i + 1,
+                                  "use of undeclared identifier 'no_such_" +
+                                      std::to_string(i) + "'")) !=
+            std::string::npos);
+    }
+    CHECK(count_occurrences(logged, path + ": diag ") == 3);
+    CHECK(logged.find("suppressed") == std::string::npos);
+    // tolerated parse: no flag dump
+    CHECK(logged.find("failed parse flags") == std::string::npos);
+  }
+
+  TEST_CASE("CIDX_STRICT=1: same errors abort; message = first 3 "
+            "';'-joined") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ParseFixture f;
+    ScopedEnv strict("CIDX_STRICT", "1");
+    const std::string path = write_error_source(f.tmp, 5);
+
+    const std::string expected =
+        path + ": 5 fatal diagnostic(s): " + path +
+        ":1: use of undeclared identifier 'no_such_0'; " + path +
+        ":2: use of undeclared identifier 'no_such_1'; " + path +
+        ":3: use of undeclared identifier 'no_such_2'";
+    CHECK_THROWS_WITH_AS(f.parser.parse(path, {}, std::nullopt),
+                         expected.c_str(), ClangParseError);
+    // the abort path logs the flag dump at ERROR -> counter +1, still one
+    // record per file
+    CHECK(f.log.warning_count() == 1);
+    const std::string logged = f.logged();
+    CHECK(logged.find("ERROR cidx.clang: " + path + ": failed parse flags: ") !=
+          std::string::npos);
+    CHECK(count_occurrences(logged, path + ": diag ") == 5);
+  }
+
+  TEST_CASE("fatal diagnostic: throw; flag dump + libclang major in the LOG "
+            "only, nothing on stdout/stderr (G28)") {
+    LibClang *lib = require_libclang();
+    if (lib == nullptr) {
+      return;
+    }
+    ParseFixture f;
+    const std::string path = f.tmp + "/bad.c";
+    write_file(path, "#include \"no-such-header.h\"\nint x;\n");
+
+    bool threw = false;
+    std::string message;
+    std::string out;
+    std::string err;
+    {
+      CaptureFd cap_out(1, f.tmp + "/captured.out");
+      CaptureFd cap_err(2, f.tmp + "/captured.err");
+      try {
+        f.parser.parse(path, {}, std::nullopt);
+      } catch (const ClangParseError &e) {
+        threw = true;
+        message = e.what();
+      }
+      out = cap_out.stop();
+      err = cap_err.stop();
+    }
+    REQUIRE(threw);
+    CHECK(message == path + ": 1 fatal diagnostic(s): " + path +
+                         ":1: 'no-such-header.h' file not found");
+    // terminal stayed clean — the dump went to cidx.log
+    CHECK(out.empty());
+    CHECK(err.empty());
+
+    const std::string logged = f.logged();
+    CHECK(logged.find("ERROR cidx.clang: " + path + ": failed parse flags: ") !=
+          std::string::npos);
+    CHECK(logged.find("-ferror-limit=0; libclang: " +
+                      std::to_string(lib->major())) != std::string::npos);
+    CHECK(logged.find(
+              "INFO cidx.clang: " +
+              diag_line(path, path, 1, "'no-such-header.h' file not found")) !=
+          std::string::npos);
+    CHECK(f.log.warning_count() == 1);
+  }
+
+  TEST_CASE("30 errors: -ferror-limit=0 lifts the 20-cap (G5); exactly 25 "
+            "INFO lines + the suppressed line") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ParseFixture f;
+    const std::string path = write_error_source(f.tmp, 30);
+
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    CHECK(tu.tu != nullptr);
+    CHECK(f.log.warning_count() == 1);
+
+    const std::string logged = f.logged();
+    // all 30 errors were reported (the default 20-error cap would instead
+    // have emitted a FATAL 'too many errors emitted' and aborted the parse)
+    CHECK(logged.find(path + ": 30 error diagnostic(s) ignored "
+                             "(CIDX_STRICT=1 to abort)") != std::string::npos);
+    CHECK(count_occurrences(logged, path + ": diag ") == 25);
+    CHECK(logged.find("INFO cidx.clang: " + path +
+                      ": ... 5 more diagnostic(s) suppressed") !=
+          std::string::npos);
+    // first 25 shown, the rest cut: error #24 logged, #25 not
+    CHECK(logged.find("'no_such_24'") != std::string::npos);
+    CHECK(logged.find("'no_such_25'") == std::string::npos);
+  }
+
+} // TEST_SUITE("clang")
+
+// ---------------------------------------------------------------------------
+// S06: AST indexer — walk / extraction / header suites (design §5.8,
+// analysis §5.6; G15, G20-G26). All cases perform real parses. The lab
+// manifests are READ-ONLY: they are registered as an `external` component
+// inside a throwaway :memory: DB and never written to (story test plan).
+
+namespace {
+
+const std::string kManifestsDir = CIDX_MANIFESTS_DIR;
+
+// ParseFixture plus an in-memory Storage and the indexer under test. The
+// system-header env knob is neutralized; cases that exercise it override
+// with their own ScopedEnv.
+struct IndexFixture : ParseFixture {
+  ScopedEnv ignore_sys{cidx::kIgnoreSystemHeadersEnv, nullptr};
+  Storage db; // :memory:
+  AstIndexer indexer{db, log};
+
+  // Register `root` as an external component (idempotent) and add the file.
+  int64_t add_owned_file(const std::string &root, const std::string &path) {
+    if (!db.get_component(root)) {
+      db.add_component("fixture", root, "external");
+    }
+    return db.add_file_path(path);
+  }
+};
+
+// The single stored symbol with this spelling (and kind, when given);
+// nullopt when absent or ambiguous.
+std::optional<Symbol>
+one_sym(Storage &db, const std::string &spelling,
+        const std::optional<std::string> &kind = std::nullopt) {
+  const std::vector<Symbol> rows = db.lookup_symbols_by_name(spelling, kind);
+  if (rows.size() != 1) {
+    return std::nullopt;
+  }
+  return rows.front();
+}
+
+} // namespace
+
+TEST_SUITE("clang") {
+
+  TEST_CASE("kind map: all 16 reachable kinds map to the exact stored kind "
+            "strings; unmapped kinds are ignored") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/kinds.cpp";
+    write_file(path, "namespace the_ns {\n"
+                     "struct the_struct { int the_member; };\n"
+                     "union the_union { int ua; float ub; };\n"
+                     "enum the_enum { THE_CONSTANT };\n"
+                     "typedef int the_typedef;\n"
+                     "using the_alias = float;\n"
+                     "int the_function(int the_param);\n"
+                     "int the_variable;\n"
+                     "class the_class {\n"
+                     "public:\n"
+                     "  the_class();\n"
+                     "  ~the_class();\n"
+                     "  void the_method();\n"
+                     "};\n"
+                     "template <typename T> class the_class_template {};\n"
+                     "template <typename T> T the_function_template(const T "
+                     "&value);\n"
+                     "} // namespace the_ns\n");
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    // 16 named kinds + the two extra union members ua/ub
+    CHECK(f.indexer.index_symbols(tu, tu.spelling, file_id) == 18);
+
+    const std::pair<const char *, const char *> expected[] = {
+        {"the_ns", "namespace"},
+        {"the_struct", "struct"},
+        {"the_member", "member"},
+        {"the_union", "union"},
+        {"the_enum", "enum"},
+        {"THE_CONSTANT", "enum-constant"},
+        {"the_typedef", "typedef"},
+        {"the_alias", "type-alias"},
+        {"the_function", "function"},
+        {"the_variable", "variable"},
+        {"the_class", "class"},
+        {"the_class", "constructor"},
+        {"~the_class", "destructor"},
+        {"the_method", "method"},
+        {"the_class_template", "class-template"},
+        {"the_function_template", "function-template"},
+    };
+    for (const auto &exp : expected) {
+      CAPTURE(exp.first);
+      CAPTURE(exp.second);
+      CHECK(f.db.lookup_symbols_by_name(exp.first, std::string(exp.second))
+                .size() == 1);
+    }
+    // unmapped kinds (ParmDecl here) never become rows
+    CHECK(f.db.lookup_symbols_by_name("the_param").empty());
+    CHECK(f.db.lookup_symbols_by_name("value").empty());
+    // qual_name is built from semantic parents
+    const auto method = one_sym(f.db, "the_method");
+    REQUIRE(method);
+    CHECK(method->qual_name == "the_ns::the_class::the_method");
+  }
+
+  TEST_CASE("project flow: header decls first, definition wins file/line/col "
+            "with decl_* preserved; counters across two TUs (G15, G20, G24)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    if (!require_manifests()) {
+      return;
+    }
+    IndexFixture f;
+    const std::string proj = kManifestsDir + "/project";
+    const std::string app_c = proj + "/app.c";
+    const std::string mathlib_c = proj + "/mathlib.c";
+    const std::string mathlib_h = proj + "/mathlib.h";
+
+    // TU 1: app.c — mathlib.h enters as bare declarations.
+    const int64_t app_id = f.add_owned_file(proj, app_c);
+    HeaderStats h1;
+    {
+      const ParsedTu tu = f.parser.parse(app_c, {}, std::nullopt);
+      CHECK(f.indexer.index_symbols(tu, tu.spelling, app_id) == 1); // main
+      h1 = f.indexer.index_headers(tu);
+    } // TU freed here — one AST alive at a time (analysis §2.2)
+    CHECK(h1.indexed == 1); // mathlib.h
+    CHECK(h1.symbols == 3); // add, multiply, square prototypes
+    CHECK(h1.already == 0);
+    CHECK(h1.system > 0); // stdio.h + its transitive system includes
+    CHECK(h1.unowned == 0);
+
+    const auto h_row = f.db.get_file(mathlib_h);
+    REQUIRE(h_row);
+    CHECK(h_row->indexed);
+    CHECK(h_row->md5);                   // staleness key captured
+    CHECK_FALSE(h_row->compile_options); // NULL options/driver (G20)
+    CHECK_FALSE(h_row->driver);
+
+    const auto decl = one_sym(f.db, "multiply");
+    REQUIRE(decl);
+    CHECK(decl->kind == "function");
+    CHECK_FALSE(decl->is_definition);
+    CHECK_FALSE(decl->resolved);
+    CHECK(decl->file_id == h_row->id);
+    CHECK(decl->line == 6);
+    // a declaration cursor records its own site as the decl site too
+    CHECK(decl->decl_file_id == h_row->id);
+    CHECK(decl->decl_line == 6);
+
+    // TU 2: mathlib.c — definitions win, decl_* preserved, resolved sticky.
+    const int64_t mathlib_id = f.db.add_file_path(mathlib_c);
+    HeaderStats h2;
+    {
+      const ParsedTu tu = f.parser.parse(mathlib_c, {}, std::nullopt);
+      CHECK(f.indexer.index_symbols(tu, tu.spelling, mathlib_id) == 3);
+      h2 = f.indexer.index_headers(tu);
+    }
+    CHECK(h2.indexed == 0);
+    CHECK(h2.symbols == 0);
+    CHECK(h2.already == 1); // mathlib.h row indexed with matching md5
+    CHECK(h2.system == 0);  // mathlib.c includes nothing else
+    CHECK(h2.unowned == 0);
+
+    const auto def = one_sym(f.db, "multiply");
+    REQUIRE(def);
+    CHECK(def->is_definition);
+    CHECK(def->resolved);
+    CHECK(def->file_id == mathlib_id);
+    CHECK(def->line == 7);
+    CHECK(def->decl_file_id == h_row->id); // decl site preserved
+    CHECK(def->decl_line == 6);
+  }
+
+  TEST_CASE("shapes.c then shapes.h: resolved rows skipped but decl-patched "
+            "(G15); subtree/body pruning (G21); `macro` unreachable (G22); "
+            "linkage spellings (D13)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    if (!require_manifests()) {
+      return;
+    }
+    IndexFixture f;
+    const std::string shapes_c = kManifestsDir + "/shapes.c";
+    const std::string shapes_h = kManifestsDir + "/shapes.h";
+
+    const int64_t c_id = f.add_owned_file(kManifestsDir, shapes_c);
+    const ParsedTu tu = f.parser.parse(shapes_c, {}, std::nullopt);
+
+    // main file first: exactly the five function definitions
+    CHECK(f.indexer.index_symbols(tu, tu.spelling, c_id) == 5);
+    // header cursors are not stored by the main-file pass (G24)
+    CHECK(f.db.lookup_symbols_by_name("Point").empty());
+    // body pruning: locals and params never become rows (G21)
+    for (const char *local : {"total", "i", "radius", "sum", "args", "s"}) {
+      CAPTURE(local);
+      CHECK(f.db.lookup_symbols_by_name(local).empty());
+    }
+    // options=0 -> no DETAILED_PREPROCESSING_RECORD -> no macro cursors
+    // (G22/D19): the kind stays mapped but no row can ever carry it
+    CHECK(f.db.lookup_symbols_by_name("PI").empty());
+    CHECK(f.db.lookup_symbols_by_name("SQUARE").empty());
+    CHECK(f.db.lookup_symbols_by_name("MAX_SHAPES").empty());
+    CHECK(f.db.stats().symbols_by_kind.count("macro") == 0);
+
+    const auto def = one_sym(f.db, "shape_area");
+    REQUIRE(def);
+    CHECK(def->is_definition);
+    CHECK(def->resolved);
+    CHECK(def->file_id == c_id);
+    CHECK(def->line == 12);
+    CHECK_FALSE(def->decl_file_id); // definitions leave decl_* null
+    CHECK(def->linkage == "external");
+    const auto helper = one_sym(f.db, "circle_area");
+    REQUIRE(helper);
+    CHECK(helper->linkage == "internal"); // static fn
+
+    // headers: shapes.h indexed; its three prototypes hit resolved rows ->
+    // skipped (not re-stored) but their decl sites are patched in (G15)
+    const HeaderStats h = f.indexer.index_headers(tu);
+    CHECK(h.indexed == 1);
+    CHECK(h.symbols == 15); // structs/fields/enums/constants/typedefs only
+    CHECK(h.already == 0);
+    CHECK(h.system >= 3); // stddef.h, math.h, stdarg.h (+ their includes)
+    CHECK(h.unowned == 0);
+
+    const auto h_row = f.db.get_file(shapes_h);
+    REQUIRE(h_row);
+    const auto patched = one_sym(f.db, "shape_area");
+    REQUIRE(patched);
+    CHECK(patched->is_definition); // stored definition untouched
+    CHECK(patched->resolved);
+    CHECK(patched->file_id == c_id);
+    CHECK(patched->line == 12);
+    CHECK(patched->decl_file_id == h_row->id); // decl site patched
+    CHECK(patched->decl_line == 31);
+
+    // no-linkage spelling via the header typedef (D13)
+    const auto td = one_sym(f.db, "Point", std::string("typedef"));
+    REQUIRE(td);
+    CHECK(td->linkage == "no-linkage");
+    // system-header symbols never appear under the default policy (G26)
+    CHECK(f.db.lookup_symbols_by_name("size_t").empty());
+  }
+
+  TEST_CASE("geometry: ns::Class::method qual names from semantic parents; "
+            "access + pure-virtual via the D13 tables") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    if (!require_manifests()) {
+      return;
+    }
+    IndexFixture f;
+    const std::string geometry_cpp = kManifestsDir + "/geometry.cpp";
+    const std::string geometry_hpp = kManifestsDir + "/geometry.hpp";
+
+    const int64_t cpp_id = f.add_owned_file(kManifestsDir, geometry_cpp);
+    const ParsedTu tu = f.parser.parse(geometry_cpp, {}, std::nullopt);
+    // geo, Shape::Shape, ~Shape, Shape::name, Circle::Circle, Circle::area,
+    // widest
+    CHECK(f.indexer.index_symbols(tu, tu.spelling, cpp_id) == 7);
+
+    // out-of-line definitions are qualified by their CLASS (semantic
+    // parents), not the file scope they sit in (G25)
+    const auto area_def = one_sym(f.db, "area");
+    REQUIRE(area_def);
+    CHECK(area_def->kind == "method");
+    CHECK(area_def->qual_name == "geo::Circle::area");
+    CHECK(area_def->is_definition);
+    const auto widest = one_sym(f.db, "widest");
+    REQUIRE(widest);
+    CHECK(widest->qual_name == "geo::widest");
+
+    const HeaderStats h = f.indexer.index_headers(tu);
+    CHECK(h.indexed == 1); // geometry.hpp; <string>/<vector>/<cmath> system
+    CHECK(h.symbols == 14);
+    CHECK(h.system > 0);
+    CHECK(h.unowned == 0);
+
+    const auto h_row = f.db.get_file(geometry_hpp);
+    REQUIRE(h_row);
+
+    const std::vector<Symbol> areas =
+        f.db.lookup_symbols_by_name("area", std::string("method"));
+    REQUIRE(areas.size() == 2);
+    const auto by_qual = [&areas](const char *qual) {
+      return std::find_if(areas.begin(), areas.end(), [qual](const Symbol &s) {
+        return s.qual_name == std::string(qual);
+      });
+    };
+    // pure virtual declaration: Shape::area
+    const auto pure = by_qual("geo::Shape::area");
+    REQUIRE(pure != areas.end());
+    CHECK(pure->is_pure);
+    CHECK(pure->access == "public");
+    CHECK_FALSE(pure->is_definition);
+    CHECK_FALSE(pure->resolved);
+    // Circle::area kept its .cpp definition and gained the header decl site
+    const auto circle_area = by_qual("geo::Circle::area");
+    REQUIRE(circle_area != areas.end());
+    CHECK(circle_area->is_definition);
+    CHECK(circle_area->file_id == cpp_id);
+    CHECK(circle_area->decl_file_id == h_row->id);
+    CHECK_FALSE(circle_area->is_pure);
+
+    // member access spellings (D13)
+    const auto name_field = one_sym(f.db, "name_");
+    REQUIRE(name_field);
+    CHECK(name_field->kind == "member");
+    CHECK(name_field->access == "protected");
+    CHECK(name_field->qual_name == "geo::Shape::name_");
+    const auto radius_field = one_sym(f.db, "radius_");
+    REQUIRE(radius_field);
+    CHECK(radius_field->access == "private");
+
+    // templates + scoped enum from the header
+    const auto ct = one_sym(f.db, "Box", std::string("class-template"));
+    REQUIRE(ct);
+    CHECK(ct->qual_name == "geo::Box");
+    const auto ft = one_sym(f.db, "max_of");
+    REQUIRE(ft);
+    CHECK(ft->kind == "function-template");
+    CHECK(ft->qual_name == "geo::max_of");
+    const auto red = one_sym(f.db, "Red");
+    REQUIRE(red);
+    CHECK(red->kind == "enum-constant");
+    CHECK(red->qual_name == "geo::Color::Red");
+  }
+
+  TEST_CASE("anonymous entities: indexed when they carry a USR; qual_name "
+            "skips empty-spelling levels (G25)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    // C++: an anonymous NAMESPACE has an empty spelling but a USR ('...@aN')
+    const std::string path = f.tmp + "/anonns.cpp";
+    write_file(path, "namespace outer_ns {\n"
+                     "namespace {\n"
+                     "int hidden_var;\n"
+                     "}\n"
+                     "}\n");
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    CHECK(f.indexer.index_symbols(tu, tu.spelling, file_id) == 3);
+
+    // the anonymous namespace IS a row: empty spelling, non-empty USR (G25)
+    const std::vector<Symbol> anon_ns =
+        f.db.lookup_symbols_by_name("", std::string("namespace"));
+    REQUIRE(anon_ns.size() == 1);
+    CHECK_FALSE(anon_ns.front().usr.empty());
+    // its own empty level is skipped -> qualified by the named parent only
+    CHECK(anon_ns.front().qual_name == "outer_ns");
+
+    // entities INSIDE it skip the empty level in their qual_name, and the
+    // anonymous-namespace variable shows the 'internal' linkage spelling
+    const auto hidden = one_sym(f.db, "hidden_var");
+    REQUIRE(hidden);
+    CHECK(hidden->qual_name == "outer_ns::hidden_var");
+    CHECK(hidden->linkage == "internal");
+    CHECK(hidden->parent_usr == anon_ns.front().usr);
+
+    // C: anonymous structs/enums carry a '(unnamed at <file>:<l>:<c>)'
+    // SPELLING under modern libclang (probed against the Python reference
+    // on the wheel's libclang 18) — those levels are NOT empty, so they
+    // stay in qual_name. Parity target is ast.py on the same libclang, not
+    // the empty-spelling folklore.
+    const std::string c_path = f.tmp + "/anon.c";
+    write_file(c_path, "struct outer_s {\n"
+                       "  struct { int inner_field; } nested;\n"
+                       "};\n"
+                       "enum { ANON_CONST = 7 };\n");
+    const int64_t c_id = f.add_owned_file(f.tmp, c_path);
+    const ParsedTu ctu = f.parser.parse(c_path, {}, std::nullopt);
+    CHECK(f.indexer.index_symbols(ctu, ctu.spelling, c_id) > 0);
+    const auto inner = one_sym(f.db, "inner_field");
+    REQUIRE(inner);
+    REQUIRE(inner->qual_name);
+    CHECK(inner->qual_name->rfind("outer_s::", 0) == 0);
+    CHECK(inner->qual_name->find("::inner_field") != std::string::npos);
+    const auto constant = one_sym(f.db, "ANON_CONST");
+    REQUIRE(constant);
+    CHECK(constant->parent_usr); // the anonymous enum still has a USR
+  }
+
+  TEST_CASE("system headers: skipped by default, indexed when "
+            "$INDEXER_IGNORE_SYSTEM_HEADERS spells false (G26); header row "
+            "carries NULL options/driver (G20); md5 'already' skip") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string sys_dir = f.tmp + "/sys";
+    const std::string sys_hdr = sys_dir + "/syshdr.h";
+    write_file(sys_hdr, "int sys_fn(void);\n");
+    const std::string main_c = f.tmp + "/main.c";
+    write_file(main_c, "#include <syshdr.h>\nint main_fn(void) { return 0; "
+                       "}\n");
+    const std::vector<std::string> args = {"-isystem", sys_dir};
+
+    const int64_t main_id = f.add_owned_file(f.tmp, main_c);
+    const ParsedTu tu = f.parser.parse(main_c, args, std::nullopt);
+    CHECK(f.indexer.index_symbols(tu, tu.spelling, main_id) == 1);
+
+    // default: the -isystem header of THIS parse is skipped as system (the
+    // check is per-TU, G26)
+    {
+      const HeaderStats h = f.indexer.index_headers(tu);
+      CHECK(h.indexed == 0);
+      CHECK(h.symbols == 0);
+      CHECK(h.already == 0);
+      CHECK(h.system == 1);
+      CHECK(h.unowned == 0);
+      CHECK(f.db.lookup_symbols_by_name("sys_fn").empty());
+    }
+    // the exact falsy set flips the policy: the header is owned -> indexed
+    {
+      ScopedEnv env(cidx::kIgnoreSystemHeadersEnv, "0");
+      const HeaderStats h = f.indexer.index_headers(tu);
+      CHECK(h.indexed == 1);
+      CHECK(h.symbols == 1);
+      CHECK(h.already == 0);
+      CHECK(h.system == 0);
+      CHECK(h.unowned == 0);
+
+      const auto row = f.db.get_file(sys_hdr);
+      REQUIRE(row);
+      CHECK(row->indexed);
+      CHECK(row->md5);
+      CHECK_FALSE(row->compile_options); // G20: NULL options/driver
+      CHECK_FALSE(row->driver);
+      const auto sym = one_sym(f.db, "sys_fn");
+      REQUIRE(sym);
+      CHECK(sym->file_id == row->id);
+      CHECK_FALSE(sym->resolved); // bare declaration
+
+      // second pass: row indexed with matching md5 -> already
+      const HeaderStats h2 = f.indexer.index_headers(tu);
+      CHECK(h2.already == 1);
+      CHECK(h2.indexed == 0);
+      CHECK(h2.system == 0);
+      // the explicit parameter overrides the env (ast.py:201-202): the
+      // system check runs before the already check
+      const HeaderStats h3 = f.indexer.index_headers(tu, true);
+      CHECK(h3.system == 1);
+      CHECK(h3.already == 0);
+    }
+  }
+
+  TEST_CASE("include spelling vs abspath: cursors matched against the "
+            "SPELLING, rows stored under the abspath (G23); unowned headers "
+            "counted") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    write_file(f.tmp + "/out/hdr.h", "int owned_fn(void);\n");
+    const std::string main_c = f.tmp + "/comp/main.c";
+    write_file(main_c, "#include \"../out/hdr.h\"\nint comp_fn(void) { "
+                       "return 0; }\n");
+
+    // owned: component over the tmp root; the include SPELLING goes through
+    // 'comp/../out' while dedupe/storage use the normalized abspath
+    const int64_t main_id = f.add_owned_file(f.tmp, main_c);
+    {
+      const ParsedTu tu = f.parser.parse(main_c, {}, std::nullopt);
+      CHECK(f.indexer.index_symbols(tu, tu.spelling, main_id) == 1);
+      const HeaderStats h = f.indexer.index_headers(tu);
+      CHECK(h.indexed == 1);
+      CHECK(h.symbols == 1); // owned_fn extracted via the spelling match
+      CHECK(h.unowned == 0);
+      const auto row = f.db.get_file(f.tmp + "/out/hdr.h"); // normalized
+      REQUIRE(row);
+      const auto sym = one_sym(f.db, "owned_fn");
+      REQUIRE(sym);
+      CHECK(sym->file_id == row->id);
+    }
+
+    // unowned: a DB owning only comp/ has nowhere to store the header
+    Storage db2;
+    AstIndexer indexer2{db2, f.log};
+    db2.add_component("comp-only", f.tmp + "/comp", "external");
+    const int64_t main_id2 = db2.add_file_path(main_c);
+    const ParsedTu tu2 = f.parser.parse(main_c, {}, std::nullopt);
+    CHECK(indexer2.index_symbols(tu2, tu2.spelling, main_id2) == 1);
+    const HeaderStats h2 = indexer2.index_headers(tu2);
+    CHECK(h2.indexed == 0);
+    CHECK(h2.symbols == 0);
+    CHECK(h2.already == 0);
+    CHECK(h2.system == 0);
+    CHECK(h2.unowned == 1);
+    CHECK(db2.lookup_symbols_by_name("owned_fn").empty());
+  }
+
+} // TEST_SUITE("clang") — S06
+
+int main(int argc, char **argv) {
+  doctest::Context ctx(argc, argv);
+  const int res = ctx.run();
+  if (ctx.shouldExit()) {
+    return res;
+  }
+  if (res == 0 && g_clang_skipped) {
+    return 77; // CTest SKIP_RETURN_CODE — "no libclang loadable" is a skip
+  }
+  return res;
+}

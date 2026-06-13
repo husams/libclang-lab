@@ -1,0 +1,23 @@
+third_party/md5 — MD5 Message-Digest Algorithm (RFC 1321) implementation
+=========================================================================
+
+Files:   md5.h, md5.c
+Author:  Alexander Peslyak (Solar Designer) <solar at openwall.com>, 2001
+Origin:  https://openwall.info/wiki/people/solar/software/public-domain-source-code/md5
+Fetched: 2026-06-12 (verbatim, unmodified)
+
+License: public domain. From the source header:
+
+  "This software was written by Alexander Peslyak in 2001.  No copyright is
+   claimed, and the software is hereby placed in the public domain.
+   In case this attempt to disclaim copyright and place the software in the
+   public domain is deemed null and void, then the software is
+   Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+   general public under the following terms:
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted.
+   There's ABSOLUTELY NO WARRANTY, express or implied."
+
+Why vendored (design D4): cidx needs hashlib-compatible lowercase 32-hex MD5
+digests with zero external dependencies; the digest format is load-bearing for
+every existing index.db's staleness data.
