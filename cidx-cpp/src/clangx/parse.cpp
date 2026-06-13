@@ -15,6 +15,10 @@ namespace {
 
 constexpr const char *kLogName = "cidx.clang";
 constexpr const char *kStrictEnv = "CIDX_STRICT"; // util.py:361
+// CIDX_MEM=1 logs one per-TU memory line (clang_getCXTUResourceUsage) after a
+// successful parse. Pure observability: the libclang C API exposes no
+// allocator hook, only this usage breakdown + the dispose lifecycle.
+constexpr const char *kMemEnv = "CIDX_MEM";
 // util.py:363-365 -- per-file cap on individual diagnostic lines written to
 // the log, so one rotten TU can't flood cidx.log.
 constexpr std::size_t kDiagLogCap = 25;
@@ -50,6 +54,42 @@ int abort_level() {
     return CXDiagnostic_Fatal;
   }
   return CXDiagnostic_Error;
+}
+
+// CIDX_MEM truthy (same falsy spellings as CIDX_STRICT) -> emit the per-TU
+// memory report. Default OFF, so a clean parse still writes nothing (G27).
+bool mem_reporting_enabled() {
+  const std::string v = strip_lower(get_env(kMemEnv).value_or(""));
+  return !(v.empty() || v == "0" || v == "off" || v == "none" ||
+           v == "false");
+}
+
+// One INFO line per TU: total bytes (+ KiB) followed by every non-zero
+// category from clang_getCXTUResourceUsage. All kinds 1..14 are
+// MEMORY_IN_BYTES, so `amount` is bytes. The CX-owned buffer is disposed
+// before returning -- nothing libclang-owned is retained.
+void report_resource_usage(Logger &log, LibClang &lib, CXTranslationUnit tu,
+                           const std::string &path) {
+  CXTUResourceUsage usage = lib.clang_getCXTUResourceUsage(tu);
+  unsigned long total = 0;
+  std::string breakdown;
+  for (unsigned i = 0; i < usage.numEntries; ++i) {
+    const CXTUResourceUsageEntry &e = usage.entries[i];
+    total += e.amount;
+    if (e.amount == 0) {
+      continue;
+    }
+    const char *name = lib.clang_getTUResourceUsageName(e.kind);
+    if (!breakdown.empty()) {
+      breakdown += ", ";
+    }
+    breakdown += std::string(name != nullptr ? name : "?") + "=" +
+                 std::to_string(e.amount);
+  }
+  lib.clang_disposeCXTUResourceUsage(usage);
+  log.info(kLogName, path + ": TU memory total=" + std::to_string(total) +
+                         " bytes (" + std::to_string(total / 1024) +
+                         " KiB); " + breakdown);
 }
 
 // util.py:380-385 with level=Error -- every diagnostic at severity >= ERROR,
@@ -179,6 +219,9 @@ ParsedTu Parser::parse(const std::string &abs_path,
   }
 
   apply_diagnostic_policy(result.tu, abs_path, flags); // may throw; RAII frees
+  if (mem_reporting_enabled()) {
+    report_resource_usage(log_, lib, result.tu, abs_path);
+  }
   return result;
 }
 

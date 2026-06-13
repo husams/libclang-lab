@@ -95,6 +95,19 @@ public:
     ::clang_disposeTranslationUnit(tu);
   }
 
+  // TU memory accounting (observability — there is no allocator hook in the
+  // libclang C API). Used by the parser's CIDX_MEM report. The returned
+  // CXTUResourceUsage owns a buffer freed by clang_disposeCXTUResourceUsage.
+  CXTUResourceUsage clang_getCXTUResourceUsage(CXTranslationUnit tu) const {
+    return ::clang_getCXTUResourceUsage(tu);
+  }
+  void clang_disposeCXTUResourceUsage(CXTUResourceUsage usage) const {
+    ::clang_disposeCXTUResourceUsage(usage);
+  }
+  const char *clang_getTUResourceUsageName(CXTUResourceUsageKind kind) const {
+    return ::clang_getTUResourceUsageName(kind);
+  }
+
   // Diagnostics
   unsigned clang_getNumDiagnostics(CXTranslationUnit tu) const {
     return ::clang_getNumDiagnostics(tu);

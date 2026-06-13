@@ -256,6 +256,42 @@ TEST_SUITE("clang") {
     CHECK_FALSE(fs::exists(f.log_path));
   }
 
+  TEST_CASE("CIDX_MEM=1: a successful parse logs one per-TU memory line") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ScopedEnv mem("CIDX_MEM", "1");
+    ParseFixture f;
+    const std::string path = f.tmp + "/mem.c";
+    write_file(path, "int the_answer(void) { return 42; }\n");
+
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    CHECK(tu.tu != nullptr);
+
+    const std::string log = f.logged();
+    CHECK(log.find(path + ": TU memory total=") != std::string::npos);
+    CHECK(log.find(" bytes (") != std::string::npos);
+    // A non-empty category breakdown follows the "KiB); " marker (a real
+    // parse always uses memory in at least one category, e.g. the AST).
+    const std::size_t pos = log.find("KiB); ");
+    REQUIRE(pos != std::string::npos);
+    CHECK(log.size() > pos + 6);
+    CHECK(log[pos + 6] != '\n'); // breakdown is present, not blank
+  }
+
+  TEST_CASE("CIDX_MEM unset: a clean parse still writes nothing (default off)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    ScopedEnv mem("CIDX_MEM", nullptr);
+    ParseFixture f;
+    const std::string path = f.tmp + "/nomem.c";
+    write_file(path, "int x(void) { return 0; }\n");
+
+    f.parser.parse(path, {}, std::nullopt);
+    CHECK_FALSE(fs::exists(f.log_path)); // G27: lazy log, nothing written
+  }
+
   TEST_CASE("nonexistent source -> ClangParseError(\"cannot parse <file>\")") {
     if (require_libclang() == nullptr) {
       return;
