@@ -12,10 +12,13 @@ endif()
 
 # CIDX_STATIC: prefer static archives for the third-party dependencies so the
 # binary carries fewer runtime requirements. Platform reality differs:
-#   * Linux: link libclang/LLVM + SQLite3 static archives (when present) and
-#     -static-libstdc++ -static-libgcc -> a self-contained binary that does not
-#     need /opt/llvm or libstdc++ at runtime. glibc stays dynamic (a fully
-#     static glibc binary is discouraged and breaks NSS/dlopen).
+#   * Linux: SQLite3 from its static archive + -static-libstdc++ -static-libgcc
+#     so the binary needs neither libstdc++ nor libsqlite3 at runtime. glibc
+#     stays dynamic (a fully static glibc binary is discouraged and breaks
+#     NSS/dlopen). A static libclang is linked ONLY if a libclang.a is on disk
+#     -- official LLVM release tarballs (e.g. /opt/llvm-21.1.1, validated
+#     2026-06-13) ship only libclang.so, so libclang normally stays dynamic
+#     (RPATH). The clang component .a's exist but none defines the C API.
 #   * macOS: only SQLite3 has a static archive; libclang ships shared-only and
 #     Apple provides no static libSystem, so libclang stays dynamic (RPATH).
 # Each dependency falls back to its shared form (with a STATUS/WARNING) when no
@@ -176,9 +179,11 @@ elseif(CIDX_STATIC)
   # Linux: a static libclang pulls in the whole clang + LLVM static-archive
   # set. We glob the clang component archives and let llvm-config enumerate the
   # LLVM libs + system libs, then wrap clang+LLVM in one --start-group so their
-  # circular references resolve regardless of order. NOTE: this path depends on
-  # the install actually shipping static archives (e.g. an official LLVM release
-  # tarball under /opt/llvm-*); validate on the target box.
+  # circular references resolve regardless of order. NOTE: this needs a
+  # libclang.a, which standard LLVM release tarballs do NOT ship (only
+  # libclang.so) -- so in practice this branch usually warns and falls back to
+  # dynamic libclang. It engages only on a custom LLVM built with
+  # LIBCLANG_BUILD_STATIC=ON. The static libstdc++/SQLite3 below still apply.
   find_library(CIDX_LIBCLANG_STATIC NAMES libclang.a
     HINTS "${_cidx_libclang_dir}" ${_cidx_libclang_hints}
     DOC "Static libclang archive for CIDX_STATIC")
