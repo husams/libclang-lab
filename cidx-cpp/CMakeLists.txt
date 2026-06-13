@@ -10,6 +10,18 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "cidx: CMAKE_BUILD_TYPE defaulted to Release")
 endif()
 
+# CIDX_STATIC: prefer static archives for the third-party dependencies so the
+# binary carries fewer runtime requirements. Platform reality differs:
+#   * Linux: link libclang/LLVM + SQLite3 static archives (when present) and
+#     -static-libstdc++ -static-libgcc -> a self-contained binary that does not
+#     need /opt/llvm or libstdc++ at runtime. glibc stays dynamic (a fully
+#     static glibc binary is discouraged and breaks NSS/dlopen).
+#   * macOS: only SQLite3 has a static archive; libclang ships shared-only and
+#     Apple provides no static libSystem, so libclang stays dynamic (RPATH).
+# Each dependency falls back to its shared form (with a STATUS/WARNING) when no
+# static archive is found, so a static configure never hard-fails.
+option(CIDX_STATIC "Statically link dependencies where the platform allows" OFF)
+
 # A2.1: C++23 standard; minimum compilers (A2.1 guard).
 # Build hosts: macOS AppleClang (dev) and Ubuntu 24.04 gcc 13 (e2e).
 # g++ 8.5 cross toolchains are *indexing targets*, not the cidx build host.
@@ -38,6 +50,31 @@ message(STATUS "cidx: compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VER
 
 # S02: storage layer sits on the system SQLite3 (>= 3.35 enforced at runtime).
 find_package(SQLite3 REQUIRED)
+
+# Default: the shared SQLite3 imported target. Under CIDX_STATIC, swap in the
+# static archive when one is on disk (the sqlite amalgamation pulls in
+# dl/pthread/m; libSystem covers those on macOS so they are Linux-only).
+set(_cidx_sqlite_link SQLite::SQLite3)
+if(CIDX_STATIC)
+  find_library(CIDX_SQLITE3_STATIC NAMES libsqlite3.a
+    HINTS /opt/homebrew/opt/sqlite/lib /usr/local/opt/sqlite/lib
+          /usr/lib /usr/lib64 /usr/local/lib
+    DOC "Static SQLite3 archive for CIDX_STATIC")
+  if(CIDX_SQLITE3_STATIC)
+    add_library(cidx_sqlite_static STATIC IMPORTED)
+    set_target_properties(cidx_sqlite_static PROPERTIES
+      IMPORTED_LOCATION "${CIDX_SQLITE3_STATIC}"
+      INTERFACE_INCLUDE_DIRECTORIES "${SQLite3_INCLUDE_DIRS}")
+    if(NOT APPLE)
+      target_link_libraries(cidx_sqlite_static
+        INTERFACE ${CMAKE_DL_LIBS} pthread m)
+    endif()
+    set(_cidx_sqlite_link cidx_sqlite_static)
+    message(STATUS "cidx[static]: SQLite3 (static) = ${CIDX_SQLITE3_STATIC}")
+  else()
+    message(WARNING "cidx[static]: no libsqlite3.a found — using shared SQLite3")
+  endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # A1 (Amendment A1 — spec §12): link libclang at build time.
@@ -126,6 +163,55 @@ get_filename_component(_cidx_libclang_dir "${CIDX_LIBCLANG_LIB}" DIRECTORY)
 message(STATUS "libclang: ${CIDX_LIBCLANG_LIB}")
 message(STATUS "libclang dir (RPATH): ${_cidx_libclang_dir}")
 
+# How libclang is linked into cidx_core. Default: the resolved shared library
+# (RPATH-located at runtime). Under CIDX_STATIC on a non-Apple host, try to
+# build a static link line instead.
+set(_cidx_libclang_link "${CIDX_LIBCLANG_LIB}")
+set(_cidx_libclang_static OFF)
+
+if(CIDX_STATIC AND APPLE)
+  message(STATUS "cidx[static]: macOS — libclang stays dynamic "
+                 "(no static archive ships; libSystem has no static form)")
+elseif(CIDX_STATIC)
+  # Linux: a static libclang pulls in the whole clang + LLVM static-archive
+  # set. We glob the clang component archives and let llvm-config enumerate the
+  # LLVM libs + system libs, then wrap clang+LLVM in one --start-group so their
+  # circular references resolve regardless of order. NOTE: this path depends on
+  # the install actually shipping static archives (e.g. an official LLVM release
+  # tarball under /opt/llvm-*); validate on the target box.
+  find_library(CIDX_LIBCLANG_STATIC NAMES libclang.a
+    HINTS "${_cidx_libclang_dir}" ${_cidx_libclang_hints}
+    DOC "Static libclang archive for CIDX_STATIC")
+  find_program(_cidx_llvm_config NAMES llvm-config
+    HINTS "${_cidx_libclang_dir}/../bin")
+  if(CIDX_LIBCLANG_STATIC AND _cidx_llvm_config)
+    execute_process(COMMAND "${_cidx_llvm_config}" --libdir
+      OUTPUT_VARIABLE _ll_libdir OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND "${_cidx_llvm_config}" --link-static --libs
+      OUTPUT_VARIABLE _ll_libs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND "${_cidx_llvm_config}" --link-static --system-libs
+      OUTPUT_VARIABLE _ll_syslibs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    separate_arguments(_ll_libs)
+    separate_arguments(_ll_syslibs)
+    file(GLOB _cidx_clang_static_libs "${_ll_libdir}/libclang*.a")
+    list(SORT _cidx_clang_static_libs)
+    set(_cidx_libclang_link
+      "-L${_ll_libdir}"
+      "-Wl,--start-group"
+      ${_cidx_clang_static_libs}
+      ${_ll_libs}
+      "-Wl,--end-group"
+      ${_ll_syslibs})
+    set(_cidx_libclang_static ON)
+    message(STATUS "cidx[static]: libclang (static) = ${CIDX_LIBCLANG_STATIC}")
+    message(STATUS "cidx[static]: LLVM libdir = ${_ll_libdir}")
+  else()
+    message(WARNING "cidx[static]: static libclang not found "
+      "(need libclang.a + llvm-config under ${_cidx_libclang_dir}); "
+      "libclang stays dynamic")
+  endif()
+endif()
+
 # Core library: util + storage + clangx + compiledb + cli + vendored MD5.
 add_library(cidx_core STATIC
   src/util/logger.cpp
@@ -149,10 +235,12 @@ add_library(cidx_core STATIC
   third_party/md5/md5.c
 )
 
-# A1.1: link libclang directly.
-target_link_libraries(cidx_core PUBLIC "${CIDX_LIBCLANG_LIB}")
-# S02: storage layer links the system SQLite3.
-target_link_libraries(cidx_core PUBLIC SQLite::SQLite3)
+# A1.1: link libclang (shared by default; a static archive group under
+# CIDX_STATIC on Linux — see the resolution block above).
+target_link_libraries(cidx_core PUBLIC ${_cidx_libclang_link})
+# S02: storage layer links SQLite3 (shared, or the static archive under
+# CIDX_STATIC).
+target_link_libraries(cidx_core PUBLIC ${_cidx_sqlite_link})
 target_include_directories(cidx_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
@@ -171,12 +259,22 @@ target_compile_definitions(cidx_core PUBLIC
 add_executable(cidx src/main.cpp)
 target_compile_options(cidx PRIVATE -Wall -Wextra)
 target_link_libraries(cidx PRIVATE cidx_core)
-# A1.1: RPATH so the binary runs without LD_LIBRARY_PATH.
-set_target_properties(cidx PROPERTIES
-  BUILD_RPATH "${_cidx_libclang_dir}"
-  INSTALL_RPATH "${_cidx_libclang_dir}"
-  INSTALL_RPATH_USE_LINK_PATH ON
-)
+
+# Static C++ runtime on Linux (AppleClang/libc++ has no static-libstdc++).
+if(CIDX_STATIC AND NOT APPLE)
+  target_link_options(cidx PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# RPATH is only needed while libclang is dynamic. With a static libclang there
+# is no shared dependency to locate, so skip it (a leftover RPATH is harmless
+# but misleading).
+if(NOT _cidx_libclang_static)
+  set_target_properties(cidx PROPERTIES
+    BUILD_RPATH "${_cidx_libclang_dir}"
+    INSTALL_RPATH "${_cidx_libclang_dir}"
+    INSTALL_RPATH_USE_LINK_PATH ON
+  )
+endif()
 
 enable_testing()
 add_subdirectory(tests)
