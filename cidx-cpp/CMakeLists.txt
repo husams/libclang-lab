@@ -15,10 +15,13 @@ endif()
 #   * Linux: SQLite3 from its static archive + -static-libstdc++ -static-libgcc
 #     so the binary needs neither libstdc++ nor libsqlite3 at runtime. glibc
 #     stays dynamic (a fully static glibc binary is discouraged and breaks
-#     NSS/dlopen). A static libclang is linked ONLY if a libclang.a is on disk
-#     -- official LLVM release tarballs (e.g. /opt/llvm-21.1.1, validated
-#     2026-06-13) ship only libclang.so, so libclang normally stays dynamic
-#     (RPATH). The clang component .a's exist but none defines the C API.
+#     NSS/dlopen). libclang is ALSO linked statically when a C-API wrapper
+#     archive is supplied via -DCIDX_LIBCLANG_STATIC=<libclang.a> (build it once
+#     with scripts/build-static-libclang.sh against a NON-LTO distro LLVM, e.g.
+#     apt llvm-18 — validated 2026-06-13 on Ubuntu 24.04 -> the binary has no
+#     libclang.so dependency). Without it, libclang falls back to dynamic: no
+#     distribution ships a linkable static libclang C API (release tarballs are
+#     LTO bitcode; -dev packages ship only libclang.so), hence the wrapper.
 #   * macOS: only SQLite3 has a static archive; libclang ships shared-only and
 #     Apple provides no static libSystem, so libclang stays dynamic (RPATH).
 # Each dependency falls back to its shared form (with a STATUS/WARNING) when no
@@ -176,44 +179,66 @@ if(CIDX_STATIC AND APPLE)
   message(STATUS "cidx[static]: macOS — libclang stays dynamic "
                  "(no static archive ships; libSystem has no static form)")
 elseif(CIDX_STATIC)
-  # Linux: a static libclang pulls in the whole clang + LLVM static-archive
-  # set. We glob the clang component archives and let llvm-config enumerate the
-  # LLVM libs + system libs, then wrap clang+LLVM in one --start-group so their
-  # circular references resolve regardless of order. NOTE: this needs a
-  # libclang.a, which standard LLVM release tarballs do NOT ship (only
-  # libclang.so) -- so in practice this branch usually warns and falls back to
-  # dynamic libclang. It engages only on a custom LLVM built with
-  # LIBCLANG_BUILD_STATIC=ON. The static libstdc++/SQLite3 below still apply.
-  find_library(CIDX_LIBCLANG_STATIC NAMES libclang.a
-    HINTS "${_cidx_libclang_dir}" ${_cidx_libclang_hints}
-    DOC "Static libclang archive for CIDX_STATIC")
-  find_program(_cidx_llvm_config NAMES llvm-config
-    HINTS "${_cidx_libclang_dir}/../bin")
-  if(CIDX_LIBCLANG_STATIC AND _cidx_llvm_config)
+  # Linux: link a static libclang. The libclang C API itself ships only as a
+  # shared lib everywhere, so a wrapper libclang.a (the clang/tools/libclang
+  # C-API objects) must be built first with scripts/build-static-libclang.sh and
+  # pointed at via -DCIDX_LIBCLANG_STATIC. We then add the distro's clang/LLVM
+  # *component* static archives (regular ELF, libstdc++ — ABI-matched to a g++
+  # build of cidx; an LTO/bitcode LLVM will NOT link) and the llvm-config LLVM +
+  # system libs, all in one --start-group so the circular refs resolve.
+  #   Validated 2026-06-13 on Ubuntu 24.04 apt llvm-18 (18.1.3): the resulting
+  #   cidx has NO libclang.so dependency (only libc/libm/libz/libzstd/libtinfo).
+  # CIDX_LIBCLANG_STATIC: path to the C-API wrapper archive. Usually passed via
+  # -D (printed by build-static-libclang.sh); else try to find one on disk.
+  if(NOT CIDX_LIBCLANG_STATIC)
+    find_library(CIDX_LIBCLANG_STATIC NAMES libclang.a
+      HINTS "${_cidx_libclang_dir}" ${_cidx_libclang_hints}
+      DOC "Static libclang.a (C-API wrapper) for CIDX_STATIC")
+  endif()
+  # llvm-config MUST come from the SAME prefix as the libclang we are linking
+  # (its --libdir/--libs select the component archives). Pin it to the resolved
+  # libclang's sibling bin/ rather than trusting PATH (which may point at an
+  # unrelated/LTO LLVM, e.g. /opt/llvm-*). -DCIDX_LLVM_CONFIG overrides.
+  if(CIDX_LLVM_CONFIG)
+    set(_cidx_llvm_config "${CIDX_LLVM_CONFIG}")
+  elseif(EXISTS "${_cidx_libclang_dir}/../bin/llvm-config")
+    set(_cidx_llvm_config "${_cidx_libclang_dir}/../bin/llvm-config")
+  else()
+    find_program(_cidx_llvm_config NAMES llvm-config llvm-config-18)
+  endif()
+  if(CIDX_LIBCLANG_STATIC AND EXISTS "${CIDX_LIBCLANG_STATIC}" AND _cidx_llvm_config)
     execute_process(COMMAND "${_cidx_llvm_config}" --libdir
       OUTPUT_VARIABLE _ll_libdir OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND "${_cidx_llvm_config}" --ldflags
+      OUTPUT_VARIABLE _ll_ldflags OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     execute_process(COMMAND "${_cidx_llvm_config}" --link-static --libs
       OUTPUT_VARIABLE _ll_libs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     execute_process(COMMAND "${_cidx_llvm_config}" --link-static --system-libs
       OUTPUT_VARIABLE _ll_syslibs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    separate_arguments(_ll_ldflags)
     separate_arguments(_ll_libs)
     separate_arguments(_ll_syslibs)
+    # Drop components llvm-config lists but the distro ships no static .a for
+    # (e.g. Polly on apt LLVM) — they would fail with 'cannot find -lPolly'.
+    list(FILTER _ll_libs EXCLUDE REGEX "Polly")
+    # Clang component archives (libclangAST.a, ...) live beside the LLVM ones.
     file(GLOB _cidx_clang_static_libs "${_ll_libdir}/libclang*.a")
     list(SORT _cidx_clang_static_libs)
     set(_cidx_libclang_link
-      "-L${_ll_libdir}"
+      ${_ll_ldflags}
       "-Wl,--start-group"
-      ${_cidx_clang_static_libs}
-      ${_ll_libs}
+      "${CIDX_LIBCLANG_STATIC}"          # the C-API wrapper archive
+      ${_cidx_clang_static_libs}          # clang component archives
+      ${_ll_libs}                         # LLVM component archives
       "-Wl,--end-group"
       ${_ll_syslibs})
     set(_cidx_libclang_static ON)
     message(STATUS "cidx[static]: libclang (static) = ${CIDX_LIBCLANG_STATIC}")
     message(STATUS "cidx[static]: LLVM libdir = ${_ll_libdir}")
   else()
-    message(WARNING "cidx[static]: static libclang not found "
-      "(need libclang.a + llvm-config under ${_cidx_libclang_dir}); "
-      "libclang stays dynamic")
+    message(WARNING "cidx[static]: no static libclang -> libclang stays dynamic. "
+      "Build the C-API wrapper with scripts/build-static-libclang.sh and pass "
+      "-DCIDX_LIBCLANG_STATIC=<libclang.a> (needs a non-LTO LLVM + llvm-config).")
   endif()
 endif()
 
