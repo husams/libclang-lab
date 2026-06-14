@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "c++ -std=c++17 -I/Users/husam/workspace/qemu-vms/libclang-lab/manifests -c geometry.cpp -o geometry.o",
+    "file": "geometry.cpp"
+  }
+]

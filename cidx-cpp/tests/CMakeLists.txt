@@ -9,6 +9,7 @@ set(CIDX_DEFAULT_TESTS
   env_logger_test
   storage_smoke_test
   storage_migration_test
+  graph_storage_test
   fuzzy_match_test
   repo_test
 )

@@ -58,6 +58,44 @@ struct Symbol {
   int64_t id = -1;
 };
 
+// -- v7 graph layer records ---------------------------------------------------
+
+struct Edge {
+  int64_t src_id = -1;
+  int64_t dst_id = -1;
+  int64_t kind = 0;                       // edge_kind.id
+  int64_t count = 1;
+  std::optional<int64_t> base_access;     // inherits
+  std::optional<int64_t> is_virtual;      // inherits (0/1)
+  std::optional<int64_t> vtable_slot;     // overrides (reserved)
+  int64_t id = -1;
+};
+
+struct EdgeSite {
+  int64_t edge_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  int64_t conditional = 0;
+  std::optional<std::string> args_sig;
+};
+
+struct TemplateParam {
+  int64_t owner_id = -1;
+  int64_t position = 0;
+  int64_t param_kind = 0;
+  std::optional<std::string> name;
+  std::optional<std::string> default_txt;
+};
+
+struct TemplateArg {
+  int64_t owner_id = -1;
+  int64_t position = 0;
+  int64_t arg_kind = 0;
+  std::optional<int64_t> ref_id;
+  std::optional<std::string> literal;
+};
+
 struct Stats {
   int64_t components = 0;
   int64_t directories = 0;
@@ -66,6 +104,8 @@ struct Stats {
   int64_t symbols = 0;
   int64_t symbols_unresolved = 0;
   std::map<std::string, int64_t> symbols_by_kind;
+  int64_t edges = 0;
+  std::map<std::string, int64_t> edges_by_kind;
 };
 
 } // namespace cidx

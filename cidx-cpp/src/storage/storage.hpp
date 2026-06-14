@@ -26,7 +26,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 6;
+constexpr int kSchemaVersion = 7;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
 // SQL CHECK and by an application-side StorageError (§3.2).
@@ -152,6 +152,39 @@ public:
                const std::optional<std::string> &kind = std::nullopt);
   std::vector<Symbol> symbols_in_file(int64_t file_id);
   std::vector<Symbol> unresolved_symbols();
+
+  // -- graph layer (v7) ------------------------------------------------------
+  // Mint a stub symbol row (resolved=0, spelling='', kind='function') for an
+  // unknown USR; INSERT OR IGNORE keeps an existing real row intact. Returns
+  // the stable symbol.id regardless of whether the row was minted or found.
+  int64_t mint_symbol_id(const std::string &usr);
+
+  // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
+  // Returns the edge.id for edge_site linkage.
+  int64_t add_edge(const Edge &e);
+
+  // INSERT OR IGNORE: same site visited twice (e.g. re-parse) = no-op.
+  void add_edge_site(const EdgeSite &s);
+
+  // INSERT OR REPLACE keyed on (owner_id, position).
+  void add_template_param(const TemplateParam &p);
+  void add_template_arg(const TemplateArg &a);
+
+  // Delete edges whose src is a symbol defined in this file (idempotent
+  // re-index: edges cascade-delete their edge_site rows).
+  void delete_edges_for_file(int64_t file_id);
+
+  // Resolve pass (DB-only, no parse): roll up edge.count from edge_site for
+  // calls/uses, report remaining stubs. Returns count of still-unresolved
+  // stub symbols.
+  int resolve_pass();
+
+  // Roll edge.count up to the true site count for calls (kind=1) and uses
+  // (kind=7) — idempotent; COUNT(*) is the source of truth.
+  void rollup_edge_counts();
+
+  // Edges whose ends live in different components.
+  std::vector<Edge> cross_repo_edges();
 
   Stats stats();
 

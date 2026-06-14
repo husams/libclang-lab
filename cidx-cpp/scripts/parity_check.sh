@@ -40,6 +40,7 @@ PY_CIDX="$LAB_ROOT/project/cidx"
 CPP_BIN="${CIDX_CPP_BIN:-$CIDX_CPP_ROOT/build/cidx}"
 FIXTURE_DB="$LAB_ROOT/manifests/project/compile_commands.json"
 PROJECT_DIR="$LAB_ROOT/manifests/project"
+GEOMETRY_DB="$LAB_ROOT/manifests/geometry"
 
 fail() { echo "parity_check: FAIL: $*" >&2; exit 1; }
 
@@ -47,6 +48,7 @@ fail() { echo "parity_check: FAIL: $*" >&2; exit 1; }
 [ -x "$CPP_BIN" ] || fail "C++ binary not found/executable: $CPP_BIN (build cidx-cpp first, or set CIDX_CPP_BIN)"
 [ -x "$PY_CIDX" ] || fail "Python launcher not found: $PY_CIDX"
 [ -f "$FIXTURE_DB" ] || fail "fixture missing: $FIXTURE_DB"
+[ -f "$GEOMETRY_DB/compile_commands.json" ] || fail "geometry fixture missing: $GEOMETRY_DB/compile_commands.json"
 command -v uv >/dev/null 2>&1 || fail "uv not on PATH (the Python launcher needs it)"
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 not on PATH"
 
@@ -169,6 +171,8 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- import --db "$MULTI_ARGS_DB" --name multiargscomp
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve --rebuild
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index "$PROJECT_DIR/app.c"
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index "$WORK/not-in-db.c"
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- search multiply
@@ -200,7 +204,16 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- import --force --db "$FIXTURE_DB" --name parityproj
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files --pending
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --limit 2
+  # M2: geometry fixture (C++ graph edges: inherits/field_of/method_of/
+  # template_param/instantiates/template_arg). Import + index + resolve so the
+  # DB dump covers all graph tables and diffs are byte-strict across both tools.
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- import --db "$GEOMETRY_DB" --name geoproject
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve --rebuild
+
   # delete subcommand: help, nested-choice errors, per-leaf help, the
   # required-mutex / mutex / bad-int / 0-match error paths, dry-run previews,
   # then REAL deletes exercising cascade + orphan-symbol purge. Placed last so
@@ -258,6 +271,9 @@ dump_db() {
   # delta does not cause a spurious diff on multi-element arrays (R6).
   sqlite3 "$tmp" "UPDATE file SET mtime = NULL, indexed_at = NULL;" \
     || fail "sqlite3 UPDATE failed on $src"
+  # NULL out the volatile graph_resolved_at timestamp in meta (written by resolve).
+  sqlite3 "$tmp" "UPDATE meta SET value = NULL WHERE key = 'graph_resolved_at';" \
+    || fail "sqlite3 UPDATE meta failed on $src"
   # Normalise compile_options JSON arrays: round-trip through python3 with
   # compact separators so Python's ["a", "b"] and C++'s ["a","b"] both become
   # ["a","b"] before the diff.  The python3 snippet is written to a temp file

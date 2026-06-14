@@ -208,14 +208,15 @@ def _source_root(db: Storage, name: str | None) -> str | None:
     return comp.path if comp else None
 
 
-def _index_one(db: Storage, rec: File, path: str) -> int:
+def _index_one(db: Storage, rec: File, path: str,
+               no_graph: bool = False) -> int:
     """Parse + index one pending file (main TU + its headers); returns 0/1."""
     if rec.id is None:
         return 1
     try:
         result = index_source(db, path,
                               compiledb.sanitize(rec.compile_options or []),
-                              rec.id, driver=rec.driver)
+                              rec.id, driver=rec.driver, no_graph=no_graph)
     except ClangParseError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -228,7 +229,8 @@ def _index_one(db: Storage, rec: File, path: str) -> int:
     return 0
 
 
-def _index_files(db: Storage, files: list[str], root: str | None) -> int:
+def _index_files(db: Storage, files: list[str], root: str | None,
+                 no_graph: bool = False) -> int:
     """index FILE...: look each file up and index it unless already indexed."""
     rc = 0
     for f in files:
@@ -242,11 +244,11 @@ def _index_files(db: Storage, files: list[str], root: str | None) -> int:
         if index_status(rec, path)[0]:
             print("  already indexed")
             continue
-        rc |= _index_one(db, rec, path)
+        rc |= _index_one(db, rec, path, no_graph=no_graph)
     return rc
 
 
-def _index_pending(db: Storage) -> int:
+def _index_pending(db: Storage, no_graph: bool = False) -> int:
     """index (no args): index every file still pending in the database."""
     done, skipped, failed = 0, 0, 0
     for rec, path in db.files():
@@ -254,7 +256,7 @@ def _index_pending(db: Storage) -> int:
             skipped += 1
             continue
         print(f"indexing {path}")
-        if _index_one(db, rec, path) == 0:
+        if _index_one(db, rec, path, no_graph=no_graph) == 0:
             done += 1
         else:
             failed += 1
@@ -263,17 +265,28 @@ def _index_pending(db: Storage) -> int:
 
 
 def cmd_index(args) -> int:
+    no_graph = getattr(args, "no_graph", False)
     with Storage(args.index) as db:
         try:
             root = _source_root(db, args.source)
         except LookupError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
-        rc = (_index_files(db, args.files, root) if args.files
-              else _index_pending(db))
+        rc = (_index_files(db, args.files, root, no_graph=no_graph) if args.files
+              else _index_pending(db, no_graph=no_graph))
     if _warnings.count:
         print(f"{_warnings.count} warning(s)/error(s) logged to {log_path()}")
     return rc
+
+
+def cmd_resolve(args) -> int:
+    """DB-only pass: roll up edge counts, finalize cross-repo edges."""
+    with Storage(args.index) as db:
+        if getattr(args, "rebuild", False):
+            db.clear_edges()
+        stubs, cross = db.resolve_pass()
+    print(f"resolve: {stubs} still-stub, {cross} cross-repo edge(s)")
+    return 0
 
 
 def _print_symbols(db: Storage, hits, limit: int) -> None:
@@ -655,7 +668,15 @@ def main(argv=None) -> int:
     p.add_argument("files", nargs="*", help="restrict to these files (default: all pending)")
     p.add_argument("--source", metavar="COMPONENT",
                    help="resolve relative FILE paths against this component's root")
+    p.add_argument("--no-graph", dest="no_graph", action="store_true",
+                   help="skip relationship-graph extraction (calls, inherits, …)")
     p.set_defaults(fn=cmd_index)
+
+    p = sub.add_parser("resolve",
+                       help="finalize cross-repo edges and roll up edge counts")
+    p.add_argument("--rebuild", action="store_true",
+                   help="clear all edges before resolving (forces full re-extract)")
+    p.set_defaults(fn=cmd_resolve)
 
     p = sub.add_parser("search", help="fuzzy-search symbols by qualified name")
     p.add_argument("pattern",

@@ -319,7 +319,8 @@ struct GoldFixture {
 // Usage blocks shared by several expected error messages (transcribed from
 // the captured Python argparse output, COLUMNS=80).
 const char kTopUsage[] =
-    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls,delete} "
+    "usage: cidx [-h] "
+    "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
     "...\n";
 
 const char kSearchUsage[] =
@@ -359,8 +360,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, add-source, import, index, search, show, list, ls, "
-            "delete)\n");
+            "from init, add-source, import, index, resolve, search, show, "
+            "list, ls, delete)\n");
 }
 
 TEST_CASE("args: unknown flag -> exit 2, TOP-level unrecognized arguments") {
@@ -587,8 +588,8 @@ TEST_CASE("args: delete parses each selector + --component + --dry-run") {
 TEST_CASE("delete: functional — multi-match list+delete, dry-run, cascade") {
   GoldFixture g; // seeded: component 'gold' (id 1), files a.c/a.h, 6 symbols
   // dry-run previews without mutating
-  CmdResult r = run_cli({"delete", "symbol", "--name", "multiply", "--dry-run"},
-                        g.cache);
+  CmdResult r =
+      run_cli({"delete", "symbol", "--name", "multiply", "--dry-run"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == "  #1  function  multiply\n"
                  "would delete 1 symbol\n");
@@ -612,8 +613,8 @@ TEST_CASE("delete: functional — multi-match list+delete, dry-run, cascade") {
   // delete the whole component (full cascade)
   r = run_cli({"delete", "component", "--name", "gold"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("  #1  gold (repo)  {ROOT}\n") +
-                     "deleted 1 component\n");
+  CHECK(r.out ==
+        g.expect("  #1  gold (repo)  {ROOT}\n") + "deleted 1 component\n");
   r = run_cli({"list", "components"}, g.cache);
   CHECK(r.out == "0 component(s)\n");
 }
@@ -687,27 +688,31 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
   // $ python3 -m indexer -h    (full top help, exit 0)
   cli::ParsedArgs pa = cli::parse_args({"-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text ==
-        std::string(kTopUsage) +
-            "\n"
-            "cidx command-line skeleton\n"
-            "\n"
-            "positional arguments:\n"
-            "  {init,add-source,import,index,search,show,list,ls,delete}\n"
-            "    init                create a blank index database\n"
-            "    add-source          register a component\n"
-            "    import              import a compile_commands.json\n"
-            "    index               index imported C/C++ files\n"
-            "    search              fuzzy-search symbols by qualified name\n"
-            "    show                show full details of one symbol or "
-            "file\n"
-            "    list (ls)           browse the index: components, dirs, "
-            "files, symbols\n"
-            "    delete              delete a component, directory, file, or "
-            "symbol\n"
-            "\n"
-            "options:\n"
-            "  -h, --help            show this help message and exit\n");
+  CHECK(
+      *pa.help_text ==
+      std::string(kTopUsage) +
+          "\n"
+          "cidx command-line skeleton\n"
+          "\n"
+          "positional arguments:\n"
+          "  "
+          "{init,add-source,import,index,resolve,search,show,list,ls,delete}\n"
+          "    init                create a blank index database\n"
+          "    add-source          register a component\n"
+          "    import              import a compile_commands.json\n"
+          "    index               index imported C/C++ files\n"
+          "    resolve             finalize cross-repo edges and roll up edge "
+          "counts\n"
+          "    search              fuzzy-search symbols by qualified name\n"
+          "    show                show full details of one symbol or "
+          "file\n"
+          "    list (ls)           browse the index: components, dirs, "
+          "files, symbols\n"
+          "    delete              delete a component, directory, file, or "
+          "symbol\n"
+          "\n"
+          "options:\n"
+          "  -h, --help            show this help message and exit\n");
 
   // $ python3 -m indexer search -h --kind bogus foo   -> help wins (exit 0)
   pa = cli::parse_args({"search", "-h", "--kind", "bogus", "foo"});
@@ -718,6 +723,14 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
   // $ python3 -m indexer search --kind bogus -h       -> error wins (exit 2)
   const ParseFail f = parse_fail({"search", "--kind", "bogus", "-h"});
   CHECK(f.code == 2);
+
+  // $ cidx resolve -h: assert --rebuild option help text is byte-identical
+  // to Python's argparse text (M3 golden lock).
+  pa = cli::parse_args({"resolve", "-h"});
+  REQUIRE(pa.help_text);
+  CHECK(pa.help_text->find(
+            "clear all edges before resolving (forces full re-extract)") !=
+        std::string::npos);
 
   // $ python3 -m indexer list files -h                (first usage line
   // matches the wrapped [--indexed | --pending] block)
@@ -1327,18 +1340,19 @@ TEST_CASE("args: init grammar — --force flag, no positionals") {
   // -h returns help text (argparse exit 0 path)
   pa = cli::parse_args({"init", "-h"});
   REQUIRE(pa.help_text.has_value());
-  CHECK(*pa.help_text == "usage: cidx init [-h] [--force]\n"
-                         "\n"
-                         "options:\n"
-                         "  -h, --help  show this help message and exit\n"
-                         "  --force     overwrite an existing index database\n");
+  CHECK(*pa.help_text ==
+        "usage: cidx init [-h] [--force]\n"
+        "\n"
+        "options:\n"
+        "  -h, --help  show this help message and exit\n"
+        "  --force     overwrite an existing index database\n");
 
   // unknown flag -> TOP-level unrecognized arguments, exit 2
   ParseFail f = parse_fail({"init", "--bogus"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
         "usage: cidx [-h] "
-        "{init,add-source,import,index,search,show,list,ls,delete} "
+        "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
         "...\ncidx: error: unrecognized arguments: --bogus\n");
 
   // stray positional -> unrecognized arguments, exit 2
@@ -1346,7 +1360,7 @@ TEST_CASE("args: init grammar — --force flag, no positionals") {
   CHECK(f.code == 2);
   CHECK(f.msg ==
         "usage: cidx [-h] "
-        "{init,add-source,import,index,search,show,list,ls,delete} "
+        "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
         "...\ncidx: error: unrecognized arguments: extra\n");
 }
 

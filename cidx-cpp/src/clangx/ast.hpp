@@ -57,6 +57,15 @@ public:
   int index_symbols(const ParsedTu &tu, const std::string &filename,
                     int64_t file_id);
 
+  // Extract edges (inherits, field_of, method_of, specializes, instantiates,
+  // overrides, template_param, template_arg from the declaration-level walk;
+  // calls and uses from the body descent) for `filename` under file_id.
+  // Must be called AFTER index_symbols for the same file (src_id lookups hit
+  // real rows). Runs inside its own transaction per file.
+  // No-op when graph_enabled_ is false.
+  void index_edges(const ParsedTu &tu, const std::string &filename,
+                   int64_t file_id);
+
   // Index every header this TU includes, skipping ones already indexed
   // (ast.py:183-226). For each header not yet indexed (file row missing,
   // never indexed, or md5 changed) its symbols are read out of THIS TU's AST
@@ -67,6 +76,11 @@ public:
   index_headers(const ParsedTu &tu,
                 const std::optional<bool> &ignore_system = std::nullopt);
 
+  // Enable or disable graph extraction (default: enabled). Set false via
+  // --no-graph.
+  void set_graph_enabled(bool enabled) { graph_enabled_ = enabled; }
+  bool graph_enabled() const { return graph_enabled_; }
+
 private:
   // Store one file's symbols inside one transaction; (stored, skipped) —
   // ast.py:133-160. `filename` is matched against cursor expansion-file
@@ -74,6 +88,15 @@ private:
   // headers (G23).
   std::pair<int, int> index_file(const ParsedTu &tu,
                                  const std::string &filename, int64_t file_id);
+
+  // M4: txn-free inner work of index_file; caller owns the transaction.
+  std::pair<int, int> index_file_notxn(const ParsedTu &tu,
+                                       const std::string &filename,
+                                       int64_t file_id);
+
+  // M4: txn-free inner work of index_edges; caller owns the transaction.
+  void index_edges_notxn(const ParsedTu &tu, const std::string &filename,
+                         int64_t file_id);
 
   // Pre-order walk via clang_visitChildren streaming only cursors located in
   // `filename` to fn (ast.py:62-74). The visitor is noexcept (D23; errors
@@ -84,6 +107,12 @@ private:
   // are not walked; everything else recurses.
   void for_file_cursors(const ParsedTu &tu, const std::string &filename,
                         const std::function<void(CXCursor)> &fn);
+
+  // Parent-aware variant: fn receives (cursor, parent). Used by index_edges
+  // so CXX_BASE_SPECIFIER can get the enclosing record from the walk parent
+  // (spec §1.4: semantic_parent is NULL on that cursor kind).
+  void for_file_cursors_p(const ParsedTu &tu, const std::string &filename,
+                          const std::function<void(CXCursor, CXCursor)> &fn);
 
   // Storage Symbol for a cursor, or nullopt when it is not indexable: kind
   // outside the frozen 17-entry map, or empty USR (ast.py:94-130).
@@ -98,9 +127,14 @@ private:
   // (returns true).
   bool store(const Symbol &sym);
 
+  // Body descent for calls and uses extraction. Recurses through ALL children
+  // of a function-like definition, tracking cond_depth.
+  void body_descent(CXCursor fn_cursor, int64_t src_id, int64_t file_id);
+
   Storage &db_;
   [[maybe_unused]] Logger &log_; // design §5.8 wires the sink; ast.py logs
                                  // nothing, so no record is ever written
+  bool graph_enabled_ = true;
 };
 
 } // namespace cidx
