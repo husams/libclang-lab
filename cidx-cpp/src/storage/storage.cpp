@@ -90,7 +90,60 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '6');
+-- ---- v7 graph layer (PLAN §2/§6) -----------------------------------------
+
+CREATE TABLE IF NOT EXISTS edge_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO edge_kind (id, name) VALUES
+  (1,'calls'), (2,'inherits'), (3,'contains'), (4,'specializes'),
+  (5,'instantiates'), (6,'overrides'), (7,'uses'),
+  (8,'field_of'), (9,'method_of');
+
+CREATE TABLE IF NOT EXISTS edge (
+    id          INTEGER PRIMARY KEY,
+    src_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    dst_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind        INTEGER NOT NULL REFERENCES edge_kind(id),
+    count       INTEGER NOT NULL DEFAULT 1,
+    base_access INTEGER,   -- inherits: public/protected/private of the base
+    is_virtual  INTEGER,   -- inherits: virtual base
+    vtable_slot INTEGER,   -- overrides: reserved (NULL today)
+    UNIQUE (src_id, dst_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_src ON edge(src_id, kind);
+CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
+
+CREATE TABLE IF NOT EXISTS edge_site (
+    edge_id     INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+    file_id     INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    line        INTEGER,
+    col         INTEGER,
+    conditional INTEGER NOT NULL DEFAULT 0,
+    args_sig    TEXT,
+    PRIMARY KEY (edge_id, file_id, line, col)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS template_param (
+    owner_id    INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    param_kind  INTEGER NOT NULL,  -- 1=type 2=non-type 3=template-template 4=pack
+    name        TEXT,
+    default_txt TEXT,
+    PRIMARY KEY (owner_id, position)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS template_arg (
+    owner_id  INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    position  INTEGER NOT NULL,
+    arg_kind  INTEGER NOT NULL,  -- 1=type 2=non-type value 3=template-template 4=pack
+    ref_id    INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    literal   TEXT,
+    PRIMARY KEY (owner_id, position)
+) WITHOUT ROWID;
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '7');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -422,6 +475,24 @@ void Storage::migrate() {
       // No backfill possible from stored data -- re-import to populate.
       db_.exec("ALTER TABLE file ADD COLUMN driver TEXT");
       changed = true;
+    }
+  }
+  // v6 -> v7: the graph tables are created by the schema script (CREATE TABLE
+  // IF NOT EXISTS + INSERT OR IGNORE edge_kind). No symbol/file ALTER is
+  // needed, so detect the version from meta and bump it directly. Idempotent.
+  if (!has_table("edge")) {
+    changed = true; // tables will be created by the schema script
+  } else {
+    // edge table exists: bump version only when stored version is OLDER
+    // (future-schema DBs — version > kSchemaVersion — are left untouched so
+    // we do NOT downgrade them).
+    auto st =
+        db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (st.step()) {
+      const std::string v = st.col_text(0);
+      if (!v.empty() && std::stoi(v) < kSchemaVersion) {
+        changed = true; // forces the meta UPDATE below to write '7'
+      }
     }
   }
   if (changed) {
@@ -1158,6 +1229,157 @@ std::vector<Symbol> Storage::unresolved_symbols() {
   return out;
 }
 
+// -- graph layer (v7)
+// -----------------------------------------------------------------
+
+int64_t Storage::mint_symbol_id(const std::string &usr) {
+  // INSERT OR IGNORE keeps a concurrent/earlier real row intact; the
+  // follow-up SELECT returns the stable id either way. kind='function' is the
+  // sentinel for stubs (callee targets are usually functions; the real def's
+  // add_symbol upsert overwrites kind/spelling/resolved).
+  auto ins = db_.prepare(
+      "INSERT OR IGNORE INTO symbol (usr, spelling, kind, resolved) "
+      "VALUES (?, '', 'function', 0)");
+  ins.bind(1, std::string_view(usr));
+  ins.step_done();
+  auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
+  sel.bind(1, std::string_view(usr));
+  if (!sel.step()) {
+    throw StorageError("mint_symbol_id: SELECT returned no row for usr=" + usr);
+  }
+  return sel.col_int64(0);
+}
+
+int64_t Storage::add_edge(const Edge &e) {
+  auto st = db_.prepare(
+      "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
+      "                  vtable_slot) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_id, dst_id, kind) DO UPDATE SET "
+      "  count       = edge.count + excluded.count, "
+      "  base_access = COALESCE(excluded.base_access, edge.base_access), "
+      "  is_virtual  = COALESCE(excluded.is_virtual,  edge.is_virtual), "
+      "  vtable_slot = COALESCE(excluded.vtable_slot, edge.vtable_slot) "
+      "RETURNING id");
+  st.bind(1, e.src_id);
+  st.bind(2, e.dst_id);
+  st.bind(3, e.kind);
+  st.bind(4, e.count);
+  bind_opt(st, 5, e.base_access);
+  bind_opt(st, 6, e.is_virtual);
+  bind_opt(st, 7, e.vtable_slot);
+  if (!st.step()) {
+    throw StorageError("add_edge: upsert returned no id");
+  }
+  const int64_t eid = st.col_int64(0);
+  st.step_done();
+  return eid;
+}
+
+void Storage::add_edge_site(const EdgeSite &s) {
+  auto st = db_.prepare(
+      "INSERT OR IGNORE INTO edge_site "
+      "(edge_id, file_id, line, col, conditional, args_sig) "
+      "VALUES (?, ?, ?, ?, ?, ?)");
+  st.bind(1, s.edge_id);
+  bind_opt(st, 2, s.file_id);
+  bind_opt(st, 3, s.line);
+  bind_opt(st, 4, s.col);
+  st.bind(5, s.conditional);
+  bind_opt(st, 6, s.args_sig);
+  st.step_done();
+}
+
+void Storage::add_template_param(const TemplateParam &p) {
+  auto st = db_.prepare(
+      "INSERT OR REPLACE INTO template_param "
+      "(owner_id, position, param_kind, name, default_txt) "
+      "VALUES (?, ?, ?, ?, ?)");
+  st.bind(1, p.owner_id);
+  st.bind(2, p.position);
+  st.bind(3, p.param_kind);
+  bind_opt(st, 4, p.name);
+  bind_opt(st, 5, p.default_txt);
+  st.step_done();
+}
+
+void Storage::add_template_arg(const TemplateArg &a) {
+  auto st = db_.prepare(
+      "INSERT OR REPLACE INTO template_arg "
+      "(owner_id, position, arg_kind, ref_id, literal) "
+      "VALUES (?, ?, ?, ?, ?)");
+  st.bind(1, a.owner_id);
+  st.bind(2, a.position);
+  st.bind(3, a.arg_kind);
+  bind_opt(st, 4, a.ref_id);
+  bind_opt(st, 5, a.literal);
+  st.step_done();
+}
+
+void Storage::delete_edges_for_file(int64_t file_id) {
+  // Exclude contains (kind=3): declaration-level structural edges emitted
+  // during header indexing. Namespaces reopen in every .cpp TU, so deleting
+  // contains on each re-index would permanently erase the header-phase edges.
+  // Contains edges are idempotent (UPSERT); excluding them here is safe.
+  auto st = db_.prepare(
+      "DELETE FROM edge WHERE kind != 3 AND src_id IN "
+      "(SELECT id FROM symbol WHERE file_id = ?)");
+  st.bind(1, file_id);
+  st.step_done();
+}
+
+void Storage::rollup_edge_counts() {
+  // For calls (1) and uses (7): set count = COUNT(edge_site) so the edge
+  // reflects true site count after multi-TU indexing.
+  db_.exec(
+      "UPDATE edge SET count = ("
+      "  SELECT COUNT(*) FROM edge_site WHERE edge_site.edge_id = edge.id"
+      ") "
+      "WHERE kind IN (1, 7)"
+      "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = edge.id)");
+}
+
+std::vector<Edge> Storage::cross_repo_edges() {
+  auto st = db_.prepare(
+      "SELECT e.id, e.src_id, e.dst_id, e.kind, e.count, "
+      "       e.base_access, e.is_virtual, e.vtable_slot "
+      "FROM edge e "
+      "  JOIN symbol s1 ON s1.id = e.src_id "
+      "  JOIN symbol s2 ON s2.id = e.dst_id "
+      "  JOIN file f1 ON f1.id = s1.file_id "
+      "  JOIN directory d1 ON d1.id = f1.directory_id "
+      "  JOIN file f2 ON f2.id = s2.file_id "
+      "  JOIN directory d2 ON d2.id = f2.directory_id "
+      "WHERE d1.component_id <> d2.component_id");
+  std::vector<Edge> out;
+  while (st.step()) {
+    Edge e;
+    e.id = st.col_int64(0);
+    e.src_id = st.col_int64(1);
+    e.dst_id = st.col_int64(2);
+    e.kind = st.col_int64(3);
+    e.count = st.col_int64(4);
+    e.base_access = opt_int64(st, 5);
+    e.is_virtual = opt_int64(st, 6);
+    e.vtable_slot = opt_int64(st, 7);
+    out.push_back(e);
+  }
+  return out;
+}
+
+int Storage::resolve_pass() {
+  // Roll up edge.count for calls/uses from edge_site counts.
+  rollup_edge_counts();
+  // Count remaining stub symbols (spelling='' AND resolved=0 means never-defined
+  // externals like printf).
+  auto st = db_.prepare(
+      "SELECT COUNT(*) FROM symbol WHERE resolved = 0 AND spelling = ''");
+  if (!st.step()) {
+    return 0;
+  }
+  return static_cast<int>(st.col_int64(0));
+}
+
 // -- fuzzy matching
 // -----------------------------------------------------------------
 
@@ -1200,10 +1422,21 @@ Stats Storage::stats() {
   s.files_indexed = one("SELECT COUNT(*) FROM file WHERE indexed = 1");
   s.symbols = one("SELECT COUNT(*) FROM symbol");
   s.symbols_unresolved = one("SELECT COUNT(*) FROM symbol WHERE resolved = 0");
-  auto st = db_.prepare(
-      "SELECT kind, COUNT(*) AS n FROM symbol GROUP BY kind ORDER BY kind");
-  while (st.step()) {
-    s.symbols_by_kind[st.col_text(0)] = st.col_int64(1);
+  {
+    auto st = db_.prepare(
+        "SELECT kind, COUNT(*) AS n FROM symbol GROUP BY kind ORDER BY kind");
+    while (st.step()) {
+      s.symbols_by_kind[st.col_text(0)] = st.col_int64(1);
+    }
+  }
+  s.edges = one("SELECT COUNT(*) FROM edge");
+  {
+    auto st = db_.prepare(
+        "SELECT k.name, COUNT(*) AS n FROM edge e "
+        "JOIN edge_kind k ON k.id = e.kind GROUP BY k.name ORDER BY k.name");
+    while (st.step()) {
+      s.edges_by_kind[st.col_text(0)] = st.col_int64(1);
+    }
   }
   return s;
 }

@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -120,6 +120,59 @@ CREATE INDEX IF NOT EXISTS idx_symbol_qual     ON symbol(qual_name);
 CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
+
+-- ---- v7 graph layer (PLAN §2/§6) -----------------------------------------
+
+CREATE TABLE IF NOT EXISTS edge_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO edge_kind (id, name) VALUES
+  (1,'calls'), (2,'inherits'), (3,'contains'), (4,'specializes'),
+  (5,'instantiates'), (6,'overrides'), (7,'uses'),
+  (8,'field_of'), (9,'method_of');
+
+CREATE TABLE IF NOT EXISTS edge (
+    id          INTEGER PRIMARY KEY,
+    src_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    dst_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind        INTEGER NOT NULL REFERENCES edge_kind(id),
+    count       INTEGER NOT NULL DEFAULT 1,
+    base_access INTEGER,   -- inherits: public/protected/private of the base
+    is_virtual  INTEGER,   -- inherits: virtual base
+    vtable_slot INTEGER,   -- overrides: reserved (NULL today)
+    UNIQUE (src_id, dst_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_src ON edge(src_id, kind);
+CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
+
+CREATE TABLE IF NOT EXISTS edge_site (
+    edge_id     INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+    file_id     INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    line        INTEGER,
+    col         INTEGER,
+    conditional INTEGER NOT NULL DEFAULT 0,
+    args_sig    TEXT,
+    PRIMARY KEY (edge_id, file_id, line, col)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS template_param (
+    owner_id    INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    param_kind  INTEGER NOT NULL,  -- 1=type 2=non-type 3=template-template 4=pack
+    name        TEXT,
+    default_txt TEXT,
+    PRIMARY KEY (owner_id, position)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS template_arg (
+    owner_id  INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    position  INTEGER NOT NULL,
+    arg_kind  INTEGER NOT NULL,  -- 1=type 2=non-type value 3=template-template 4=pack
+    ref_id    INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    literal   TEXT,
+    PRIMARY KEY (owner_id, position)
+) WITHOUT ROWID;
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -263,6 +316,21 @@ class Storage:
             # No backfill possible from stored data -- re-import to populate.
             self._conn.execute("ALTER TABLE file ADD COLUMN driver TEXT")
             changed = True
+        if "edge" not in tables:
+            # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
+            # the tables + indexes + seeds edge_kind; nothing to backfill from
+            # stored data (edges are derived — re-run `cidx index`/`resolve`).
+            changed = True
+        elif not changed:
+            # edge table exists: bump version only when stored version is OLDER
+            # (future-schema DBs — version > SCHEMA_VERSION — are left untouched).
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if row is not None:
+                v = row[0]
+                if v and int(v) < SCHEMA_VERSION:
+                    changed = True
         if changed:
             self._conn.execute(
                 "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -797,6 +865,155 @@ class Storage:
         return [_row_to(Symbol, r) for r in self._conn.execute(
             "SELECT * FROM symbol WHERE resolved = 0 ORDER BY usr"
         )]
+
+    # -- graph (v7) ------------------------------------------------------------
+
+    def mint_symbol_id(self, usr: str) -> int:
+        """INSERT OR IGNORE a stub row for `usr`, then SELECT its id.
+
+        kind='function' is the sentinel for stubs; the real def's add_symbol
+        upsert overwrites kind/spelling/resolved later.
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO symbol (usr, spelling, kind, resolved) "
+            "VALUES (?, '', 'function', 0)",
+            (usr,),
+        )
+        row = self._conn.execute(
+            "SELECT id FROM symbol WHERE usr = ?", (usr,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"mint_symbol_id: SELECT returned no row for usr={usr!r}")
+        return row["id"]
+
+    def add_edge(self, src_id: int, dst_id: int, kind: int, count: int = 1,
+                 base_access: Optional[int] = None,
+                 is_virtual: Optional[int] = None,
+                 vtable_slot: Optional[int] = None) -> int:
+        """Upsert an edge; returns the edge id."""
+        cur = self._conn.execute(
+            "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
+            "                  vtable_slot) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(src_id, dst_id, kind) DO UPDATE SET "
+            "  count       = edge.count + excluded.count, "
+            "  base_access = COALESCE(excluded.base_access, edge.base_access), "
+            "  is_virtual  = COALESCE(excluded.is_virtual,  edge.is_virtual), "
+            "  vtable_slot = COALESCE(excluded.vtable_slot, edge.vtable_slot) "
+            "RETURNING id",
+            (src_id, dst_id, kind, count, base_access, is_virtual, vtable_slot),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("add_edge: upsert returned no id")
+        return row["id"]
+
+    def add_edge_site(self, edge_id: int, file_id: Optional[int],
+                      line: Optional[int], col: Optional[int],
+                      conditional: int = 0,
+                      args_sig: Optional[str] = None) -> None:
+        """INSERT OR IGNORE an edge_site (PK collision = same site, harmless)."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO edge_site "
+            "(edge_id, file_id, line, col, conditional, args_sig) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (edge_id, file_id, line, col, conditional, args_sig),
+        )
+
+    def add_template_param(self, owner_id: int, position: int, param_kind: int,
+                           name: Optional[str] = None,
+                           default_txt: Optional[str] = None) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO template_param "
+            "(owner_id, position, param_kind, name, default_txt) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (owner_id, position, param_kind, name, default_txt),
+        )
+
+    def add_template_arg(self, owner_id: int, position: int, arg_kind: int,
+                         ref_id: Optional[int] = None,
+                         literal: Optional[str] = None) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO template_arg "
+            "(owner_id, position, arg_kind, ref_id, literal) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (owner_id, position, arg_kind, ref_id, literal),
+        )
+
+    def delete_edges_for_file(self, file_id: int) -> None:
+        """Remove edges whose src symbol was indexed from this file.
+
+        Contains edges (kind=3) are excluded: they are declaration-level
+        structural edges emitted once during header indexing. Namespace and
+        record membership spans multiple TUs (the same namespace reopens in
+        every .cpp that uses it), so deleting contains on each re-index would
+        permanently erase edges emitted during the header-indexing pass.
+        Contains edges are idempotent (UPSERT) and survive stale re-indexes.
+        """
+        self._conn.execute(
+            "DELETE FROM edge WHERE kind != 3 AND src_id IN "
+            "(SELECT id FROM symbol WHERE file_id = ?)",
+            (file_id,),
+        )
+        self._commit()
+
+    def rollup_edge_counts(self) -> None:
+        """For calls (1) and uses (7): set count = COUNT(edge_site)."""
+        self._conn.execute(
+            "UPDATE edge SET count = ("
+            "  SELECT COUNT(*) FROM edge_site WHERE edge_site.edge_id = edge.id"
+            ") "
+            "WHERE kind IN (1, 7)"
+            "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = edge.id)"
+        )
+        self._commit()
+
+    def cross_repo_edges(self) -> list[tuple[int, int, int]]:
+        """Return (src_id, dst_id, kind) for edges crossing component boundaries."""
+        rows = self._conn.execute(
+            "SELECT e.src_id, e.dst_id, e.kind FROM edge e "
+            "JOIN symbol src ON src.id = e.src_id "
+            "JOIN symbol dst ON dst.id = e.dst_id "
+            "JOIN file sf ON sf.id = src.file_id "
+            "JOIN directory sd ON sd.id = sf.directory_id "
+            "JOIN file df ON df.id = dst.file_id "
+            "JOIN directory dd ON dd.id = df.directory_id "
+            "WHERE sd.component_id != dd.component_id"
+        ).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+
+    def clear_edges(self) -> None:
+        """Delete all edge, edge_site, template_param, template_arg rows."""
+        self._conn.execute("DELETE FROM template_arg")
+        self._conn.execute("DELETE FROM template_param")
+        self._conn.execute("DELETE FROM edge_site")
+        self._conn.execute("DELETE FROM edge")
+        self._commit()
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Upsert a meta row."""
+        self._conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._commit()
+
+    def resolve_pass(self) -> tuple[int, int]:
+        """Roll up edge counts, write graph_resolved_at meta.
+
+        Returns (still_stub_count, cross_repo_edge_count).
+        """
+        from datetime import datetime, timezone
+        self.rollup_edge_counts()
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM symbol WHERE resolved = 0 AND spelling = ''"
+        ).fetchone()
+        stubs = row[0] if row else 0
+        cross = self.cross_repo_edges()
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.set_meta("graph_resolved_at", ts)
+        return stubs, len(cross)
 
     # -- stats -----------------------------------------------------------------
 

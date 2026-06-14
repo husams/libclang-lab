@@ -6,15 +6,66 @@ every file the TU includes (tu.get_includes() is transitive, so nested
 includes are reached too) is indexed as its own file row, skipping headers
 that are already indexed and -- by default -- system headers
 ($INDEXER_IGNORE_SYSTEM_HEADERS=false to index those as well).
+
+index_edges() extracts typed relationships (calls, inherits, field_of,
+method_of, overrides, specializes, template_param, template_arg) from the
+SAME TU; it must be called AFTER index_symbols for the same file.
 """
 
+import ctypes
 import os
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import Any, Optional
 
 import clang.cindex as cx
 
 from ..storage import Storage, Symbol
+
+# ---------------------------------------------------------------------------
+# Raw libclang function bindings not exposed by the Python bindings layer.
+# ---------------------------------------------------------------------------
+_lib = cx.conf.lib
+
+# clang_isVirtualBase(CXCursor) -> unsigned int
+_lib.clang_isVirtualBase.restype = ctypes.c_uint
+_lib.clang_isVirtualBase.argtypes = [cx.Cursor]
+
+# clang_getSpecializedCursorTemplate(CXCursor) -> CXCursor
+_lib.clang_getSpecializedCursorTemplate.restype = cx.Cursor
+_lib.clang_getSpecializedCursorTemplate.argtypes = [cx.Cursor]
+
+# clang_getOverriddenCursors + clang_disposeOverriddenCursors
+_CursorArrayPtr = ctypes.POINTER(cx.Cursor)
+_lib.clang_getOverriddenCursors.restype = None
+_lib.clang_getOverriddenCursors.argtypes = [
+    cx.Cursor,
+    ctypes.POINTER(_CursorArrayPtr),
+    ctypes.POINTER(ctypes.c_uint),
+]
+_lib.clang_disposeOverriddenCursors.restype = None
+_lib.clang_disposeOverriddenCursors.argtypes = [_CursorArrayPtr]
+
+# clang_Type_getNumTemplateArguments(CXType) -> int
+_lib.clang_Type_getNumTemplateArguments.restype = ctypes.c_int
+_lib.clang_Type_getNumTemplateArguments.argtypes = [cx.Type]
+
+# clang_Type_getTemplateArgumentAsType(CXType, unsigned) -> CXType
+_lib.clang_Type_getTemplateArgumentAsType.restype = cx.Type
+_lib.clang_Type_getTemplateArgumentAsType.argtypes = [cx.Type, ctypes.c_uint]
+
+
+def _get_overridden_cursors(cursor: cx.Cursor) -> list[cx.Cursor]:
+    """Return the list of cursors that `cursor` overrides (may be empty)."""
+    out_ptr = _CursorArrayPtr()
+    out_num = ctypes.c_uint(0)
+    _lib.clang_getOverriddenCursors(cursor, ctypes.byref(out_ptr),
+                                    ctypes.byref(out_num))
+    result: list[cx.Cursor] = []
+    if out_num.value > 0 and out_ptr:
+        for i in range(out_num.value):
+            result.append(out_ptr[i])
+        _lib.clang_disposeOverriddenCursors(out_ptr)
+    return result
 from ..utils import md5_of
 from .util import parse
 
@@ -74,6 +125,28 @@ def _file_cursors(tu: cx.TranslationUnit, filename: str) -> Iterator[cx.Cursor]:
     yield from walk(tu.cursor)
 
 
+def _file_cursors_p(
+    tu: cx.TranslationUnit, filename: str
+) -> Iterator[tuple[cx.Cursor, cx.Cursor]]:
+    """Parent-aware variant: yields (cursor, walk_parent) for cursors in `filename`.
+
+    `walk_parent` is the immediate parent in the walk tree — the enclosing
+    CLASS_DECL for a CXX_BASE_SPECIFIER cursor (spec §1.4: semantic_parent and
+    lexical_parent are both NULL on that cursor kind).
+    """
+
+    def walk(cursor: cx.Cursor, parent: cx.Cursor) -> Iterator[tuple[cx.Cursor, cx.Cursor]]:
+        for child in cursor.get_children():
+            f = child.location.file
+            if f is None or f.name != filename:
+                continue
+            yield child, cursor      # cursor is the walk-parent of child
+            if child.kind not in _FUNCTION_KINDS:
+                yield from walk(child, child)
+
+    yield from walk(tu.cursor, tu.cursor)
+
+
 def _linkage(cursor: cx.Cursor) -> str | None:
     name: str = cursor.linkage.name
     return None if name == "INVALID" else name.lower().replace("_", "-")
@@ -130,34 +203,41 @@ def _to_symbol(cursor: cx.Cursor, file_id: int) -> Symbol | None:
     )
 
 
-def _index_file(db: Storage, tu: cx.TranslationUnit, filename: str,
-                file_id: int) -> tuple[int, int]:
-    """Store the symbols of one file from this TU; returns (stored, skipped).
+def _index_file_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
+                      file_id: int) -> tuple[int, int]:
+    """M4: txn-free inner work of _index_file; caller MUST own an open transaction.
 
+    Store the symbols of one file from this TU; returns (stored, skipped).
     A symbol is stored only when it is NOT already in the database, or the
     stored row is unresolved (no definition seen yet). A row that is already
     resolved is left untouched and counted as skipped.
     """
     stored = skipped = 0
-    with db.transaction():
-        for cursor in _file_cursors(tu, filename):
-            sym = _to_symbol(cursor, file_id)
-            if sym is None:
-                continue
-            existing = db.lookup_symbol(sym.usr)
-            if existing is not None and existing.resolved:
-                # The definition is already stored, but this cursor may be the
-                # header declaration of it -- record the decl site if missing.
-                if sym.decl_file_id is not None and existing.decl_file_id is None:
-                    db.update_symbol(sym.usr,
-                                     decl_file_id=sym.decl_file_id,
-                                     decl_line=sym.decl_line,
-                                     decl_col=sym.decl_col)
-                skipped += 1
-                continue
-            db.add_symbol(sym)
-            stored += 1
+    for cursor in _file_cursors(tu, filename):
+        sym = _to_symbol(cursor, file_id)
+        if sym is None:
+            continue
+        existing = db.lookup_symbol(sym.usr)
+        if existing is not None and existing.resolved:
+            # The definition is already stored, but this cursor may be the
+            # header declaration of it -- record the decl site if missing.
+            if sym.decl_file_id is not None and existing.decl_file_id is None:
+                db.update_symbol(sym.usr,
+                                 decl_file_id=sym.decl_file_id,
+                                 decl_line=sym.decl_line,
+                                 decl_col=sym.decl_col)
+            skipped += 1
+            continue
+        db.add_symbol(sym)
+        stored += 1
     return stored, skipped
+
+
+def _index_file(db: Storage, tu: cx.TranslationUnit, filename: str,
+                file_id: int) -> tuple[int, int]:
+    """Store the symbols of one file from this TU; returns (stored, skipped)."""
+    with db.transaction():
+        return _index_file_notxn(db, tu, filename, file_id)
 
 
 def index_symbols(db: Storage, tu: cx.TranslationUnit, file_id: int) -> tuple[int, int]:
@@ -219,16 +299,381 @@ def index_headers(db: Storage, tu: cx.TranslationUnit,
             continue
         mtime = os.path.getmtime(path) if os.path.exists(path) else None
         file_id = db.add_file_path(path, mtime=mtime, md5=md5)
-        stored, _ = _index_file(db, tu, inc.include.name, file_id)
+        # M4: ONE transaction covers symbols + edges for this header.
+        with db.transaction():
+            stored, _ = _index_file_notxn(db, tu, inc.include.name, file_id)
+            # QD-1: extract declaration-level edges for this header from the SAME
+            # TU's AST. Symbol rows must exist first (_index_file_notxn ran above).
+            db.delete_edges_for_file(file_id)
+            _index_edges_notxn(db, tu, inc.include.name, file_id)
         db.mark_file_indexed(file_id, mtime=mtime)
         counts["indexed"] += 1
         counts["symbols"] += stored
     return counts
 
 
+#: Cursor kinds that open a conditional scope for cond_depth tracking.
+_COND_KINDS: frozenset[cx.CursorKind] = frozenset({
+    cx.CursorKind.IF_STMT,
+    cx.CursorKind.FOR_STMT,
+    cx.CursorKind.WHILE_STMT,
+    cx.CursorKind.DO_STMT,
+    cx.CursorKind.SWITCH_STMT,
+    cx.CursorKind.CASE_STMT,
+    cx.CursorKind.CONDITIONAL_OPERATOR,
+})
+
+#: Function-like cursor kinds that body_descent recurses INTO (definitions only).
+_FUNCTION_DEF_KINDS: frozenset[cx.CursorKind] = frozenset({
+    cx.CursorKind.FUNCTION_DECL,
+    cx.CursorKind.CXX_METHOD,
+    cx.CursorKind.CONSTRUCTOR,
+    cx.CursorKind.DESTRUCTOR,
+    cx.CursorKind.FUNCTION_TEMPLATE,
+})
+
+
+def _body_descent(db: Storage, fn_cursor: cx.Cursor,
+                  src_id: int, file_id: int,
+                  cond_depth: int = 0) -> None:
+    """Recurse through the body of a function-like cursor emitting calls + uses edges.
+
+    For each CALL_EXPR: emit upsert_edge(src_id, dst_id, kind=1) +
+    add_edge_site(edge_id, file_id, line, col, conditional).
+    For each DECL_REF_EXPR/MEMBER_REF_EXPR referencing a non-function indexed
+    symbol: emit upsert_edge(src_id, dst_id, kind=7) + add_edge_site.
+    Tracks cond_depth for IF/FOR/WHILE/DO/SWITCH/CASE/CONDITIONAL_OPERATOR.
+    """
+    for child in fn_cursor.get_children():
+        kind = child.kind
+        if kind == cx.CursorKind.CALL_EXPR:
+            ref = child.referenced
+            if ref is not None:
+                callee_usr: str = ref.get_usr()
+                if callee_usr:
+                    dst_id = db.mint_symbol_id(callee_usr)
+                    edge_id = db.add_edge(src_id, dst_id, 1)  # calls
+                    loc = child.location
+                    db.add_edge_site(
+                        edge_id, file_id, loc.line, loc.column,
+                        conditional=1 if cond_depth > 0 else 0,
+                    )
+                    # B3 instantiates (kind=5): when the callee is a template
+                    # specialization, emit an edge to the primary template.
+                    # Only emit when primary is already indexed (no stubs for
+                    # stdlib templates — prevents inflating stub count for
+                    # std::vector, std::move, etc.).
+                    primary = _lib.clang_getSpecializedCursorTemplate(ref)
+                    if (primary is not None and
+                            primary.kind.value > 0 and
+                            primary.kind not in (
+                                cx.CursorKind.NO_DECL_FOUND,
+                                cx.CursorKind.INVALID_FILE,
+                            )):
+                        prim_usr = primary.get_usr()
+                        if prim_usr and prim_usr != callee_usr:
+                            prim_sym = db.lookup_symbol(prim_usr)
+                            if prim_sym is not None:
+                                db.add_edge(src_id, prim_sym.id, 5)  # instantiates
+        elif kind in (cx.CursorKind.DECL_REF_EXPR, cx.CursorKind.MEMBER_REF_EXPR):
+            # B2 uses: non-function indexed symbols referenced in function body.
+            # Only emit for symbols already in the DB (lookup, no stub) —
+            # prevents creating stubs for every stdlib constant touched in body.
+            ref = child.referenced
+            if ref is not None:
+                ref_kind = ref.kind
+                if ref_kind not in _FUNCTION_KINDS and ref_kind not in (
+                    cx.CursorKind.CXX_METHOD,
+                    cx.CursorKind.CONSTRUCTOR,
+                    cx.CursorKind.DESTRUCTOR,
+                ):
+                    ref_usr: str = ref.get_usr()
+                    if ref_usr:
+                        dst_sym = db.lookup_symbol(ref_usr)
+                        if dst_sym is not None:
+                            edge_id = db.add_edge(src_id, dst_sym.id, 7)  # uses
+                            loc = child.location
+                            db.add_edge_site(
+                                edge_id, file_id, loc.line, loc.column,
+                                conditional=1 if cond_depth > 0 else 0,
+                            )
+        elif kind == cx.CursorKind.VAR_DECL:
+            # B3 class-template instantiates (kind=5): when a variable's type is
+            # a class-template instantiation, emit instantiates (src=enclosing fn,
+            # dst=primary template) + template_arg rows.
+            # Only emit when the primary is already indexed (no stubs for stdlib
+            # types — prevents inflating stub count for std::string, std::vector).
+            var_type = child.type
+            nargs = _lib.clang_Type_getNumTemplateArguments(var_type)
+            if nargs > 0:
+                type_decl = var_type.get_declaration()
+                if (type_decl is not None and
+                        type_decl.kind != cx.CursorKind.NO_DECL_FOUND and
+                        type_decl.kind.value > 0):
+                    primary = _lib.clang_getSpecializedCursorTemplate(type_decl)
+                    if (primary is not None and
+                            primary.kind.value > 0 and
+                            primary.kind not in (
+                                cx.CursorKind.NO_DECL_FOUND,
+                                cx.CursorKind.INVALID_FILE,
+                            )):
+                        prim_usr = primary.get_usr()
+                        if prim_usr:
+                            prim_sym = db.lookup_symbol(prim_usr)
+                            if prim_sym is not None:
+                                # instantiates edge: fn -> primary template
+                                db.add_edge(src_id, prim_sym.id, 5)  # instantiates
+                                # template_arg rows: owner_id = src_id (the using
+                                # function), recording which types are used.
+                                for ai in range(nargs):
+                                    arg_type = _lib.clang_Type_getTemplateArgumentAsType(
+                                        var_type, ai)
+                                    ref_id: Optional[int] = None
+                                    arg_decl = arg_type.get_declaration()
+                                    if (arg_decl is not None and
+                                            arg_decl.kind != cx.CursorKind.NO_DECL_FOUND and
+                                            arg_decl.kind.value > 0):
+                                        ref_usr = arg_decl.get_usr()
+                                        if ref_usr:
+                                            rsym = db.lookup_symbol(ref_usr)
+                                            if rsym is not None:
+                                                ref_id = rsym.id
+                                    db.add_template_arg(src_id, ai, 1, ref_id=ref_id)
+        is_cond = kind in _COND_KINDS
+        _body_descent(db, child, src_id, file_id,
+                      cond_depth + (1 if is_cond else 0))
+
+
+def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
+                       file_id: int) -> None:
+    """M4: txn-free inner work of index_edges; caller MUST own an open transaction.
+
+    Extract typed edges from this TU's AST for `filename`.
+    Must be called AFTER index_symbols for the same file (B1 declaration-level
+    + B2 body descent). Edge deletion is NOT done here; caller handles it.
+    """
+    # B1: declaration-level edges from the same file-cursor stream.
+    # Use the parent-aware walk so that CXX_BASE_SPECIFIER handlers can get
+    # the enclosing record from the walk parent (spec §1.4: semantic_parent
+    # and lexical_parent are both NULL on that cursor kind — probed in
+    # geometry.hpp Circle:Shape).
+    for cursor, walk_parent in _file_cursors_p(tu, filename):
+        ck = cursor.kind
+
+        # -- contains (kind=3): namespace/record → child symbol ---------------
+        # Emitted FIRST so it fires regardless of which handler runs below
+        # (each handler may `continue` before reaching the end of the loop).
+        # src = the enclosing namespace or record; dst = this cursor.
+        # Covers: NAMESPACE_DECL → any indexed child,
+        #         record/class_template → nested type/enum/typedef/union.
+        # Does NOT duplicate field_of (members) or method_of (methods) —
+        # those emit child→parent, while contains emits parent→child.
+        _pk = walk_parent.kind
+        _parent_is_ns = (_pk == cx.CursorKind.NAMESPACE)
+        _parent_is_record = _pk in (
+            cx.CursorKind.CLASS_DECL,
+            cx.CursorKind.STRUCT_DECL,
+            cx.CursorKind.CLASS_TEMPLATE,
+            cx.CursorKind.UNION_DECL,
+        )
+        _child_is_nested_type = ck in (
+            cx.CursorKind.CLASS_DECL,
+            cx.CursorKind.STRUCT_DECL,
+            cx.CursorKind.UNION_DECL,
+            cx.CursorKind.ENUM_DECL,
+            cx.CursorKind.TYPEDEF_DECL,
+            cx.CursorKind.TYPE_ALIAS_DECL,
+            cx.CursorKind.CLASS_TEMPLATE,
+            cx.CursorKind.FUNCTION_TEMPLATE,
+        )
+        if _parent_is_ns or (_parent_is_record and _child_is_nested_type):
+            _child_usr = cursor.get_usr()
+            _parent_usr = walk_parent.get_usr()
+            if _child_usr and _parent_usr:
+                _child_sym = db.lookup_symbol(_child_usr)
+                _parent_sym = db.lookup_symbol(_parent_usr)
+                if _child_sym is not None and _parent_sym is not None:
+                    db.add_edge(_parent_sym.id, _child_sym.id, 3)  # contains
+
+        # -- CXX_BASE_SPECIFIER: inherits ---------------------------------
+        # Derived class is the enclosing record from the walk parent, NOT
+        # from semantic_parent (which is NULL — spec §1.4 gotcha).
+        if ck == cx.CursorKind.CXX_BASE_SPECIFIER:
+            pk = walk_parent.kind
+            if pk not in (cx.CursorKind.CLASS_DECL, cx.CursorKind.STRUCT_DECL):
+                continue   # unexpected parent; skip
+            derived_usr = walk_parent.get_usr()
+            if not derived_usr:
+                continue
+            ref = cursor.referenced
+            if ref is None:
+                continue
+            base_usr = ref.get_usr()
+            if not base_usr:
+                continue
+            src_sym = db.lookup_symbol(derived_usr)
+            if src_sym is None:
+                continue
+            dst_id = db.mint_symbol_id(base_usr)
+            acc_map = {
+                cx.AccessSpecifier.PUBLIC: 1,
+                cx.AccessSpecifier.PROTECTED: 2,
+                cx.AccessSpecifier.PRIVATE: 3,
+            }
+            base_access: Optional[int] = acc_map.get(cursor.access_specifier)
+            is_virtual: Optional[int] = (
+                1 if _lib.clang_isVirtualBase(cursor) else 0
+            )
+            db.add_edge(src_sym.id, dst_id, 2,  # inherits
+                        base_access=base_access, is_virtual=is_virtual)
+            continue
+
+        # -- FIELD_DECL: field_of -----------------------------------------
+        if ck == cx.CursorKind.FIELD_DECL:
+            member_usr = cursor.get_usr()
+            if not member_usr:
+                continue
+            owner = cursor.semantic_parent
+            if owner is None or owner.kind == cx.CursorKind.TRANSLATION_UNIT:
+                continue
+            owner_usr = owner.get_usr()
+            if not owner_usr:
+                continue
+            src_sym = db.lookup_symbol(member_usr)
+            dst_sym = db.lookup_symbol(owner_usr)
+            if src_sym is None or dst_sym is None:
+                continue
+            db.add_edge(src_sym.id, dst_sym.id, 8)  # field_of
+            continue
+
+        # -- CXX_METHOD/CONSTRUCTOR/DESTRUCTOR: method_of -----------------
+        if ck in (cx.CursorKind.CXX_METHOD, cx.CursorKind.CONSTRUCTOR,
+                  cx.CursorKind.DESTRUCTOR):
+            method_usr = cursor.get_usr()
+            if not method_usr:
+                continue
+            owner = cursor.semantic_parent
+            if owner is None or owner.kind == cx.CursorKind.TRANSLATION_UNIT:
+                continue
+            owner_usr = owner.get_usr()
+            if not owner_usr:
+                continue
+            src_sym = db.lookup_symbol(method_usr)
+            dst_sym = db.lookup_symbol(owner_usr)
+            if src_sym is None or dst_sym is None:
+                continue
+            db.add_edge(src_sym.id, dst_sym.id, 9)  # method_of
+
+            # overrides (CXX_METHOD only)
+            if ck == cx.CursorKind.CXX_METHOD:
+                for ov in _get_overridden_cursors(cursor):
+                    ov_usr = ov.get_usr()
+                    if not ov_usr:
+                        continue
+                    dst_ov = db.mint_symbol_id(ov_usr)
+                    db.add_edge(src_sym.id, dst_ov, 6)  # overrides
+            continue
+
+        # -- CLASS_TEMPLATE/FUNCTION_TEMPLATE: template_param -------------
+        if ck in (cx.CursorKind.CLASS_TEMPLATE,
+                  cx.CursorKind.FUNCTION_TEMPLATE):
+            tmpl_usr = cursor.get_usr()
+            if not tmpl_usr:
+                continue
+            tmpl_sym = db.lookup_symbol(tmpl_usr)
+            if tmpl_sym is None:
+                continue
+            _PARAM_KIND_MAP = {
+                cx.CursorKind.TEMPLATE_TYPE_PARAMETER: 1,
+                cx.CursorKind.TEMPLATE_NON_TYPE_PARAMETER: 2,
+                cx.CursorKind.TEMPLATE_TEMPLATE_PARAMETER: 3,
+            }
+            pos = 0
+            for child in cursor.get_children():
+                pk = _PARAM_KIND_MAP.get(child.kind)
+                if pk is None:
+                    continue
+                nm = child.spelling or None
+                db.add_template_param(tmpl_sym.id, pos, pk, name=nm)
+                pos += 1
+            continue
+
+        # -- STRUCT_DECL/CLASS_DECL: specializes --------------------------
+        if ck in (cx.CursorKind.STRUCT_DECL, cx.CursorKind.CLASS_DECL):
+            if not cursor.is_definition():
+                continue
+            primary = _lib.clang_getSpecializedCursorTemplate(cursor)
+            if (primary is None or
+                    primary.kind == cx.CursorKind.NO_DECL_FOUND or
+                    primary.kind == cx.CursorKind.INVALID_FILE or
+                    primary.kind.value <= 0):
+                continue
+            spec_usr = cursor.get_usr()
+            prim_usr = primary.get_usr()
+            if not spec_usr or not prim_usr or spec_usr == prim_usr:
+                continue
+            spec_sym = db.lookup_symbol(spec_usr)
+            if spec_sym is None:
+                continue
+            prim_id = db.mint_symbol_id(prim_usr)
+            db.add_edge(spec_sym.id, prim_id, 4)  # specializes
+
+            # template_arg rows
+            nargs = cursor.get_num_template_arguments()
+            for ai in range(nargs if nargs >= 0 else 0):
+                tak = cursor.get_template_argument_kind(ai)
+                if tak == cx.TemplateArgumentKind.TYPE:
+                    arg_type = cursor.get_template_argument_type(ai)
+                    arg_decl = arg_type.get_declaration()
+                    ref_id: Optional[int] = None
+                    if (arg_decl is not None and
+                            arg_decl.kind != cx.CursorKind.NO_DECL_FOUND):
+                        ref_usr = arg_decl.get_usr()
+                        if ref_usr:
+                            rsym = db.lookup_symbol(ref_usr)
+                            if rsym is not None:
+                                ref_id = rsym.id
+                    db.add_template_arg(spec_sym.id, ai, 1, ref_id=ref_id)
+                elif tak == cx.TemplateArgumentKind.INTEGRAL:
+                    literal = str(cursor.get_template_argument_value(ai))
+                    db.add_template_arg(spec_sym.id, ai, 2, literal=literal)
+                else:
+                    db.add_template_arg(spec_sym.id, ai, int(tak))
+            continue
+
+    # B2: body descent for calls -- recurse into each function-like definition.
+    for cursor in _file_cursors(tu, filename):
+        if cursor.kind not in _FUNCTION_DEF_KINDS:
+            continue
+        if not cursor.is_definition():
+            continue
+        fn_usr = cursor.get_usr()
+        if not fn_usr:
+            continue
+        fn_sym = db.lookup_symbol(fn_usr)
+        if fn_sym is None:
+            continue
+        _body_descent(db, cursor, fn_sym.id, file_id)
+
+
+def index_edges(db: Storage, tu: cx.TranslationUnit, filename: str,
+                file_id: int) -> None:
+    """Extract typed edges from this TU's AST for `filename`.
+
+    Must be called AFTER index_symbols for the same file. Runs inside one
+    transaction (delete stale edges first, then B1 declaration-level + B2
+    body descent).
+    """
+    # Delete stale edges from a previous index of this file.
+    db.delete_edges_for_file(file_id)
+    with db.transaction():
+        _index_edges_notxn(db, tu, filename, file_id)
+
+
 def index_source(db: Storage, filename: str, args: Sequence[str], file_id: int,
                  ignore_system: bool | None = None,
-                 driver: str | None = None) -> dict[str, Any]:
+                 driver: str | None = None,
+                 no_graph: bool = False) -> dict[str, Any]:
     """Parse one source file, index its symbols and its headers, free the TU.
 
     The translation unit exists only inside this call: nothing libclang-owned
@@ -240,6 +685,8 @@ def index_source(db: Storage, filename: str, args: Sequence[str], file_id: int,
     try:
         stored, skipped = index_symbols(db, tu, file_id)
         headers = index_headers(db, tu, ignore_system=ignore_system)
+        if not no_graph:
+            index_edges(db, tu, filename, file_id)
     finally:
         del tu                      # last reference -> native AST freed NOW
     return {"symbols": stored, "skipped": skipped, "headers": headers}

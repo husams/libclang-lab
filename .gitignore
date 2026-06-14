@@ -14,3 +14,13 @@ wheels/
 
 # Cloned example repos for cidx / lab testing
 test-repo/
+
+# Generated indexes, caches, and agent/CI scratch
+.claude/
+.cache/
+cidx-cpp/.cidx-selfindex/
+cidx-cpp/Testing/
+cidx-cpp/logs/
+cidx-cpp/spec/logs/
+cidx-cpp/spec/handoff/
+cidx-cpp/spec/implementation-notes.md

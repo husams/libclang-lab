@@ -77,7 +77,7 @@ void check_migrated(const std::string &db_path) {
     CHECK_MESSAGE(has_col(scols, c), "symbol." << c << " present");
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
-  CHECK(meta_version(raw) == "6");
+  CHECK(meta_version(raw) == "7");
 
   // qual_name: longest parent_usr chain wins; the anonymous-namespace level
   // (empty parent spelling) is skipped.
@@ -111,7 +111,7 @@ void check_migrated(const std::string &db_path) {
   }
 
   // G19: the schema script ran AFTER migration, so idx_symbol_qual (which
-  // references the migrated column) exists.
+  // references the migrated column) exists. v7 also adds idx_edge_src/dst.
   std::set<std::string> indexes;
   auto st = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' "
                         "AND name LIKE 'idx_%'");
@@ -121,7 +121,8 @@ void check_migrated(const std::string &db_path) {
   CHECK(indexes == std::set<std::string>{"idx_symbol_spelling",
                                          "idx_symbol_qual", "idx_symbol_file",
                                          "idx_symbol_parent",
-                                         "idx_symbol_kind"});
+                                         "idx_symbol_kind",
+                                         "idx_edge_src", "idx_edge_dst"});
 }
 
 } // namespace
@@ -229,11 +230,11 @@ TEST_CASE("newer DB opens without refusal (no downgrade path)") {
   const std::string path = tmp + "/future.db";
   {
     cidx::Storage db(path);
-  } // create a fresh v6
+  } // create a fresh v7
   {
     cidx::SqliteDb raw(path);
     raw.exec("ALTER TABLE symbol ADD COLUMN future_col TEXT");
-    raw.exec("UPDATE meta SET value = '7' WHERE key = 'schema_version'");
+    raw.exec("UPDATE meta SET value = '8' WHERE key = 'schema_version'");
   }
   {
     cidx::Storage db(path); // must not throw, must not downgrade
@@ -241,6 +242,6 @@ TEST_CASE("newer DB opens without refusal (no downgrade path)") {
     CHECK(db.get_component_by_name("c").has_value());
   }
   cidx::SqliteDb raw(path);
-  CHECK(meta_version(raw) == "7"); // column-presence detection found no work
+  CHECK(meta_version(raw) == "8"); // column-presence detection found no work
   CHECK(has_col(table_columns(raw, "symbol"), "future_col"));
 }

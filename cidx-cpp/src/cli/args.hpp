@@ -50,6 +50,8 @@ struct ParsedArgs {
   std::optional<std::string> del_path;    // delete --path
   std::optional<std::string> usr;         // delete symbol --usr
   bool dry_run = false;                   // delete --dry-run
+  bool no_graph = false;                  // index --no-graph
+  bool rebuild = false;                   // resolve --rebuild
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

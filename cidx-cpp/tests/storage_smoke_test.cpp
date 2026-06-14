@@ -382,13 +382,13 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v6 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v7 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
   auto &raw = db.raw_db();
 
-  // tables
+  // tables — v7 adds edge_kind, edge, edge_site, template_param, template_arg
   std::set<std::string> tables;
   {
     auto st = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -398,7 +398,9 @@ TEST_CASE("fresh Storage produces schema v6 (file-backed and :memory:)") {
     }
   }
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
-                                        "file", "symbol"});
+                                        "file", "symbol", "edge_kind", "edge",
+                                        "edge_site", "template_param",
+                                        "template_arg"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -425,7 +427,7 @@ TEST_CASE("fresh Storage produces schema v6 (file-backed and :memory:)") {
                               "decl_col", "is_definition", "is_pure", "linkage",
                               "access", "parent_usr", "resolved"});
 
-  // the 5 indexes
+  // the 7 indexes (5 symbol + 2 edge)
   std::set<std::string> indexes;
   {
     auto st = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' "
@@ -437,14 +439,15 @@ TEST_CASE("fresh Storage produces schema v6 (file-backed and :memory:)") {
   CHECK(indexes == std::set<std::string>{"idx_symbol_spelling",
                                          "idx_symbol_qual", "idx_symbol_file",
                                          "idx_symbol_parent",
-                                         "idx_symbol_kind"});
+                                         "idx_symbol_kind",
+                                         "idx_edge_src", "idx_edge_dst"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "6");
+    CHECK(st.col_text(0) == "7");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

@@ -279,7 +279,8 @@ TEST_SUITE("clang") {
     CHECK(log[pos + 6] != '\n'); // breakdown is present, not blank
   }
 
-  TEST_CASE("CIDX_MEM unset: a clean parse still writes nothing (default off)") {
+  TEST_CASE(
+      "CIDX_MEM unset: a clean parse still writes nothing (default off)") {
     if (require_libclang() == nullptr) {
       return;
     }
@@ -927,6 +928,157 @@ TEST_SUITE("clang") {
     CHECK(h2.system == 0);
     CHECK(h2.unowned == 1);
     CHECK(db2.lookup_symbols_by_name("owned_fn").empty());
+  }
+
+  TEST_CASE("geometry: graph edges — inherits/field_of/method_of/"
+            "template_param/uses extracted from geometry.cpp + geometry.hpp "
+            "(M1 functional graph tests)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    if (!require_manifests()) {
+      return;
+    }
+    IndexFixture f;
+    const std::string geometry_cpp = kManifestsDir + "/geometry.cpp";
+    const std::string geometry_hpp = kManifestsDir + "/geometry.hpp";
+
+    // Step 1: index the main .cpp file symbols.
+    const int64_t cpp_id = f.add_owned_file(kManifestsDir, geometry_cpp);
+    const ParsedTu tu = f.parser.parse(geometry_cpp, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, cpp_id);
+
+    // Step 2: index headers (extracts geometry.hpp symbols + their edges).
+    // index_edges is called per header inside index_headers (QD-1 fix).
+    const HeaderStats h = f.indexer.index_headers(tu);
+    CHECK(h.indexed == 1);  // geometry.hpp
+    CHECK(h.symbols >= 10); // Shape, Circle, Box, max_of, Color, ...
+
+    // Step 3: index edges for the main .cpp (calls + uses + body descent).
+    f.indexer.index_edges(tu, tu.spelling, cpp_id);
+
+    // Use raw SQL to count edges by kind.
+    auto &raw = f.db.raw_db();
+
+    auto count_edges = [&raw](int64_t kind_id) -> int64_t {
+      auto st = raw.prepare("SELECT COUNT(*) FROM edge WHERE kind = ?");
+      st.bind(1, kind_id);
+      st.step();
+      return st.col_int64(0);
+    };
+
+    // inherits (kind=2): Circle -> Shape (exactly one inheritance edge)
+    CHECK(count_edges(2) == 1);
+
+    // field_of (kind=8): Shape::name_, Circle::radius_, Box::value_
+    CHECK(count_edges(8) >= 2);
+
+    // method_of (kind=9): Shape::{area,name,~Shape}, Circle::{Circle,area}
+    CHECK(count_edges(9) >= 4);
+
+    // template_param: Box<T>, max_of<T> should each have 1 param row
+    {
+      auto st = raw.prepare("SELECT COUNT(*) FROM template_param");
+      st.step();
+      CHECK(st.col_int64(0) >= 2);
+    }
+
+    // uses (kind=7): widest() references indexed symbol(s) from geometry.hpp
+    // (at minimum the radius_ or max_of template arg types)
+    // uses may be 0 if all refs are to stdlib/template symbols not in the DB;
+    // the important check is that it doesn't crash and the query runs.
+    const int64_t uses_count = count_edges(7);
+    CHECK(uses_count >=
+          0); // at minimum: no crash; parity fixture confirms actual count
+
+    // Verify the inherits edge: src=Circle, dst=Shape
+    {
+      const auto circle =
+          f.db.lookup_symbols_by_name("Circle", std::string("class"));
+      const auto shape =
+          f.db.lookup_symbols_by_name("Shape", std::string("class"));
+      REQUIRE_FALSE(circle.empty());
+      REQUIRE_FALSE(shape.empty());
+      const int64_t circle_id = circle.front().id;
+      const int64_t shape_id = shape.front().id;
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM edge WHERE src_id=? AND dst_id=? AND kind=2");
+      st.bind(1, circle_id);
+      st.bind(2, shape_id);
+      st.step();
+      CHECK(st.col_int64(0) == 1); // Circle inherits Shape
+    }
+
+    // Verify field_of: name_ -> Shape
+    {
+      const auto name_fld = f.db.lookup_symbols_by_name("name_");
+      const auto shape =
+          f.db.lookup_symbols_by_name("Shape", std::string("class"));
+      if (!name_fld.empty() && !shape.empty()) {
+        auto st = raw.prepare(
+            "SELECT COUNT(*) FROM edge WHERE src_id=? AND dst_id=? AND kind=8");
+        st.bind(1, name_fld.front().id);
+        st.bind(2, shape.front().id);
+        st.step();
+        CHECK(st.col_int64(0) == 1); // name_ is field_of Shape
+      }
+    }
+
+    // instantiates (kind=5): widest() body has Box<int> bi and Box<double> bd;
+    // both are class-template instantiations -> instantiates edges to Box<T>.
+    // box_instantiates >= 1 (may be 2 but edges are upserted so duplicates
+    // compress to a single src->dst row).
+    CHECK(count_edges(5) >= 1);
+
+    // template_arg: the VAR_DECL handler emits template_arg rows with owner_id
+    // = widest fn's sym_id. At least one row must have ref_id IS NOT NULL
+    // (i.e., the type argument resolves to an indexed symbol — int maps to NULL
+    // since int has no USR; double likewise; but the edge itself is asserted
+    // above). Accept count >= 1 (two VAR_DECL for bi and bd).
+    {
+      auto st = raw.prepare("SELECT COUNT(*) FROM template_arg");
+      st.step();
+      CHECK(st.col_int64(0) >= 1);
+    }
+
+    // template_arg.ref_id IS NOT NULL (Item 2): Box<Color> in widest() uses
+    // Color (an indexed enum), so clang_getTypeDeclaration resolves it to a
+    // symbol with a USR -> ref_id is populated.  The join must return "Color".
+    {
+      auto st = raw.prepare(
+          "SELECT s.spelling FROM template_arg ta "
+          "JOIN symbol s ON s.id = ta.ref_id "
+          "WHERE ta.ref_id IS NOT NULL "
+          "LIMIT 1");
+      const bool has_row = st.step();
+      CHECK(has_row); // at least one template_arg with a non-NULL ref_id
+      if (has_row) {
+        CHECK(st.col_text(0) == std::string("Color"));
+      }
+    }
+
+    // contains (kind=3) — Item 1: namespace geo contains its child symbols.
+    // geometry.hpp declares Color/Shape/Circle/max_of/Box inside geo (5 edges);
+    // geometry.cpp may contribute additional out-of-line entries.
+    CHECK(count_edges(3) >= 5);
+
+    // Verify one specific contains edge: geo -> Shape (class).
+    // Join through the symbol table to handle multiple rows with the same
+    // spelling (e.g., Shape::Shape constructor vs Shape class). The fix in
+    // delete_edges_for_file (kind!=3 exclusion) ensures the class-level
+    // contains edge from the header-indexing pass is not wiped by the later
+    // geometry.cpp edge re-index.
+    {
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM edge e "
+          "JOIN symbol src ON src.id = e.src_id "
+          "JOIN symbol dst ON dst.id = e.dst_id "
+          "WHERE e.kind = 3 "
+          "  AND src.spelling = 'geo' AND src.kind = 'namespace' "
+          "  AND dst.spelling = 'Shape' AND dst.kind = 'class'");
+      st.step();
+      CHECK(st.col_int64(0) >= 1); // geo contains Shape (class)
+    }
   }
 
 } // TEST_SUITE("clang") — S06

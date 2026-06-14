@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <functional>
 #include <map>
 #include <optional>
@@ -126,6 +127,10 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
     const ParsedTu tu = parser.parse(path, opts, rec.driver);
     stored = indexer.index_symbols(tu, path, rec.id);
     hs = indexer.index_headers(tu);
+    // v7: extract graph edges AFTER symbols so src_id lookups hit real rows.
+    // index_edges opens its own transaction; it's a no-op when graph_enabled_
+    // is false (--no-graph was passed).
+    indexer.index_edges(tu, path, rec.id);
   } catch (const ClangParseError &e) {
     *ctx.err << "error: " << e.what() << "\n";
     return 1;
@@ -398,6 +403,8 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     Toolchain toolchain(log);
     Parser parser(toolchain, log);
     AstIndexer indexer(db, log);
+    // v7: --no-graph disables edge extraction for this run.
+    indexer.set_graph_enabled(!args.no_graph);
     rc = !args.files.empty()
              ? index_files(db, parser, indexer, args.files, root, ctx)
              : index_pending(db, parser, indexer, ctx);
@@ -871,6 +878,35 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx) {
       "symbol", "symbols");
 }
 
+int cmd_resolve(const ParsedArgs &args, Context &ctx) {
+  Storage db(ctx.index_path);
+  if (args.rebuild) {
+    // Clear all edge, edge_site (CASCADE), template_param, template_arg rows.
+    // Then fall through to resolve_pass so the summary line is identical
+    // to a non-rebuild run (parity with Python cli.py:cmd_resolve).
+    db.raw_db().exec("DELETE FROM template_arg");
+    db.raw_db().exec("DELETE FROM template_param");
+    db.raw_db().exec("DELETE FROM edge");
+  }
+  const int stubs = db.resolve_pass();
+  const std::vector<Edge> cross = db.cross_repo_edges();
+  // ISO 8601 UTC timestamp matching Python's
+  // datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ").
+  {
+    std::time_t now = std::time(nullptr);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
+    auto st = db.raw_db().prepare(
+        "INSERT OR REPLACE INTO meta (key, value) "
+        "VALUES ('graph_resolved_at', ?)");
+    st.bind(1, std::string_view(buf));
+    st.step_done();
+  }
+  *ctx.out << "resolve: " << stubs << " still-stub, "
+           << cross.size() << " cross-repo edge(s)\n";
+  return 0;
+}
+
 int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "init") {
     return cmd_init(args, ctx);
@@ -883,6 +919,9 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   }
   if (args.command == "index") {
     return cmd_index(args, ctx);
+  }
+  if (args.command == "resolve") {
+    return cmd_resolve(args, ctx);
   }
   if (args.command == "search") {
     return cmd_search(args, ctx);

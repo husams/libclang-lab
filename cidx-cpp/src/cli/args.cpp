@@ -19,21 +19,23 @@ namespace {
 // ---------------------------------------------------------------------------
 
 const char kTopUsage[] =
-    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls,delete} "
+    "usage: cidx [-h] "
+    "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] "
-    "{init,add-source,import,index,search,show,list,ls,delete} ...\n"
+    "{init,add-source,import,index,resolve,search,show,list,ls,delete} ...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,index,search,show,list,ls,delete}\n"
+    "  {init,add-source,import,index,resolve,search,show,list,ls,delete}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
     "    index               index imported C/C++ files\n"
+    "    resolve             finalize cross-repo edges and roll up edge counts\n"
     "    search              fuzzy-search symbols by qualified name\n"
     "    show                show full details of one symbol or file\n"
     "    list (ls)           browse the index: components, dirs, files, "
@@ -85,10 +87,10 @@ const char kImportHelp[] =
     "               indexed symbols) before importing\n";
 
 const char kIndexUsage[] =
-    "usage: cidx index [-h] [--source COMPONENT] [files ...]\n";
+    "usage: cidx index [-h] [--source COMPONENT] [--no-graph] [files ...]\n";
 
 const char kIndexHelp[] =
-    "usage: cidx index [-h] [--source COMPONENT] [files ...]\n"
+    "usage: cidx index [-h] [--source COMPONENT] [--no-graph] [files ...]\n"
     "\n"
     "positional arguments:\n"
     "  files               restrict to these files (default: all pending)\n"
@@ -97,7 +99,18 @@ const char kIndexHelp[] =
     "  -h, --help          show this help message and exit\n"
     "  --source COMPONENT  resolve relative FILE paths against this "
     "component's\n"
-    "                      root\n";
+    "                      root\n"
+    "  --no-graph          skip relationship-graph extraction (calls, inherits, …)\n";
+
+const char kResolveUsage[] =
+    "usage: cidx resolve [-h] [--rebuild]\n";
+
+const char kResolveHelp[] =
+    "usage: cidx resolve [-h] [--rebuild]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help   show this help message and exit\n"
+    "  --rebuild    clear all edges before resolving (forces full re-extract)\n";
 
 // The 17 symbol kinds, sorted — sorted(SYMBOL_KINDS) in cli.py.
 #define CIDX_KIND_BRACE                                                        \
@@ -367,8 +380,8 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",   "add-source", "import", "index",
-    "search", "show",       "list",   "ls",    "delete"};
+    "init",   "add-source", "import", "index",  "resolve",
+    "search", "show",       "list",   "ls",     "delete"};
 const std::vector<std::string> kShowWhats = {"symbol", "file"};
 const std::vector<std::string> kListWhats = {"components", "dirs", "files",
                                              "symbols"};
@@ -799,9 +812,22 @@ const Spec kIndexSpec = {
     kIndexHelp,
     {
         {"--source", '\0', ValueKind::kString, "--source", nullptr, 0},
+        {"--no-graph", '\0', ValueKind::kNone, "--no-graph", nullptr, 0},
     },
     {},
     true, // files: nargs="*"
+    {},
+};
+
+const Spec kResolveSpec = {
+    "cidx resolve",
+    kResolveUsage,
+    kResolveHelp,
+    {
+        {"--rebuild", '\0', ValueKind::kNone, "--rebuild", nullptr, 0},
+    },
+    {},
+    false,
     {},
 };
 
@@ -1017,6 +1043,14 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     }
     pa.files = st.rest;
     pa.source = opt_value(st, "--source");
+    pa.no_graph = st.flags.count("--no-graph") != 0;
+  } else if (pa.command == "resolve") {
+    ParseState st = parse_leaf(kResolveSpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kResolveHelp;
+      return pa;
+    }
+    pa.rebuild = st.flags.count("--rebuild") != 0;
   } else if (pa.command == "search") {
     ParseState st = parse_leaf(kSearchSpec, argv, i, extras);
     if (st.help) {

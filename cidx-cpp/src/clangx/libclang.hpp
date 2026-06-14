@@ -196,6 +196,92 @@ public:
     ::clang_getInclusions(tu, visitor, client_data);
   }
 
+  // -- v7 graph layer forwarding methods -------------------------------------
+
+  // Returns the cursor that a reference/call/base-spec points to. Returns the
+  // null cursor when there is no referenced entity.
+  CXCursor clang_getCursorReferenced(CXCursor c) const {
+    return ::clang_getCursorReferenced(c);
+  }
+
+  // 1 when the cursor is a virtual-base CXX_BASE_SPECIFIER; 0 otherwise.
+  unsigned clang_isVirtualBase(CXCursor c) const {
+    return ::clang_isVirtualBase(c);
+  }
+
+  // 1 when the CXXMethod cursor is declared virtual.
+  unsigned clang_CXXMethod_isVirtual(CXCursor c) const {
+    return ::clang_CXXMethod_isVirtual(c);
+  }
+
+  // For a specialization cursor, returns the primary template.
+  CXCursor clang_getSpecializedCursorTemplate(CXCursor c) const {
+    return ::clang_getSpecializedCursorTemplate(c);
+  }
+
+  // Overridden cursors — caller MUST release with clang_disposeOverriddenCursors.
+  void clang_getOverriddenCursors(CXCursor cursor,
+                                  CXCursor **overridden,
+                                  unsigned *num_overridden) const {
+    ::clang_getOverriddenCursors(cursor, overridden, num_overridden);
+  }
+
+  void clang_disposeOverriddenCursors(CXCursor *overridden) const {
+    ::clang_disposeOverriddenCursors(overridden);
+  }
+
+  // Number of template arguments on a cursor (e.g. a specialization decl).
+  // Returns -1 when the cursor has no template arguments.
+  int clang_Cursor_getNumTemplateArguments(CXCursor c) const {
+    return ::clang_Cursor_getNumTemplateArguments(c);
+  }
+
+  // Kind of the i-th template argument (CXTemplateArgumentKind_Type, etc.).
+  enum CXTemplateArgumentKind
+  clang_Cursor_getTemplateArgumentKind(CXCursor c, unsigned i) const {
+    return ::clang_Cursor_getTemplateArgumentKind(c, i);
+  }
+
+  // Type of a type template argument.
+  CXType clang_Cursor_getTemplateArgumentType(CXCursor c, unsigned i) const {
+    return ::clang_Cursor_getTemplateArgumentType(c, i);
+  }
+
+  // Value of an integral template argument.
+  long long clang_Cursor_getTemplateArgumentValue(CXCursor c, unsigned i) const {
+    return ::clang_Cursor_getTemplateArgumentValue(c, i);
+  }
+
+  // Declaration cursor for a type (e.g. the class decl behind a specialization
+  // type). May return null cursor when there is no declaration.
+  CXCursor clang_getTypeDeclaration(CXType t) const {
+    return ::clang_getTypeDeclaration(t);
+  }
+
+  // Number of template arguments on a type (e.g. vector<int> -> 1).
+  int clang_Type_getNumTemplateArguments(CXType t) const {
+    return ::clang_Type_getNumTemplateArguments(t);
+  }
+
+  // i-th type template argument of a type.
+  CXType clang_Type_getTemplateArgumentAsType(CXType t, unsigned i) const {
+    return ::clang_Type_getTemplateArgumentAsType(t, i);
+  }
+
+  // Canonical cursor (dedup): collapses multiple declarations to one.
+  CXCursor clang_getCanonicalCursor(CXCursor c) const {
+    return ::clang_getCanonicalCursor(c);
+  }
+
+  // Null cursor guard.
+  CXCursor clang_getNullCursor() const { return ::clang_getNullCursor(); }
+  int clang_Cursor_isNull(CXCursor c) const { return ::clang_Cursor_isNull(c); }
+
+  // Cursor equality.
+  unsigned clang_equalCursors(CXCursor a, CXCursor b) const {
+    return ::clang_equalCursors(a, b);
+  }
+
   // CompilationDatabase
   CXCompilationDatabase
   clang_CompilationDatabase_fromDirectory(const char *dir,
@@ -255,6 +341,31 @@ public:
 private:
   const LibClang *lib_;
   CXString s_;
+};
+
+// RAII for clang_getOverriddenCursors (mirrors CxString).
+// Holds an owned array of overridden cursors; frees it on destruction.
+class CxOverriddenCursors {
+public:
+  CxOverriddenCursors(const LibClang &lib, CXCursor cursor) : lib_(&lib) {
+    lib_->clang_getOverriddenCursors(cursor, &cursors_, &num_);
+  }
+  ~CxOverriddenCursors() {
+    if (cursors_ != nullptr) {
+      lib_->clang_disposeOverriddenCursors(cursors_);
+    }
+  }
+  CxOverriddenCursors(const CxOverriddenCursors &) = delete;
+  CxOverriddenCursors &operator=(const CxOverriddenCursors &) = delete;
+
+  unsigned size() const noexcept { return num_; }
+  // Index access; caller must check i < size().
+  CXCursor operator[](unsigned i) const { return cursors_[i]; }
+
+private:
+  const LibClang *lib_;
+  CXCursor *cursors_ = nullptr;
+  unsigned num_ = 0;
 };
 
 } // namespace cidx
