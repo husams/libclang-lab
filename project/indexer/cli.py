@@ -480,6 +480,150 @@ def cmd_show_file(args) -> int:
     return 0
 
 
+# -- delete -------------------------------------------------------------------
+
+def _plural(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+def _selector_str(args) -> str:
+    """The selector the user passed, for error messages: '--name foo'."""
+    for flag in ("id", "name", "path", "usr"):
+        val = getattr(args, flag, None)
+        if val is not None:
+            return f"--{flag} {val}"
+    return "<no selector>"
+
+
+def _under_component(abs_path: str | None, comp) -> bool:
+    """True when comp is None, or abs_path lies within the component root."""
+    if comp is None:
+        return True
+    if abs_path is None:
+        return False
+    root = comp.path.rstrip(os.sep)
+    return abs_path == root or abs_path.startswith(root + os.sep)
+
+
+def _finish_delete(args, ids, lines, delete_fn, singular, plural) -> int:
+    """Shared tail: print the matched rows, delete (unless --dry-run), summarize."""
+    for line in lines:
+        print(line)
+    if not args.dry_run:
+        for row_id in ids:
+            delete_fn(row_id)
+    verb = "would delete" if args.dry_run else "deleted"
+    print(f"{verb} {len(ids)} {_plural(len(ids), singular, plural)}")
+    return 0
+
+
+def cmd_delete_component(args) -> int:
+    with Storage(args.index) as db:
+        if args.id is not None:
+            c = db.get_component_by_id(args.id)
+            matches = [c] if c else []
+        elif args.path is not None:
+            c = db.get_component(os.path.abspath(args.path))
+            matches = [c] if c else []
+        else:
+            matches = [c for c in db.list_components() if c.name == args.name]
+        if not matches:
+            print(f"error: no component matches {_selector_str(args)}",
+                  file=sys.stderr)
+            return 1
+        lines = [f"  #{c.id}  {c.name} ({c.kind})  {c.path}" for c in matches]
+        return _finish_delete(args, [c.id for c in matches], lines,
+                              db.delete_component, "component", "components")
+
+
+def cmd_delete_dir(args) -> int:
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        if args.id is not None:
+            d = db.get_directory_by_id(args.id)
+            matches = [d] if d and _under_component(
+                db.directory_abs_path(d.id), comp) else []
+        else:
+            target = os.path.abspath(args.path)
+            matches = [d for d, _cn in db.list_directories(
+                          component_id=comp.id if comp else None)
+                       if db.directory_abs_path(d.id) == target]
+        if not matches:
+            print(f"error: no directory matches {_selector_str(args)}",
+                  file=sys.stderr)
+            return 1
+        lines = [f"  #{d.id}  {db.directory_abs_path(d.id)}" for d in matches]
+        return _finish_delete(args, [d.id for d in matches], lines,
+                              db.delete_directory, "directory", "directories")
+
+
+def cmd_delete_file(args) -> int:
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        matches = []  # list of (file_id, abs_path)
+        if args.id is not None:
+            rec = db.get_file_by_id(args.id)
+            ap = db.file_abs_path(rec.id) if rec else None
+            if rec and _under_component(ap, comp):
+                matches = [(rec.id, ap)]
+        elif args.path is not None:
+            ap = resolve_file_arg(args.path, comp.path if comp else None)
+            rec = db.get_file(ap)
+            if rec and _under_component(ap, comp):
+                matches = [(rec.id, ap)]
+        else:
+            matches = [(f.id, ap) for f, ap in db.files()
+                       if os.path.basename(ap) == args.name
+                       and _under_component(ap, comp)]
+        if not matches:
+            print(f"error: no file matches {_selector_str(args)}",
+                  file=sys.stderr)
+            return 1
+        lines = [f"  #{fid}  {ap}" for fid, ap in matches]
+        return _finish_delete(args, [fid for fid, _ in matches], lines,
+                              db.delete_file, "file", "files")
+
+
+def cmd_delete_symbol(args) -> int:
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        if args.id is not None:
+            s = db.lookup_symbol_by_id(args.id)
+            matches = [s] if s else []
+        elif args.usr is not None:
+            s = db.lookup_symbol(args.usr)
+            matches = [s] if s else []
+        else:
+            matches = db.lookup_symbols_by_name(args.name)
+        if comp is not None:
+            def in_comp(s):
+                here = db.file_abs_path(s.file_id) if s.file_id else None
+                decl = db.file_abs_path(s.decl_file_id) if s.decl_file_id else None
+                return (here is not None and _under_component(here, comp)) or \
+                       (decl is not None and _under_component(decl, comp))
+            matches = [s for s in matches if in_comp(s)]
+        if not matches:
+            print(f"error: no symbol matches {_selector_str(args)}",
+                  file=sys.stderr)
+            return 1
+        lines = [f"  #{s.id}  {s.kind}  {s.qual_name or s.spelling}"
+                 for s in matches]
+        return _finish_delete(args, [s.id for s in matches], lines,
+                              db.delete_symbol, "symbol", "symbols")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx",
                                  description="cidx command-line skeleton")
@@ -591,6 +735,53 @@ def main(argv=None) -> int:
     q.add_argument("--limit", type=int, default=50, metavar="N",
                    help="show at most N matches (0 = all; default 50)")
     q.set_defaults(fn=cmd_list_symbols)
+
+    p = sub.add_parser("delete",
+                       help="delete a component, directory, file, or symbol")
+    dsub = p.add_subparsers(dest="what", required=True)
+
+    def _dry_run(q):
+        q.add_argument("--dry-run", action="store_true",
+                       help="preview the matches without deleting anything")
+
+    q = dsub.add_parser("component",
+                        help="delete a component and everything indexed from it")
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="component id")
+    g.add_argument("--name", metavar="NAME", help="component name")
+    g.add_argument("--path", metavar="PATH", help="component root path")
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_component)
+
+    q = dsub.add_parser("dir",
+                        help="delete a directory, its files, and their symbols")
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="directory id")
+    g.add_argument("--path", metavar="PATH", help="directory path")
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict the match to this component")
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_dir)
+
+    q = dsub.add_parser("file", help="delete a file and its symbols")
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="file id")
+    g.add_argument("--name", metavar="NAME", help="file basename")
+    g.add_argument("--path", metavar="PATH", help="file path")
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict the match to this component")
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_file)
+
+    q = dsub.add_parser("symbol", help="delete a symbol")
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="symbol id")
+    g.add_argument("--name", metavar="NAME", help="symbol spelling")
+    g.add_argument("--usr", metavar="USR", help="clang USR")
+    q.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict the match to this component")
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_symbol)
 
     args = ap.parse_args(argv)
     args.index = index_path()

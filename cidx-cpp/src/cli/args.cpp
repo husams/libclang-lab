@@ -19,15 +19,17 @@ namespace {
 // ---------------------------------------------------------------------------
 
 const char kTopUsage[] =
-    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls} ...\n";
+    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls,delete} "
+    "...\n";
 
 const char kTopHelp[] =
-    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls} ...\n"
+    "usage: cidx [-h] "
+    "{init,add-source,import,index,search,show,list,ls,delete} ...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,index,search,show,list,ls}\n"
+    "  {init,add-source,import,index,search,show,list,ls,delete}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
@@ -36,6 +38,7 @@ const char kTopHelp[] =
     "    show                show full details of one symbol or file\n"
     "    list (ls)           browse the index: components, dirs, files, "
     "symbols\n"
+    "    delete              delete a component, directory, file, or symbol\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n";
@@ -274,6 +277,84 @@ const char kListSymbolsHelp[] =
     "                        restrict to one symbol kind\n"
     "  --limit N             show at most N matches (0 = all; default 50)\n";
 
+const char kDeleteUsage[] =
+    "usage: cidx delete [-h] {component,dir,file,symbol} ...\n";
+
+const char kDeleteHelp[] =
+    "usage: cidx delete [-h] {component,dir,file,symbol} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {component,dir,file,symbol}\n"
+    "    component           delete a component and everything indexed from it\n"
+    "    dir                 delete a directory, its files, and their symbols\n"
+    "    file                delete a file and its symbols\n"
+    "    symbol              delete a symbol\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kDeleteComponentUsage[] =
+    "usage: cidx delete component [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                             [--dry-run]\n";
+
+const char kDeleteComponentHelp[] =
+    "usage: cidx delete component [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                             [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help   show this help message and exit\n"
+    "  --id ID      component id\n"
+    "  --name NAME  component name\n"
+    "  --path PATH  component root path\n"
+    "  --dry-run    preview the matches without deleting anything\n";
+
+const char kDeleteDirUsage[] =
+    "usage: cidx delete dir [-h] (--id ID | --path PATH) [--component NAME]\n"
+    "                       [--dry-run]\n";
+
+const char kDeleteDirHelp[] =
+    "usage: cidx delete dir [-h] (--id ID | --path PATH) [--component NAME]\n"
+    "                       [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --id ID               directory id\n"
+    "  --path PATH           directory path\n"
+    "  --component, -c NAME  restrict the match to this component\n"
+    "  --dry-run             preview the matches without deleting anything\n";
+
+const char kDeleteFileUsage[] =
+    "usage: cidx delete file [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                        [--component NAME] [--dry-run]\n";
+
+const char kDeleteFileHelp[] =
+    "usage: cidx delete file [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                        [--component NAME] [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --id ID               file id\n"
+    "  --name NAME           file basename\n"
+    "  --path PATH           file path\n"
+    "  --component, -c NAME  restrict the match to this component\n"
+    "  --dry-run             preview the matches without deleting anything\n";
+
+const char kDeleteSymbolUsage[] =
+    "usage: cidx delete symbol [-h] (--id ID | --name NAME | --usr USR)\n"
+    "                          [--component NAME] [--dry-run]\n";
+
+const char kDeleteSymbolHelp[] =
+    "usage: cidx delete symbol [-h] (--id ID | --name NAME | --usr USR)\n"
+    "                          [--component NAME] [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --id ID               symbol id\n"
+    "  --name NAME           symbol spelling\n"
+    "  --usr USR             clang USR\n"
+    "  --component, -c NAME  restrict the match to this component\n"
+    "  --dry-run             preview the matches without deleting anything\n";
+
 // ---------------------------------------------------------------------------
 // Choice sets
 // ---------------------------------------------------------------------------
@@ -286,10 +367,13 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init", "add-source", "import", "index", "search", "show", "list", "ls"};
+    "init",   "add-source", "import", "index",
+    "search", "show",       "list",   "ls",    "delete"};
 const std::vector<std::string> kShowWhats = {"symbol", "file"};
 const std::vector<std::string> kListWhats = {"components", "dirs", "files",
                                              "symbols"};
+const std::vector<std::string> kDeleteWhats = {"component", "dir", "file",
+                                               "symbol"};
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -315,6 +399,9 @@ struct Spec {
   bool rest = false;                     // collect surplus (index FILE...)
   // names reported by the required check, in argparse action-add order
   std::vector<const char *> required;
+  // mutex group ids that argparse marks required: when none of a group's
+  // members is seen, argparse fails with "one of the arguments ... is required"
+  std::vector<int> required_mutex = {};
 };
 
 struct ParseState {
@@ -577,6 +664,24 @@ ParseState parse_leaf(const Spec &spec, const std::vector<std::string> &tokens,
   if (!missing.empty()) {
     fail(spec, "the following arguments are required: " + join(missing, ", "));
   }
+  // Required mutually-exclusive groups: argparse fails when none of the
+  // group's members was supplied. Members are listed in spec.opts order.
+  for (const int grp : spec.required_mutex) {
+    std::vector<std::string> members;
+    bool seen = false;
+    for (const OptSpec &o : spec.opts) {
+      if (o.mutex == grp) {
+        members.emplace_back(o.name);
+        if (st.values.find(o.name) != st.values.end() ||
+            st.flags.find(o.name) != st.flags.end()) {
+          seen = true;
+        }
+      }
+    }
+    if (!seen) {
+      fail(spec, "one of the arguments " + join(members, " ") + " is required");
+    }
+  }
   return st;
 }
 
@@ -787,6 +892,72 @@ const Spec kListSymbolsSpec = {
     {},
 };
 
+const Spec kDeleteComponentSpec = {
+    "cidx delete component",
+    kDeleteComponentUsage,
+    kDeleteComponentHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kDeleteDirSpec = {
+    "cidx delete dir",
+    kDeleteDirUsage,
+    kDeleteDirHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kDeleteFileSpec = {
+    "cidx delete file",
+    kDeleteFileUsage,
+    kDeleteFileHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kDeleteSymbolSpec = {
+    "cidx delete symbol",
+    kDeleteSymbolUsage,
+    kDeleteSymbolHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
+        {"--usr", '\0', ValueKind::kString, "--usr", nullptr, 1},
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
 } // namespace
 
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
@@ -887,7 +1058,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.file = st.positionals[0];
       pa.component = opt_value(st, "--component");
     }
-  } else { // list / ls
+  } else if (pa.command == "list") { // list / ls
     CommandScan what = scan_command(argv, i, extras);
     if (what.help) {
       pa.help_text = kListHelp;
@@ -951,6 +1122,52 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.kind = opt_value(st, "--kind");
       pa.limit = int_value(st, "--limit", 50);
     }
+  } else { // delete
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kDeleteHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kDeleteUsage, "cidx delete",
+           "the following arguments are required: what");
+    }
+    if (!contains(kDeleteWhats, *what.command)) {
+      fail(kDeleteUsage, "cidx delete",
+           "argument what: invalid choice: '" + *what.command +
+               "' (choose from " + join(kDeleteWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+    const Spec *spec = nullptr;
+    const char *leaf_help = nullptr;
+    if (pa.what == "component") {
+      spec = &kDeleteComponentSpec;
+      leaf_help = kDeleteComponentHelp;
+    } else if (pa.what == "dir") {
+      spec = &kDeleteDirSpec;
+      leaf_help = kDeleteDirHelp;
+    } else if (pa.what == "file") {
+      spec = &kDeleteFileSpec;
+      leaf_help = kDeleteFileHelp;
+    } else {
+      spec = &kDeleteSymbolSpec;
+      leaf_help = kDeleteSymbolHelp;
+    }
+    ParseState st = parse_leaf(*spec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = leaf_help;
+      return pa;
+    }
+    if (const std::optional<std::string> id = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*id, parsed); // validated at encounter time
+      pa.del_id = static_cast<int64_t>(parsed);
+    }
+    pa.name = opt_value(st, "--name");
+    pa.del_path = opt_value(st, "--path");
+    pa.usr = opt_value(st, "--usr");
+    pa.component = opt_value(st, "--component");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
   }
 
   // argparse parse_args: anything parse_known_args left over is reported by

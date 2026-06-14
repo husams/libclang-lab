@@ -319,7 +319,8 @@ struct GoldFixture {
 // Usage blocks shared by several expected error messages (transcribed from
 // the captured Python argparse output, COLUMNS=80).
 const char kTopUsage[] =
-    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls} ...\n";
+    "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls,delete} "
+    "...\n";
 
 const char kSearchUsage[] =
     "usage: cidx search [-h]\n"
@@ -358,7 +359,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, add-source, import, index, search, show, list, ls)\n");
+            "from init, add-source, import, index, search, show, list, ls, "
+            "delete)\n");
 }
 
 TEST_CASE("args: unknown flag -> exit 2, TOP-level unrecognized arguments") {
@@ -501,6 +503,121 @@ TEST_CASE("args: --indexed and --pending are mutually exclusive (exit 2)") {
                      "allowed with argument --pending\n");
 }
 
+TEST_CASE("args: delete needs a sub-command; invalid what -> exit 2") {
+  // $ python3 -m indexer delete
+  ParseFail f = parse_fail({"delete"});
+  CHECK(f.code == 2);
+  CHECK(f.msg == "usage: cidx delete [-h] {component,dir,file,symbol} ...\n"
+                 "cidx delete: error: the following arguments are required: "
+                 "what\n");
+  // $ python3 -m indexer delete bogus
+  f = parse_fail({"delete", "bogus"});
+  CHECK(f.msg == "usage: cidx delete [-h] {component,dir,file,symbol} ...\n"
+                 "cidx delete: error: argument what: invalid choice: 'bogus' "
+                 "(choose from component, dir, file, symbol)\n");
+}
+
+TEST_CASE("args: delete requires one selector (required mutex group)") {
+  // $ python3 -m indexer delete symbol   -> one of --id --name --usr required
+  ParseFail f = parse_fail({"delete", "symbol"});
+  CHECK(f.code == 2);
+  CHECK(f.msg ==
+        "usage: cidx delete symbol [-h] (--id ID | --name NAME | --usr USR)\n"
+        "                          [--component NAME] [--dry-run]\n"
+        "cidx delete symbol: error: one of the arguments --id --name --usr is "
+        "required\n");
+  // dir's group is just --id | --path
+  f = parse_fail({"delete", "dir"});
+  CHECK(f.msg ==
+        "usage: cidx delete dir [-h] (--id ID | --path PATH) [--component "
+        "NAME]\n"
+        "                       [--dry-run]\n"
+        "cidx delete dir: error: one of the arguments --id --path is "
+        "required\n");
+}
+
+TEST_CASE("args: delete selectors are mutually exclusive (exit 2)") {
+  // $ python3 -m indexer delete component --id 1 --name x
+  ParseFail f = parse_fail({"delete", "component", "--id", "1", "--name", "x"});
+  CHECK(f.code == 2);
+  CHECK(f.msg ==
+        "usage: cidx delete component [-h] (--id ID | --name NAME | --path "
+        "PATH)\n"
+        "                             [--dry-run]\n"
+        "cidx delete component: error: argument --name: not allowed with "
+        "argument --id\n");
+}
+
+TEST_CASE("args: delete --id is int-typed (exit 2 on non-int)") {
+  // $ python3 -m indexer delete file --id notanint
+  const ParseFail f = parse_fail({"delete", "file", "--id", "notanint"});
+  CHECK(f.code == 2);
+  CHECK(f.msg ==
+        "usage: cidx delete file [-h] (--id ID | --name NAME | --path PATH)\n"
+        "                        [--component NAME] [--dry-run]\n"
+        "cidx delete file: error: argument --id: invalid int value: "
+        "'notanint'\n");
+}
+
+TEST_CASE("args: delete parses each selector + --component + --dry-run") {
+  cli::ParsedArgs pa = cli::parse_args({"delete", "symbol", "--id", "7"});
+  CHECK(pa.command == "delete");
+  CHECK(pa.what == "symbol");
+  REQUIRE(pa.del_id.has_value());
+  CHECK(*pa.del_id == 7);
+  CHECK_FALSE(pa.dry_run);
+
+  pa = cli::parse_args({"delete", "symbol", "--usr", "c:@F@multiply", "-c",
+                        "proj", "--dry-run"});
+  REQUIRE(pa.usr.has_value());
+  CHECK(*pa.usr == "c:@F@multiply");
+  REQUIRE(pa.component.has_value());
+  CHECK(*pa.component == "proj");
+  CHECK(pa.dry_run);
+
+  pa = cli::parse_args({"delete", "component", "--path", "/tmp/repo"});
+  REQUIRE(pa.del_path.has_value());
+  CHECK(*pa.del_path == "/tmp/repo");
+
+  pa = cli::parse_args({"delete", "file", "--name", "a.c"});
+  REQUIRE(pa.name.has_value());
+  CHECK(*pa.name == "a.c");
+}
+
+TEST_CASE("delete: functional — multi-match list+delete, dry-run, cascade") {
+  GoldFixture g; // seeded: component 'gold' (id 1), files a.c/a.h, 6 symbols
+  // dry-run previews without mutating
+  CmdResult r = run_cli({"delete", "symbol", "--name", "multiply", "--dry-run"},
+                        g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out == "  #1  function  multiply\n"
+                 "would delete 1 symbol\n");
+  // symbol still present after dry-run
+  r = run_cli({"delete", "symbol", "--name", "multiply", "--dry-run"}, g.cache);
+  CHECK(r.out == "  #1  function  multiply\n"
+                 "would delete 1 symbol\n");
+  // real delete by name
+  r = run_cli({"delete", "symbol", "--name", "multiply"}, g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out == "  #1  function  multiply\n"
+                 "deleted 1 symbol\n");
+  // gone now -> 0 match -> exit 1, stderr
+  r = run_cli({"delete", "symbol", "--name", "multiply"}, g.cache);
+  CHECK(r.rc == 1);
+  CHECK(r.err == "error: no symbol matches --name multiply\n");
+  // delete file by basename cascades to its symbols (FK SET NULL -> purged)
+  r = run_cli({"delete", "file", "--name", "a.h"}, g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out == g.expect("  #2  {ROOT}/include/a.h\n") + "deleted 1 file\n");
+  // delete the whole component (full cascade)
+  r = run_cli({"delete", "component", "--name", "gold"}, g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out == g.expect("  #1  gold (repo)  {ROOT}\n") +
+                     "deleted 1 component\n");
+  r = run_cli({"list", "components"}, g.cache);
+  CHECK(r.out == "0 component(s)\n");
+}
+
 TEST_CASE("args: defaults — search 25, list symbols 50, add-source repo") {
   cli::ParsedArgs pa = cli::parse_args({"search", "foo"});
   CHECK(pa.command == "search");
@@ -576,7 +693,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
             "cidx command-line skeleton\n"
             "\n"
             "positional arguments:\n"
-            "  {init,add-source,import,index,search,show,list,ls}\n"
+            "  {init,add-source,import,index,search,show,list,ls,delete}\n"
             "    init                create a blank index database\n"
             "    add-source          register a component\n"
             "    import              import a compile_commands.json\n"
@@ -586,6 +703,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
             "file\n"
             "    list (ls)           browse the index: components, dirs, "
             "files, symbols\n"
+            "    delete              delete a component, directory, file, or "
+            "symbol\n"
             "\n"
             "options:\n"
             "  -h, --help            show this help message and exit\n");
@@ -1218,14 +1337,16 @@ TEST_CASE("args: init grammar — --force flag, no positionals") {
   ParseFail f = parse_fail({"init", "--bogus"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls} "
+        "usage: cidx [-h] "
+        "{init,add-source,import,index,search,show,list,ls,delete} "
         "...\ncidx: error: unrecognized arguments: --bogus\n");
 
   // stray positional -> unrecognized arguments, exit 2
   f = parse_fail({"init", "extra"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx [-h] {init,add-source,import,index,search,show,list,ls} "
+        "usage: cidx [-h] "
+        "{init,add-source,import,index,search,show,list,ls,delete} "
         "...\ncidx: error: unrecognized arguments: extra\n");
 }
 

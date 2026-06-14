@@ -352,6 +352,36 @@ class Storage:
             "DELETE FROM component WHERE id = ?", (component_id,))
         self._commit()
 
+    def delete_directory(self, directory_id: int) -> None:
+        """Remove a directory, its files (ON DELETE CASCADE), and the symbols
+        indexed from those files (file_id/decl_file_id are ON DELETE SET NULL,
+        so they are deleted explicitly to avoid file-less orphans)."""
+        sub = "SELECT id FROM file WHERE directory_id = ?"
+        self._conn.execute(
+            f"DELETE FROM symbol WHERE file_id IN ({sub}) "
+            f"OR decl_file_id IN ({sub})",
+            (directory_id, directory_id),
+        )
+        self._conn.execute(
+            "DELETE FROM directory WHERE id = ?", (directory_id,))
+        self._commit()
+
+    def delete_file(self, file_id: int) -> None:
+        """Remove a file and the symbols indexed from it (referenced by
+        file_id/decl_file_id with ON DELETE SET NULL, so deleted explicitly to
+        avoid file-less orphans)."""
+        self._conn.execute(
+            "DELETE FROM symbol WHERE file_id = ? OR decl_file_id = ?",
+            (file_id, file_id),
+        )
+        self._conn.execute("DELETE FROM file WHERE id = ?", (file_id,))
+        self._commit()
+
+    def delete_symbol(self, symbol_id: int) -> None:
+        """Remove a single symbol row."""
+        self._conn.execute("DELETE FROM symbol WHERE id = ?", (symbol_id,))
+        self._commit()
+
     @staticmethod
     def _fuzzy_like(text: str) -> str:
         """LIKE pattern for fzf-style fuzzy matching (use with ESCAPE '\\').
@@ -585,6 +615,17 @@ class Storage:
             return None
         return os.path.join(row["root"], row["rel"], row["name"]) if row["rel"] \
             else os.path.join(row["root"], row["name"])
+
+    def directory_abs_path(self, directory_id: int) -> Optional[str]:
+        """component.path / directory.path for a directory id."""
+        row = self._conn.execute(
+            "SELECT c.path AS root, d.path AS rel FROM directory d "
+            "JOIN component c ON c.id = d.component_id WHERE d.id = ?",
+            (directory_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return os.path.join(row["root"], row["rel"]) if row["rel"] else row["root"]
 
     def _split_path(self, abs_path: str) -> tuple[int, str, str]:
         """Absolute path -> (component_id, relative dir, file name)."""

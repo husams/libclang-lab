@@ -14,6 +14,7 @@
 // main() is the only catch-site (D23).
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,6 +46,10 @@ struct ParsedArgs {
   bool pending = false;                   // list files --pending
   bool force = false;                     // init --force
   bool no_git = false;                    // add-source --no-git
+  std::optional<int64_t> del_id;          // delete --id
+  std::optional<std::string> del_path;    // delete --path
+  std::optional<std::string> usr;         // delete symbol --usr
+  bool dry_run = false;                   // delete --dry-run
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

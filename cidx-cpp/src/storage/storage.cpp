@@ -523,6 +523,40 @@ void Storage::delete_component(int64_t component_id) {
   del_comp.step_done();
 }
 
+void Storage::delete_directory(int64_t directory_id) {
+  // Files cascade on directory delete; symbols (ON DELETE SET NULL) would
+  // linger file-less, so delete them first.
+  static const char kSub[] = "SELECT id FROM file WHERE directory_id = ?";
+  auto del_sym =
+      db_.prepare(std::string("DELETE FROM symbol WHERE file_id IN (") + kSub +
+                  ") OR decl_file_id IN (" + kSub + ")");
+  del_sym.bind(1, directory_id);
+  del_sym.bind(2, directory_id);
+  del_sym.step_done();
+  auto del_dir = db_.prepare("DELETE FROM directory WHERE id = ?");
+  del_dir.bind(1, directory_id);
+  del_dir.step_done();
+}
+
+void Storage::delete_file(int64_t file_id) {
+  // Symbols reference files with ON DELETE SET NULL; delete them first so they
+  // do not linger file-less.
+  auto del_sym =
+      db_.prepare("DELETE FROM symbol WHERE file_id = ? OR decl_file_id = ?");
+  del_sym.bind(1, file_id);
+  del_sym.bind(2, file_id);
+  del_sym.step_done();
+  auto del_file = db_.prepare("DELETE FROM file WHERE id = ?");
+  del_file.bind(1, file_id);
+  del_file.step_done();
+}
+
+void Storage::delete_symbol(int64_t symbol_id) {
+  auto del = db_.prepare("DELETE FROM symbol WHERE id = ?");
+  del.bind(1, symbol_id);
+  del.step_done();
+}
+
 std::vector<Component>
 Storage::list_components(const std::optional<std::string> &name,
                          const std::optional<std::string> &kind) {
@@ -752,6 +786,19 @@ std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
     return std::nullopt;
   }
   return reconstruct_path(st.col_text(0), st.col_text(1), st.col_text(2));
+}
+
+std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
+  auto st = db_.prepare("SELECT c.path AS root, d.path AS rel FROM directory d "
+                        "JOIN component c ON c.id = d.component_id "
+                        "WHERE d.id = ?");
+  st.bind(1, directory_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  const std::string root = st.col_text(0);
+  const std::string rel = st.col_text(1);
+  return rel.empty() ? root : pathutil::join(root, rel);
 }
 
 std::vector<std::pair<File, std::string>>

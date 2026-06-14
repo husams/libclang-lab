@@ -201,6 +201,28 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files --pending
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --limit 2
+  # delete subcommand: help, nested-choice errors, per-leaf help, the
+  # required-mutex / mutex / bad-int / 0-match error paths, dry-run previews,
+  # then REAL deletes exercising cascade + orphan-symbol purge. Placed last so
+  # the golden assertions above are undisturbed; the final DB dump reflects the
+  # post-delete state and must still match byte-for-byte across both tools.
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete bogus
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete component -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete dir -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete file -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --id 1 --name x
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete dir --id 1 --path /x
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete file --id notanint
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --name nope
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --name multiply --dry-run
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --name multiply
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete file --name app.c
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete component --name parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols
 }
 
 echo "parity_check: running Python cidx (cache: $PY_CACHE)"

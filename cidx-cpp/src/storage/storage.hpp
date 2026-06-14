@@ -82,6 +82,11 @@ public:
   std::optional<Directory> get_directory(int64_t component_id,
                                          const std::string &path);
   std::optional<Directory> get_directory_by_id(int64_t directory_id);
+  // component.path / directory.path for a directory id, or nullopt.
+  std::optional<std::string> directory_abs_path(int64_t directory_id);
+  // Remove a directory, its files (ON DELETE CASCADE), and the symbols indexed
+  // from those files (file refs are ON DELETE SET NULL, deleted explicitly).
+  void delete_directory(int64_t directory_id);
   std::vector<std::pair<Directory, std::string>> // (row, component name)
   list_directories(const std::optional<int64_t> &component_id = std::nullopt,
                    const std::optional<std::string> &name = std::nullopt);
@@ -104,6 +109,9 @@ public:
   std::optional<File> get_file(const std::string &abs_path);
   std::optional<File> get_file_by_id(int64_t file_id);
   std::optional<std::string> file_abs_path(int64_t file_id);
+  // Remove a file and the symbols indexed from it (file refs are ON DELETE SET
+  // NULL, so deleted explicitly to avoid file-less orphans).
+  void delete_file(int64_t file_id);
   std::vector<std::pair<File, std::string>> // (row, reconstructed abs path)
   list_files(const std::optional<int64_t> &component_id = std::nullopt,
              const std::optional<std::string> &dir_path = std::nullopt,
@@ -126,6 +134,8 @@ public:
                 const std::vector<std::pair<std::string, SqlValue>> &values);
   std::optional<Symbol> lookup_symbol(const std::string &usr);
   std::optional<Symbol> lookup_symbol_by_id(int64_t symbol_id);
+  // Remove a single symbol row.
+  void delete_symbol(int64_t symbol_id);
   std::vector<Symbol>
   lookup_symbols_by_name(const std::string &spelling,
                          const std::optional<std::string> &kind = std::nullopt);
