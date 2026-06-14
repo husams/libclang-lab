@@ -126,10 +126,11 @@ def cmd_add_source(args) -> int:
     if not os.path.isdir(path):
         print(f"error: {path} is not a directory", file=sys.stderr)
         return 1
-    root = git_root(path) if args.kind == "repo" else None
+    use_git = args.kind == "repo" and not args.no_git
+    root = git_root(path) if use_git else None
     if root is not None:
         path = root
-    name = args.name or (repo_name(path) if args.kind == "repo"
+    name = args.name or (repo_name(path) if use_git
                          else os.path.basename(path))
     with Storage(args.index) as db:
         cid = db.add_component(name, path, kind=args.kind)
@@ -493,6 +494,8 @@ def main(argv=None) -> int:
     p.add_argument("--path", required=True, help="repo root or library header dir")
     p.add_argument("--name", help="component name (default: from .git/config)")
     p.add_argument("--kind", choices=("repo", "external"), default="repo")
+    p.add_argument("--no-git", action="store_true",
+                   help="use --path as-is; do not promote to the enclosing git root")
     p.set_defaults(fn=cmd_add_source)
 
     p = sub.add_parser("import", help="import a compile_commands.json")

@@ -49,18 +49,24 @@ const char kInitHelp[] =
     "  -h, --help  show this help message and exit\n"
     "  --force     overwrite an existing index database\n";
 
-const char kAddSourceUsage[] = "usage: cidx add-source [-h] --path PATH "
-                               "[--name NAME] [--kind {repo,external}]\n";
+const char kAddSourceUsage[] =
+    "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
+    "{repo,external}]\n"
+    "                       [--no-git]\n";
 
 const char kAddSourceHelp[] =
     "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
     "{repo,external}]\n"
+    "                       [--no-git]\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
     "  --path PATH           repo root or library header dir\n"
     "  --name NAME           component name (default: from .git/config)\n"
-    "  --kind {repo,external}\n";
+    "  --kind {repo,external}\n"
+    "  --no-git              use --path as-is; do not promote to the enclosing "
+    "git\n"
+    "                        root\n";
 
 const char kImportUsage[] =
     "usage: cidx import [-h] --db DB [--name NAME] [--force]\n";
@@ -661,6 +667,7 @@ const Spec kAddSourceSpec = {
         {"--path", '\0', ValueKind::kString, "--path", nullptr, 0},
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
         {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
+        {"--no-git", '\0', ValueKind::kNone, "--no-git", nullptr, 0},
     },
     {},
     false,
@@ -821,6 +828,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     if (!pa.kind) {
       pa.kind = "repo"; // argparse default
     }
+    pa.no_git = st.flags.count("--no-git") != 0;
   } else if (pa.command == "import") {
     ParseState st = parse_leaf(kImportSpec, argv, i, extras);
     if (st.help) {

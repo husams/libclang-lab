@@ -44,6 +44,7 @@ struct ParsedArgs {
   bool indexed = false;                   // list files --indexed
   bool pending = false;                   // list files --pending
   bool force = false;                     // init --force
+  bool no_git = false;                    // add-source --no-git
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

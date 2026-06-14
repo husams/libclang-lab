@@ -231,7 +231,8 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     *ctx.err << "error: " << path << " is not a directory\n";
     return 1;
   }
-  if (kind == "repo") {
+  const bool use_git = kind == "repo" && !args.no_git;
+  if (use_git) {
     std::optional<std::string> root = repo::git_root(path);
     if (root) {
       path = *root;
@@ -240,7 +241,7 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
   const std::string name =
       args.name
           ? *args.name
-          : (kind == "repo" ? repo::repo_name(path) : pathutil::basename(path));
+          : (use_git ? repo::repo_name(path) : pathutil::basename(path));
   Storage db(ctx.index_path);
   const int64_t cid = db.add_component(name, path, kind);
   *ctx.out << "component #" << cid << ": " << name << " (" << kind << ") at "
