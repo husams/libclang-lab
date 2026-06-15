@@ -19,23 +19,28 @@ namespace {
 // ---------------------------------------------------------------------------
 
 const char kTopUsage[] =
-    "usage: cidx [-h] "
-    "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
+    "usage: cidx [-h]\n"
+    "            "
+    "{init,add-source,import,index,resolve,set,search,show,list,ls,delete} "
     "...\n";
 
 const char kTopHelp[] =
-    "usage: cidx [-h] "
-    "{init,add-source,import,index,resolve,search,show,list,ls,delete} ...\n"
+    "usage: cidx [-h]\n"
+    "            "
+    "{init,add-source,import,index,resolve,set,search,show,list,ls,delete} "
+    "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,index,resolve,search,show,list,ls,delete}\n"
+    "  {init,add-source,import,index,resolve,set,search,show,list,ls,delete}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
     "    index               index imported C/C++ files\n"
     "    resolve             finalize cross-repo edges and roll up edge counts\n"
+    "    set                 set a mutable file attribute (e.g. pending "
+    "status)\n"
     "    search              fuzzy-search symbols by qualified name\n"
     "    show                show full details of one symbol or file\n"
     "    list (ls)           browse the index: components, dirs, files, "
@@ -111,6 +116,30 @@ const char kResolveHelp[] =
     "options:\n"
     "  -h, --help   show this help message and exit\n"
     "  --rebuild    clear all edges before resolving (forces full re-extract)\n";
+
+const char kSetUsage[] =
+    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                [--dry-run]\n"
+    "                FIELD=VALUE [FIELD=VALUE ...]\n";
+
+const char kSetHelp[] =
+    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                [--dry-run]\n"
+    "                FIELD=VALUE [FIELD=VALUE ...]\n"
+    "\n"
+    "positional arguments:\n"
+    "  FIELD=VALUE           attribute assignment, e.g. 'pending=False' "
+    "(fields:\n"
+    "                        pending, indexed)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component, -c NAME  restrict to this component's files\n"
+    "  --file REL_PATH       restrict to one file (path relative to component "
+    "root)\n"
+    "  --db PATH             operate on this index DB (default: the standard "
+    "index)\n"
+    "  --dry-run             preview the matches without changing anything\n";
 
 // The 17 symbol kinds, sorted — sorted(SYMBOL_KINDS) in cli.py.
 #define CIDX_KIND_BRACE                                                        \
@@ -380,8 +409,8 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",   "add-source", "import", "index",  "resolve",
-    "search", "show",       "list",   "ls",     "delete"};
+    "init",   "add-source", "import", "index", "resolve", "set",
+    "search", "show",       "list",   "ls",    "delete"};
 const std::vector<std::string> kShowWhats = {"symbol", "file"};
 const std::vector<std::string> kListWhats = {"components", "dirs", "files",
                                              "symbols"};
@@ -831,6 +860,21 @@ const Spec kResolveSpec = {
     {},
 };
 
+const Spec kSetSpec = {
+    "cidx set",
+    kSetUsage,
+    kSetHelp,
+    {
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--file", '\0', ValueKind::kString, "--file", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {"FIELD=VALUE"}, // first positional; name reported by the required check
+    true,            // nargs="+": collect surplus FIELD=VALUE tokens
+    {"FIELD=VALUE"}, // required
+};
+
 const Spec kSearchSpec = {
     "cidx search",
     kSearchUsage,
@@ -1051,6 +1095,21 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       return pa;
     }
     pa.rebuild = st.flags.count("--rebuild") != 0;
+  } else if (pa.command == "set") {
+    ParseState st = parse_leaf(kSetSpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kSetHelp;
+      return pa;
+    }
+    // assignment = the fixed positional plus any surplus (nargs="+").
+    pa.assignment.push_back(st.positionals[0]);
+    for (const std::string &tok : st.rest) {
+      pa.assignment.push_back(tok);
+    }
+    pa.component = opt_value(st, "--component");
+    pa.file_filter = opt_value(st, "--file");
+    pa.index_db = opt_value(st, "--db");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
   } else if (pa.command == "search") {
     ParseState st = parse_leaf(kSearchSpec, argv, i, extras);
     if (st.help) {

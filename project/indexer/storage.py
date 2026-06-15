@@ -655,6 +655,17 @@ class Storage:
         )
         self._commit()
 
+    def set_file_indexed(self, file_id: int, indexed: bool) -> None:
+        """Flip a file's indexed/pending flag in place; symbols are untouched.
+
+        Setting indexed=0 marks the file pending so the next `index` re-parses
+        it (regenerating graph edges) without losing its existing symbols."""
+        self._conn.execute(
+            "UPDATE file SET indexed = ? WHERE id = ?",
+            (int(bool(indexed)), file_id),
+        )
+        self._commit()
+
     def is_file_indexed(self, abs_path: str, mtime: Optional[float] = None,
                         md5: Optional[str] = None) -> bool:
         """True if the file has been indexed (and is not stale, if mtime/md5 given).

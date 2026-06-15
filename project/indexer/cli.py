@@ -294,6 +294,92 @@ def cmd_resolve(args) -> int:
     return 0
 
 
+# -- set ----------------------------------------------------------------------
+
+_SET_TRUE = {"true", "1", "yes", "on", "t", "y"}
+_SET_FALSE = {"false", "0", "no", "off", "f", "n"}
+
+# field -> (db column, invert): 'pending' is the inverse of the 'indexed' flag.
+_SET_FIELDS = {
+    "pending": ("indexed", True),
+    "indexed": ("indexed", False),
+}
+
+
+def _parse_set_bool(tok: str) -> bool:
+    t = tok.strip().lower()
+    if t in _SET_TRUE:
+        return True
+    if t in _SET_FALSE:
+        return False
+    raise ValueError(f"expected a boolean (true/false), got {tok!r}")
+
+
+def _parse_assignment(tokens: list[str]) -> tuple[str, str]:
+    """'FIELD = VALUE' in any spacing ('pending=False', 'pending = False',
+    'pending False') -> (field, value)."""
+    expr = " ".join(tokens)
+    if "=" in expr:
+        key, _, val = expr.partition("=")
+    else:
+        parts = expr.split()
+        if len(parts) != 2:
+            raise ValueError("expected 'FIELD=VALUE' (e.g. pending=False)")
+        key, val = parts
+    key, val = key.strip().lower(), val.strip()
+    if not key or not val:
+        raise ValueError("expected 'FIELD=VALUE' (e.g. pending=False)")
+    return key, val
+
+
+def cmd_set(args) -> int:
+    """Set a mutable file attribute (currently the pending/indexed flag) over a
+    component's files or one file, without deleting any symbols."""
+    try:
+        key, raw_val = _parse_assignment(args.assignment)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if key not in _SET_FIELDS:
+        print(f"error: unknown field {key!r}; supported: "
+              f"{', '.join(sorted(_SET_FIELDS))}", file=sys.stderr)
+        return 1
+    try:
+        bval = _parse_set_bool(raw_val)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _column, invert = _SET_FIELDS[key]
+    indexed_value = (not bval) if invert else bval  # value for the 'indexed' col
+
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        if args.file is not None:
+            ap = resolve_file_arg(args.file, comp.path if comp else None)
+            rec = db.get_file(ap)
+            matches = ([(rec.id, ap)]
+                       if rec and _under_component(ap, comp) else [])
+        else:
+            matches = [(f.id, ap) for f, ap in
+                       db.list_files(component_id=comp.id if comp else None)]
+        if not matches:
+            print("error: no files match the given selector", file=sys.stderr)
+            return 1
+        for fid, ap in matches:
+            print(f"  #{fid}  {ap}")
+        if not args.dry_run:
+            for fid, _ in matches:
+                db.set_file_indexed(fid, indexed_value)
+        verb = "would set" if args.dry_run else "set"
+        print(f"{verb} {key}={bval} on {len(matches)} "
+              f"{_plural(len(matches), 'file', 'files')}")
+    return 0
+
+
 def _print_symbols(db: Storage, hits, limit: int) -> None:
     """The symbol table shared by 'search' and 'list symbols'."""
     shown = hits[:limit] if limit else hits
@@ -943,6 +1029,21 @@ def main(argv=None) -> int:
     p.add_argument("--rebuild", action="store_true",
                    help="clear all edges before resolving (forces full re-extract)")
     p.set_defaults(fn=cmd_resolve)
+
+    p = sub.add_parser("set",
+                       help="set a mutable file attribute (e.g. pending status)")
+    p.add_argument("assignment", nargs="+", metavar="FIELD=VALUE",
+                   help="attribute assignment, e.g. 'pending=False' "
+                        "(fields: pending, indexed)")
+    p.add_argument("--component", "-c", metavar="NAME",
+                   help="restrict to this component's files")
+    p.add_argument("--file", metavar="REL_PATH",
+                   help="restrict to one file (path relative to component root)")
+    p.add_argument("--db", dest="graph_db", metavar="PATH",
+                   help="operate on this index DB (default: the standard index)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="preview the matches without changing anything")
+    p.set_defaults(fn=cmd_set)
 
     p = sub.add_parser("search", help="fuzzy-search symbols by qualified name")
     p.add_argument("pattern",

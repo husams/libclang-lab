@@ -119,6 +119,8 @@ public:
              const std::optional<bool> &indexed = std::nullopt);
   void mark_file_indexed(int64_t file_id,
                          const std::optional<double> &mtime = std::nullopt);
+  // Flip the indexed/pending flag in place; symbols are untouched.
+  void set_file_indexed(int64_t file_id, bool indexed);
   bool is_file_indexed(const std::string &abs_path,
                        const std::optional<double> &mtime = std::nullopt,
                        const std::optional<std::string> &md5 = std::nullopt);

@@ -52,6 +52,8 @@ struct ParsedArgs {
   bool dry_run = false;                   // delete --dry-run
   bool no_graph = false;                  // index --no-graph
   bool rebuild = false;                   // resolve --rebuild
+  std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
+  std::optional<std::string> index_db;    // set --db (index-path override)
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.
