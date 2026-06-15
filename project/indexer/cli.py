@@ -26,6 +26,7 @@ else ~/.cache/cidx -- never the current directory:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -36,6 +37,9 @@ if __package__ in (None, ""):                       # direct execution
     from indexer.storage import SYMBOL_KINDS, File, Storage  # noqa: E402
     from indexer import compiledb                   # noqa: E402
     from indexer.clang import ClangParseError, index_source  # noqa: E402
+    from indexer.query import (                      # noqa: E402
+        EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError,
+    )
     from indexer.utils import (                     # noqa: E402
         git_root, index_status, md5_of, repo_name, resolve_file_arg,
     )
@@ -43,6 +47,7 @@ else:
     from .storage import SYMBOL_KINDS, File, Storage
     from . import compiledb
     from .clang import ClangParseError, index_source
+    from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
     from .utils import git_root, index_status, md5_of, repo_name, resolve_file_arg
 
 CACHE_ENV = "INDEXER_CACHE"
@@ -637,6 +642,267 @@ def cmd_delete_symbol(args) -> int:
                               db.delete_symbol, "symbol", "symbols")
 
 
+# -- graph --------------------------------------------------------------------
+#
+# Query the relationship graph built by `index`/`resolve`. Every graph command
+# operates on the standard index (cache_dir()/index.db) unless --db overrides it,
+# and refuses to run against a missing or edge-less DB (no silent substitution).
+
+def _open_graph(args) -> "GraphQuery | None":
+    """Open the standard index read-only, enforcing the no-edges rule.
+
+    Returns a GraphQuery, or None after printing a clear error (the caller then
+    returns a non-zero exit code via _GRAPH_ERR)."""
+    try:
+        return GraphQuery(args.index, require_edges=True)
+    except (NoIndexError, NoEdgesError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None
+
+
+def _edge_kinds(spec: str | None) -> tuple[str, ...] | None:
+    """Parse a comma-separated edge-kind list ('calls,uses') into a tuple."""
+    if not spec:
+        return None
+    kinds = tuple(k.strip() for k in spec.split(",") if k.strip())
+    return kinds or None
+
+
+def _select_one(g: "GraphQuery", usr, sym_id, name, kind, first):
+    """Resolve a shared --usr/--id/--name selector to a single Sym.
+
+    Returns (sym, exit_code). On an ambiguous --name, prints the candidates and
+    returns (None, 2) unless `first` is set."""
+    if usr is not None:
+        s = g.get(usr)
+        if s is None:
+            print(f"error: no symbol with USR {usr!r}", file=sys.stderr)
+            return None, 1
+        return s, 0
+    if sym_id is not None:
+        s = g.get(int(sym_id))
+        if s is None:
+            print(f"error: no symbol with id {sym_id}", file=sys.stderr)
+            return None, 1
+        return s, 0
+    hits = g.find(name, kind=kind)
+    if not hits:
+        print(f"error: no symbol matches --name {name!r}"
+              + (f" (kind {kind})" if kind else ""), file=sys.stderr)
+        return None, 1
+    if len(hits) > 1 and not first:
+        print(f"error: --name {name!r} matches {len(hits)} symbols; "
+              f"disambiguate with --usr/--id (or pass --first):", file=sys.stderr)
+        for s in hits[:25]:
+            print(f"  #{s.id}  {s.kind:<14} {s.name}  @{s.loc}  [{s.usr}]",
+                  file=sys.stderr)
+        if len(hits) > 25:
+            print(f"  ... and {len(hits) - 25} more", file=sys.stderr)
+        return None, 2
+    return hits[0], 0
+
+
+def _select_symbol(g, args):
+    """The primary subject symbol from the shared selector flags."""
+    return _select_one(g, args.usr, args.id, args.name, args.kind, args.first)
+
+
+def _emit_edges(g: "GraphQuery", edges, args, header: str) -> None:
+    """Print a list of Edge results -- JSON (peer + edge_kind/count/sites) or a
+    human table with xN counts and a sample site."""
+    if args.json:
+        print(json.dumps([e.to_dict(sites=g.sites(e)) for e in edges], indent=2))
+        return
+    print(header)
+    width = max((len(e.peer.name or e.peer.usr) for e in edges), default=0)
+    for e in edges:
+        cnt = f"  x{e.count}" if e.count and e.count != 1 else ""
+        sample = g.sites(e, limit=1)
+        site = f"  ({sample[0].loc})" if sample else ""
+        stub = "  [stub]" if e.peer.is_stub else ""
+        nm = e.peer.name or e.peer.usr
+        print(f"  {e.peer.kind:<14} {nm:<{width}}  @{e.peer.loc}{cnt}{site}{stub}")
+    print(f"{len(edges)} result(s)")
+
+
+def _emit_syms(syms, args, header: str, depths: dict | None = None) -> None:
+    """Print a list of Sym results -- JSON (stable schema) or a human table.
+    `depths` (id -> distance) annotates walk output."""
+    if args.json:
+        out = []
+        for s in syms:
+            d = s.to_dict()
+            if depths is not None:
+                d["depth"] = depths.get(s.id)
+            out.append(d)
+        print(json.dumps(out, indent=2))
+        return
+    print(header)
+    width = max((len(s.name or s.usr) for s in syms), default=0)
+    for s in syms:
+        dep = f"  d{depths[s.id]}" if depths is not None and s.id in depths else ""
+        stub = "  [stub]" if s.is_stub else ""
+        nm = s.name or s.usr
+        print(f"  {s.kind:<14} {nm:<{width}}  @{s.loc}{dep}{stub}")
+    print(f"{len(syms)} result(s)")
+
+
+def cmd_graph_callers(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    edges = g.edges_in(sym, ("calls",), limit=args.limit)
+    _emit_edges(g, edges, args, f"callers of {sym.name} (@{sym.loc}):")
+    return 0
+
+
+def cmd_graph_callees(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    edges = g.edges_out(sym, ("calls",), limit=args.limit)
+    _emit_edges(g, edges, args, f"callees of {sym.name} (@{sym.loc}):")
+    return 0
+
+
+def cmd_graph_refs(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    edges = g.references(sym, limit=args.limit)
+    _emit_edges(g, edges, args, f"references to {sym.name} (@{sym.loc}):")
+    return 0
+
+
+def cmd_graph_neighbors(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    try:
+        edges = g._edges(sym, args.direction, _edge_kinds(args.edge), args.limit)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    kinds = args.edge or "all"
+    _emit_edges(g, edges, args,
+                f"{args.direction}-neighbors of {sym.name} "
+                f"(@{sym.loc}) over {kinds}:")
+    return 0
+
+
+def cmd_graph_walk(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    kinds = _edge_kinds(args.edge) or ("calls",)
+    try:
+        tr = g.walk(sym, kinds, direction=args.direction,
+                    depth=args.depth, max_nodes=args.limit)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    nodes = [n for n in tr.nodes if n.id != sym.id]   # exclude the start node
+    _emit_syms(nodes, args,
+               f"reachable from {sym.name} (@{sym.loc}) over "
+               f"{','.join(kinds)} {args.direction}, depth<={args.depth}:",
+               depths=tr.depth_by_id)
+    return 0
+
+
+def cmd_graph_path(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    src, rc = _select_symbol(g, args)
+    if src is None:
+        return rc
+    dst, rc = _select_one(g, args.to_usr, args.to_id, args.to_name,
+                          args.to_kind, args.first)
+    if dst is None:
+        return rc
+    kinds = _edge_kinds(args.edge) or ("calls",)
+    try:
+        chain = g.reaches(src, dst, kinds=kinds, direction=args.direction,
+                          max_depth=args.depth)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if chain is None:
+        if args.json:
+            print("null")
+        else:
+            print(f"no path from {src.name} to {dst.name} over "
+                  f"{','.join(kinds)} {args.direction} within depth {args.depth}")
+        return 1
+    _emit_syms(chain, args,
+               f"path {src.name} -> {dst.name} ({len(chain) - 1} hop(s)):")
+    return 0
+
+
+def cmd_graph_hierarchy(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    direct = not args.transitive
+    bases = g.bases(sym, direct=direct)
+    subs = g.subclasses(sym, direct=direct)
+    mems = g.members(sym)
+    if args.json:
+        print(json.dumps({
+            "symbol": sym.to_dict(),
+            "bases": [s.to_dict() for s in bases],
+            "subclasses": [s.to_dict() for s in subs],
+            "members": [s.to_dict() for s in mems],
+        }, indent=2))
+        return 0
+    scope = "all" if args.transitive else "direct"
+    print(f"hierarchy of {sym.name} (@{sym.loc}):")
+    _emit_syms(bases, args, f"  bases ({scope}):")
+    _emit_syms(subs, args, f"  subclasses ({scope}):")
+    _emit_syms(mems, args, "  members:")
+    return 0
+
+
+def cmd_graph_dispatch(args) -> int:
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    targets = g.dispatch_targets(sym)
+    virtual = g.is_virtual_method(sym)
+    if args.json:
+        print(json.dumps({
+            "method": sym.to_dict(),
+            "is_virtual": virtual,
+            "targets": [s.to_dict() for s in targets],
+        }, indent=2))
+        return 0
+    note = "" if virtual else "  (not a virtual method -- only itself)"
+    _emit_syms(targets, args,
+               f"run-time dispatch targets of {sym.name} (@{sym.loc}){note}:")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx",
                                  description="cidx command-line skeleton")
@@ -804,8 +1070,96 @@ def main(argv=None) -> int:
     _dry_run(q)
     q.set_defaults(fn=cmd_delete_symbol)
 
+    # -- graph: query the relationship graph ----------------------------------
+    p = sub.add_parser("graph",
+                       help="query the relationship graph (callers, callees, "
+                            "refs, neighbors, walk, path, hierarchy, dispatch)")
+    gsub = p.add_subparsers(dest="what", required=True)
+    edge_help = ("comma-separated edge kinds (" + ", ".join(sorted(EDGE_KINDS))
+                 + ")")
+
+    def _selector(q):
+        """Shared subject selector + common output flags for a graph command."""
+        sel = q.add_mutually_exclusive_group(required=True)
+        sel.add_argument("--usr", metavar="USR", help="exact clang USR")
+        sel.add_argument("--id", type=int, metavar="N", help="numeric symbol id")
+        sel.add_argument("--name", metavar="FUZZY",
+                         help="fuzzy qualified-name match ('conf::set')")
+        q.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
+                       help="restrict a --name match to one symbol kind")
+        q.add_argument("--first", action="store_true",
+                       help="if --name is ambiguous, take the closest match")
+        q.add_argument("--db", dest="graph_db", metavar="PATH",
+                       help="index database to query (default: the standard "
+                            "cache index)")
+        q.add_argument("--json", action="store_true",
+                       help="emit stable machine-readable JSON")
+        q.add_argument("--limit", type=int, default=50, metavar="N",
+                       help="cap the number of results (default 50)")
+
+    q = gsub.add_parser("callers", help="functions that call the symbol")
+    _selector(q)
+    q.set_defaults(fn=cmd_graph_callers)
+
+    q = gsub.add_parser("callees", help="functions the symbol calls")
+    _selector(q)
+    q.set_defaults(fn=cmd_graph_callees)
+
+    q = gsub.add_parser("refs",
+                        help="incoming references (calls + uses) to the symbol")
+    _selector(q)
+    q.set_defaults(fn=cmd_graph_refs)
+
+    q = gsub.add_parser("neighbors", help="one-hop typed neighbors")
+    _selector(q)
+    q.add_argument("--edge", metavar="KINDS", help=edge_help + " (default: all)")
+    q.add_argument("--direction", choices=("in", "out"), default="out",
+                   help="edge direction (default out)")
+    q.set_defaults(fn=cmd_graph_neighbors)
+
+    q = gsub.add_parser("walk", help="bounded BFS over typed edges")
+    _selector(q)
+    q.add_argument("--edge", metavar="KINDS", help=edge_help + " (default: calls)")
+    q.add_argument("--direction", choices=("in", "out"), default="out",
+                   help="edge direction (default out)")
+    q.add_argument("--depth", type=int, default=3, metavar="N",
+                   help="max BFS depth (default 3)")
+    q.set_defaults(fn=cmd_graph_walk)
+
+    q = gsub.add_parser("path",
+                        help="shortest path between two symbols, or none")
+    _selector(q)
+    dst = q.add_mutually_exclusive_group(required=True)
+    dst.add_argument("--to-usr", metavar="USR", help="destination by USR")
+    dst.add_argument("--to-id", type=int, metavar="N", help="destination by id")
+    dst.add_argument("--to-name", metavar="FUZZY", help="destination by name")
+    q.add_argument("--to-kind", choices=sorted(SYMBOL_KINDS),
+                   help="restrict a --to-name match to one symbol kind")
+    q.add_argument("--edge", metavar="KINDS", help=edge_help + " (default: calls)")
+    q.add_argument("--direction", choices=("in", "out"), default="out",
+                   help="edge direction (default out)")
+    q.add_argument("--depth", type=int, default=8, metavar="N",
+                   help="max search depth (default 8)")
+    q.set_defaults(fn=cmd_graph_path)
+
+    q = gsub.add_parser("hierarchy",
+                        help="class bases, subclasses, and members")
+    _selector(q)
+    q.add_argument("--transitive", action="store_true",
+                   help="walk the whole inheritance tree, not just direct edges")
+    q.set_defaults(fn=cmd_graph_hierarchy)
+
+    q = gsub.add_parser("dispatch",
+                        help="run-time targets of a virtual-method call")
+    _selector(q)
+    q.set_defaults(fn=cmd_graph_dispatch)
+
     args = ap.parse_args(argv)
+    # The standard index path, unless a graph command overrides it with --db.
     args.index = index_path()
+    graph_db = getattr(args, "graph_db", None)
+    if graph_db:
+        args.index = os.path.abspath(os.path.expanduser(graph_db))
     _setup_logging()
     return args.fn(args)
 

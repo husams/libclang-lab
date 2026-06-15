@@ -22,3 +22,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["project/indexer"]
+
+[tool.pytest.ini_options]
+testpaths = ["project/tests"]
+pythonpath = ["project"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+]
