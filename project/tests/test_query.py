@@ -1,0 +1,274 @@
+"""Tests for the read-only GraphQuery library API (indexer.query).
+
+Hermetic: every test runs against the seeded in-memory-style fixture DB built by
+conftest.py -- no libclang, no network.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from indexer.query import (
+    GraphQuery, Site, NoIndexError, NoEdgesError, default_db_path,
+)
+
+
+# --------------------------------------------------------------------------- #
+# Lookup symbols
+# --------------------------------------------------------------------------- #
+
+def test_find_fuzzy_qualified_name(g):
+    hits = g.find("Base::draw")
+    assert any(s.name == "Base::draw" for s in hits)
+    # shortest-first ordering: a plain 'draw' fuzzy returns the shortest names up top
+    names = [s.name for s in g.find("draw")]
+    assert names == sorted(names, key=len)
+
+
+def test_find_kind_filter(g):
+    assert all(s.kind == "class" for s in g.find("Derived", kind="class"))
+    assert g.find("Derived", kind="function") == []
+
+
+def test_by_name_exact(g):
+    # three classes define a method spelled 'draw'
+    draws = g.by_name("draw")
+    assert {s.name for s in draws} == {"Base::draw", "Derived::draw",
+                                       "Derived2::draw"}
+    assert g.by_name("draw", kind="class") == []
+
+
+def test_get_by_id_usr_and_passthrough(g):
+    s = g.get("c:@F@main")
+    assert s is not None and s.spelling == "main"
+    again = g.get(s.id)
+    assert again is not None and again.usr == s.usr
+    assert g.get(s) is s                          # Sym pass-through
+    assert g.get("c:@F@does_not_exist") is None
+
+
+def test_symbols_in_file(g):
+    syms = g.symbols_in_file("shapes.hpp")
+    assert {s.name for s in syms} >= {"Base", "Derived", "Base::draw"}
+    assert g.symbols_in_file("nonexistent.xyz") == []
+
+
+def test_sym_carries_grounding(g):
+    s = g.get("c:@F@helper")
+    assert s.file is not None and s.file.endswith("lib.c")
+    assert s.line == 20
+    assert s.loc == "lib.c:20"
+
+
+# --------------------------------------------------------------------------- #
+# Lookup references
+# --------------------------------------------------------------------------- #
+
+def test_callers_and_callees(g):
+    helper = g.get("c:@F@helper")
+    assert {s.name for s in g.callers(helper)} == {"main"}
+    callee_names = {s.name for s in g.callees(helper)}
+    assert "compute" in callee_names
+    # the stub callee is present but reported as a stub, not a real name
+    stub = [s for s in g.callees(helper) if s.is_stub]
+    assert len(stub) == 1 and stub[0].usr == "c:@F@ext_fn"
+
+
+def test_references_includes_calls_and_uses(g):
+    g_config = g.get("c:@g_config")
+    refs = g.references(g_config)
+    assert {e.peer.name for e in refs} == {"helper"}
+    assert {e.kind for e in refs} == {"uses"}
+
+
+def test_edges_in_out_typed(g):
+    base = g.get("c:@S@Base")
+    inbound = g.edges_in(base)
+    # Derived inherits Base; Base::x field_of; Base::draw method_of -> all inbound
+    kinds = {e.kind for e in inbound}
+    assert {"inherits", "field_of", "method_of"} <= kinds
+    outbound = g.edges_out(base, ("contains",))
+    assert {e.peer.name for e in outbound} == {"Base::Nested"}
+
+
+def test_sites_grounding(g):
+    helper = g.get("c:@F@helper")
+    edge = [e for e in g.edges_out(helper, ("calls",))
+            if e.peer.name == "compute"][0]
+    sites = g.sites(edge)
+    assert len(sites) == 2
+    assert all(isinstance(s, Site) and s.file.endswith("lib.c") for s in sites)
+    assert {s.line for s in sites} == {22, 25}
+
+
+def test_count_multiplicity_resolved(g):
+    helper = g.get("c:@F@helper")
+    edge = [e for e in g.edges_out(helper, ("calls",))
+            if e.peer.name == "compute"][0]
+    assert edge.count == 2                        # two call sites
+
+
+def test_count_falls_back_to_site_count_when_unresolved(index_db):
+    # index_db is NOT resolved -> count must come from COUNT(edge_site)
+    with GraphQuery(index_db) as q:
+        helper = q.get("c:@F@helper")
+        edge = [e for e in q.edges_out(helper, ("calls",))
+                if e.peer.name == "compute"][0]
+        assert edge.count == 2
+
+
+# --------------------------------------------------------------------------- #
+# Navigation
+# --------------------------------------------------------------------------- #
+
+def test_neighbors_direction(g):
+    base = g.get("c:@S@Base")
+    assert {s.name for s in g.neighbors(base, ("inherits",), "in")} == {"Derived"}
+    assert g.neighbors(base, ("inherits",), "out") == []
+
+
+def test_walk_bounded_depth(g):
+    main = g.get("c:@F@main")
+    tr = g.walk(main, ("calls",), "out", depth=1)
+    # depth 1: only helper
+    assert {s.name for s in tr.nodes if s.id != main.id} == {"helper"}
+    tr2 = g.walk(main, ("calls",), "out", depth=3)
+    reached = {s.name for s in tr2.nodes}
+    assert {"helper", "compute"} <= reached
+    # path reconstruction
+    compute = g.get("c:@F@compute")
+    path = [s.name for s in tr2.path_to(compute)]
+    assert path == ["main", "helper", "compute"]
+
+
+def test_walk_max_nodes_bound(g):
+    main = g.get("c:@F@main")
+    tr = g.walk(main, ("calls",), "out", depth=5, max_nodes=2)
+    assert len(tr) <= 2
+
+
+def test_reaches_shortest_path(g):
+    chain = g.reaches("c:@F@main", "c:@F@compute")
+    assert chain is not None
+    assert [s.name for s in chain] == ["main", "helper", "compute"]
+
+
+def test_reaches_none_when_unreachable(g):
+    # compute does not call main
+    assert g.reaches("c:@F@compute", "c:@F@main") is None
+
+
+# --------------------------------------------------------------------------- #
+# Hierarchy (direction gotchas)
+# --------------------------------------------------------------------------- #
+
+def test_bases_direct_and_transitive(g):
+    d2 = g.get("c:@S@Derived2")
+    assert {s.name for s in g.bases(d2, direct=True)} == {"Derived"}
+    assert {s.name for s in g.bases(d2, direct=False)} == {"Derived", "Base"}
+
+
+def test_subclasses_direct_and_transitive(g):
+    base = g.get("c:@S@Base")
+    assert {s.name for s in g.subclasses(base, direct=True)} == {"Derived"}
+    assert {s.name for s in g.subclasses(base, direct=False)} == {"Derived",
+                                                                  "Derived2"}
+
+
+def test_members_unions_in_and_out_edges(g):
+    base = g.get("c:@S@Base")
+    members = {s.name for s in g.members(base)}
+    # field_of (in) + method_of (in) + contains (out) all included
+    assert members == {"Base::x", "Base::draw", "Base::Nested"}
+
+
+# --------------------------------------------------------------------------- #
+# Dynamic dispatch
+# --------------------------------------------------------------------------- #
+
+def test_overrides_and_overridden_by(g):
+    bdraw = g.get("c:@S@Base@F@draw#")
+    assert {s.name for s in g.overridden_by(bdraw)} == {"Derived::draw"}
+    ddraw = g.get("c:@S@Derived@F@draw#")
+    assert {s.name for s in g.overrides(ddraw)} == {"Base::draw"}
+
+
+def test_is_virtual_method(g):
+    assert g.is_virtual_method("c:@S@Base@F@draw#") is True       # pure
+    assert g.is_virtual_method("c:@S@Derived2@F@draw#") is True   # overrides
+    assert g.is_virtual_method("c:@F@main") is False
+
+
+def test_dispatch_targets_excludes_pure_root(g):
+    # Base::draw is pure -> not itself a target; both overriders are
+    targets = {s.name for s in g.dispatch_targets("c:@S@Base@F@draw#")}
+    assert targets == {"Derived::draw", "Derived2::draw"}
+
+
+def test_dispatch_targets_includes_concrete_root(g):
+    # Derived::draw is concrete -> itself + its transitive overrider
+    targets = {s.name for s in g.dispatch_targets("c:@S@Derived@F@draw#")}
+    assert targets == {"Derived::draw", "Derived2::draw"}
+
+
+def test_virtual_callees(g):
+    render = g.get("c:@F@render")
+    vc = {s.name for s in g.virtual_callees(render)}
+    assert vc == {"Base::draw"}
+
+
+# --------------------------------------------------------------------------- #
+# Error paths / guards
+# --------------------------------------------------------------------------- #
+
+def test_no_index_raises(tmp_path):
+    with pytest.raises(NoIndexError):
+        GraphQuery(str(tmp_path / "nope.db"))
+
+
+def test_no_edges_raises_with_require(empty_db):
+    # opens fine without the guard...
+    q = GraphQuery(empty_db)
+    assert q.edge_count() == 0
+    q.close()
+    # ...but require_edges refuses
+    with pytest.raises(NoEdgesError):
+        GraphQuery(empty_db, require_edges=True)
+
+
+def test_unknown_edge_kind_raises(g):
+    with pytest.raises(ValueError):
+        g.edges_out("c:@F@main", ("bogus",))
+
+
+def test_bad_direction_raises(g):
+    with pytest.raises(ValueError):
+        g._edges("c:@F@main", "sideways", None, 10)
+
+
+def test_default_db_path_uses_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("INDEXER_CACHE", str(tmp_path))
+    assert default_db_path() == str(tmp_path / "index.db")
+
+
+# --------------------------------------------------------------------------- #
+# Dataclass / repr sanity
+# --------------------------------------------------------------------------- #
+
+def test_sym_to_dict_schema(g):
+    d = g.get("c:@F@main").to_dict()
+    assert set(d) == {"id", "usr", "spelling", "qual_name", "kind", "type_info",
+                      "file", "line", "col", "is_definition", "is_pure",
+                      "is_stub"}
+
+
+def test_edge_to_dict_carries_peer_and_sites(g):
+    helper = g.get("c:@F@helper")
+    edge = [e for e in g.edges_out(helper, ("calls",))
+            if e.peer.name == "compute"][0]
+    d = edge.to_dict(sites=g.sites(edge))
+    assert d["qual_name"] == "compute"
+    assert d["edge_kind"] == "calls"
+    assert d["count"] == 2
+    assert len(d["sites"]) == 2
+    assert all("file" in s and "line" in s for s in d["sites"])
