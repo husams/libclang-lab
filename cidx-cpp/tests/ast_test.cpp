@@ -1081,6 +1081,57 @@ TEST_SUITE("clang") {
     }
   }
 
+  TEST_CASE("type uses: a class named only as a parameter / return / field / "
+            "local / typedef type earns an inbound `uses` edge "
+            "(_emit_type_use parity)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/types.cpp";
+    write_file(path,
+               "namespace RdKafka {\n"
+               "  class Conf { public: int x; Conf *self(); };\n"
+               "  class Producer {\n"
+               "   public:\n"
+               "    static Producer *create(const Conf *conf, int n);\n"
+               "    Conf *m_conf;\n"
+               "  };\n"
+               "  Producer *Producer::create(const Conf *conf, int n) {\n"
+               "    Conf local; (void)local; (void)conf; (void)n;\n"
+               "    return 0;\n"
+               "  }\n"
+               "  typedef Conf ConfAlias;\n"
+               "}\n");
+
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    const auto conf = one_sym(f.db, "Conf", std::string("class"));
+    REQUIRE(conf.has_value());
+
+    // Collect the qual_names of every symbol with a uses (kind=7) edge -> Conf.
+    std::unordered_set<std::string> users;
+    {
+      auto &raw = f.db.raw_db();
+      auto st = raw.prepare("SELECT s.qual_name FROM edge e "
+                            "JOIN symbol s ON s.id = e.src_id "
+                            "WHERE e.dst_id = ? AND e.kind = 7");
+      st.bind(1, conf->id);
+      while (st.step()) {
+        users.insert(st.col_text(0));
+      }
+    }
+
+    CHECK(users.count("RdKafka::Producer::create") == 1); // param + return
+    CHECK(users.count("RdKafka::Producer::m_conf") == 1);  // field
+    CHECK(users.count("RdKafka::Conf::self") == 1);        // return type
+    CHECK(users.count("RdKafka::ConfAlias") == 1);         // typedef underlying
+    CHECK(users.count("RdKafka::Conf") == 0);              // no self-edge
+  }
+
 } // TEST_SUITE("clang") — S06
 
 int main(int argc, char **argv) {

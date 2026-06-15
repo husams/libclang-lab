@@ -332,6 +332,69 @@ _FUNCTION_DEF_KINDS: frozenset[cx.CursorKind] = frozenset({
     cx.CursorKind.FUNCTION_TEMPLATE,
 })
 
+#: Type layers stripped to reach the named (record/enum/typedef) type that a
+#: signature/field/variable mentions: `const Conf *[]` -> `Conf`.
+_TYPE_WRAPPERS: frozenset[cx.TypeKind] = frozenset({
+    cx.TypeKind.POINTER,
+    cx.TypeKind.LVALUEREFERENCE,
+    cx.TypeKind.RVALUEREFERENCE,
+    cx.TypeKind.CONSTANTARRAY,
+    cx.TypeKind.INCOMPLETEARRAY,
+    cx.TypeKind.VARIABLEARRAY,
+    cx.TypeKind.DEPENDENTSIZEDARRAY,
+})
+
+
+def _named_type_decl(ctype: cx.Type) -> Optional[cx.Cursor]:
+    """Strip pointer/reference/array layers off `ctype` and return the
+    declaration cursor of the named type it spells, or None when the type has
+    no user declaration (builtins like int, function pointers, …).
+
+    Single-level by design: it resolves the type as WRITTEN (a typedef alias
+    stays the alias), mirroring how `uses` body references name a symbol
+    directly rather than chasing canonical forms.
+    """
+    t = ctype
+    for _ in range(32):                       # guard against pathological nesting
+        if t.kind in _TYPE_WRAPPERS:
+            t = (t.get_array_element_type()
+                 if t.kind not in (cx.TypeKind.POINTER,
+                                   cx.TypeKind.LVALUEREFERENCE,
+                                   cx.TypeKind.RVALUEREFERENCE)
+                 else t.get_pointee())
+        else:
+            break
+    decl = t.get_declaration()
+    if decl is None:
+        return None
+    if decl.kind == cx.CursorKind.NO_DECL_FOUND or decl.kind.value <= 0:
+        return None
+    return decl
+
+
+def _emit_type_use(db: Storage, src_id: int, ctype: cx.Type, file_id: int,
+                   loc: Any, conditional: int = 0) -> None:
+    """Emit a `uses` edge (kind=7) src -> the record/enum/typedef named by
+    `ctype` (parameter, return, field, variable, or typedef-underlying type).
+
+    Lookup-only, like body descent: the type's symbol must already be indexed,
+    so builtins and unindexed stdlib types create neither edges nor stubs. No
+    self-edge (a factory returning its own class would otherwise loop).
+    """
+    decl = _named_type_decl(ctype)
+    if decl is None:
+        return
+    usr: str = decl.get_usr()
+    if not usr:
+        return
+    dst = db.lookup_symbol(usr)
+    if dst is None or dst.id == src_id:
+        return
+    edge_id = db.add_edge(src_id, dst.id, 7)  # uses
+    if loc is not None and loc.line:
+        db.add_edge_site(edge_id, file_id, loc.line, loc.column,
+                         conditional=conditional)
+
 
 def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                   src_id: int, file_id: int,
@@ -398,6 +461,11 @@ def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                                 conditional=1 if cond_depth > 0 else 0,
                             )
         elif kind == cx.CursorKind.VAR_DECL:
+            # B2 uses: a LOCAL variable's declared type names a record/enum/
+            # typedef -> uses edge (src=enclosing fn). `Conf local;` counts as
+            # the function using Conf even when no method is called on it.
+            _emit_type_use(db, src_id, child.type, file_id, child.location,
+                           conditional=1 if cond_depth > 0 else 0)
             # B3 class-template instantiates (kind=5): when a variable's type is
             # a class-template instantiation, emit instantiates (src=enclosing fn,
             # dst=primary template) + template_arg rows.
@@ -494,6 +562,50 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                 _parent_sym = db.lookup_symbol(_parent_usr)
                 if _child_sym is not None and _parent_sym is not None:
                     db.add_edge(_parent_sym.id, _child_sym.id, 3)  # contains
+
+        # -- uses (kind=7): TYPE references in signatures / fields / vars ------
+        # A class named only as a parameter, return, field, variable, or
+        # typedef-underlying type never appears as a body DECL_REF_EXPR, so the
+        # body-descent `uses` pass misses it. Emit those signature-level uses
+        # here. Emitted FIRST (alongside contains) so it fires regardless of a
+        # later handler's `continue`. (Local-variable types inside bodies are
+        # handled in _body_descent; the walk does not descend into bodies here.)
+        if ck in _FUNCTION_KINDS:
+            _fn_usr = cursor.get_usr()
+            if _fn_usr:
+                _fn_sym = db.lookup_symbol(_fn_usr)
+                if _fn_sym is not None:
+                    # return type (constructors/destructors have none worth recording)
+                    if ck not in (cx.CursorKind.CONSTRUCTOR,
+                                  cx.CursorKind.DESTRUCTOR):
+                        _emit_type_use(db, _fn_sym.id, cursor.result_type,
+                                       file_id, cursor.location)
+                    for _arg in cursor.get_arguments():
+                        _emit_type_use(db, _fn_sym.id, _arg.type,
+                                       file_id, _arg.location)
+        elif ck == cx.CursorKind.FIELD_DECL:
+            _m_usr = cursor.get_usr()
+            if _m_usr:
+                _m_sym = db.lookup_symbol(_m_usr)
+                if _m_sym is not None:
+                    _emit_type_use(db, _m_sym.id, cursor.type, file_id,
+                                   cursor.location)
+        elif ck == cx.CursorKind.VAR_DECL:
+            # File-scope variable (locals are reached via _body_descent).
+            _v_usr = cursor.get_usr()
+            if _v_usr:
+                _v_sym = db.lookup_symbol(_v_usr)
+                if _v_sym is not None:
+                    _emit_type_use(db, _v_sym.id, cursor.type, file_id,
+                                   cursor.location)
+        elif ck in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):
+            _t_usr = cursor.get_usr()
+            if _t_usr:
+                _t_sym = db.lookup_symbol(_t_usr)
+                if _t_sym is not None:
+                    _emit_type_use(db, _t_sym.id,
+                                   cursor.underlying_typedef_type,
+                                   file_id, cursor.location)
 
         # -- CXX_BASE_SPECIFIER: inherits ---------------------------------
         # Derived class is the enclosing record from the walk parent, NOT

@@ -93,6 +93,70 @@ ExpansionLoc cursor_location(LibClang &lib, CXCursor cursor) {
   return loc;
 }
 
+// Strip pointer/reference/array layers off `t` and return the declaration
+// cursor of the named type it spells, or the null cursor when the type has no
+// user declaration (builtins like int, function pointers, …). Single-level by
+// design: resolves the type as WRITTEN (a typedef alias stays the alias),
+// mirroring ast.py:_named_type_decl.
+CXCursor named_type_decl(LibClang &lib, CXType t) {
+  for (int i = 0; i < 32; ++i) {            // guard against pathological nesting
+    const CXTypeKind tk = t.kind;
+    if (tk == CXType_Pointer || tk == CXType_LValueReference ||
+        tk == CXType_RValueReference) {
+      t = lib.clang_getPointeeType(t);
+    } else if (tk == CXType_ConstantArray || tk == CXType_IncompleteArray ||
+               tk == CXType_VariableArray || tk == CXType_DependentSizedArray) {
+      t = lib.clang_getArrayElementType(t);
+    } else {
+      break;
+    }
+  }
+  const CXCursor decl = lib.clang_getTypeDeclaration(t);
+  if (lib.clang_Cursor_isNull(decl) ||
+      is_invalid_kind(lib.clang_getCursorKind(decl))) {
+    return lib.clang_getNullCursor();
+  }
+  return decl;
+}
+
+// Emit a `uses` edge (kind=7) src -> the record/enum/typedef named by `ctype`
+// (parameter, return, field, variable, or typedef-underlying type), grounded
+// at `loc_cursor`'s location. Lookup-only like body descent (the type's symbol
+// must already be indexed, so builtins/unindexed stdlib types create neither
+// edges nor stubs); no self-edge. Mirrors ast.py:_emit_type_use.
+void emit_type_use(LibClang &lib, Storage &db, int64_t src_id, CXType ctype,
+                   int64_t file_id, CXCursor loc_cursor, int conditional) {
+  const CXCursor decl = named_type_decl(lib, ctype);
+  if (lib.clang_Cursor_isNull(decl)) {
+    return;
+  }
+  const std::string usr = CxString(lib, lib.clang_getCursorUSR(decl)).str();
+  if (usr.empty()) {
+    return;
+  }
+  const auto dst = db.lookup_symbol(usr);
+  if (!dst || dst->id == src_id) {
+    return;
+  }
+  Edge e;
+  e.src_id = src_id;
+  e.dst_id = dst->id;
+  e.kind = 7; // uses
+  e.count = 1;
+  const int64_t edge_id = db.add_edge(e);
+
+  const ExpansionLoc loc = cursor_location(lib, loc_cursor);
+  if (loc.line != 0) {
+    EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file_id;
+    site.line = static_cast<int64_t>(loc.line);
+    site.col = static_cast<int64_t>(loc.col);
+    site.conditional = conditional;
+    db.add_edge_site(site);
+  }
+}
+
 // _linkage (ast.py:77-79) via the explicit D13 table — the stored spellings
 // are DB content shared with Python-written rows.
 std::optional<std::string> linkage_name(CXLinkageKind linkage) {
@@ -621,6 +685,11 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
         }
       }
     } else if (kind == CXCursor_VarDecl) {
+      // B2 uses: a LOCAL variable's declared type names a record/enum/typedef
+      // -> uses edge (src=enclosing fn). `Conf local;` counts as the function
+      // using Conf even when no method is called on it.
+      emit_type_use(lib, *ctx->db, ctx->src_id, lib.clang_getCursorType(cursor),
+                    ctx->file_id, cursor, ctx->cond_depth > 0 ? 1 : 0);
       // B3 class-template instantiates (kind=5): when a variable's type is a
       // class-template instantiation, emit instantiates (src=enclosing fn,
       // dst=primary template) + template_arg rows.
@@ -767,6 +836,59 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
             e.count = 1;
             db_.add_edge(e);
           }
+        }
+      }
+    }
+
+    // -- uses (kind=7): TYPE references in signatures / fields / vars ------
+    // A class named only as a parameter, return, field, variable, or
+    // typedef-underlying type never appears as a body DECL_REF_EXPR, so the
+    // body-descent `uses` pass misses it. Emit those signature-level uses
+    // here. Emitted alongside contains (before any handler's early return).
+    // Local-variable types inside bodies are handled in body_descent_visitor;
+    // the walk here does not descend into bodies.
+    if (is_function_like(ck)) {
+      const std::string fn_usr =
+          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+      if (!fn_usr.empty()) {
+        const auto fn_sym = db_.lookup_symbol(fn_usr);
+        if (fn_sym) {
+          // return type (constructors/destructors have none worth recording)
+          if (ck != CXCursor_Constructor && ck != CXCursor_Destructor) {
+            emit_type_use(lib, db_, fn_sym->id,
+                          lib.clang_getCursorResultType(cursor), file_id,
+                          cursor, 0);
+          }
+          const int nargs = lib.clang_Cursor_getNumArguments(cursor);
+          for (int ai = 0; ai < nargs; ++ai) {
+            const CXCursor arg =
+                lib.clang_Cursor_getArgument(cursor, static_cast<unsigned>(ai));
+            emit_type_use(lib, db_, fn_sym->id, lib.clang_getCursorType(arg),
+                          file_id, arg, 0);
+          }
+        }
+      }
+    } else if (ck == CXCursor_FieldDecl || ck == CXCursor_VarDecl) {
+      // FIELD_DECL: field type. VAR_DECL: file-scope variable type (locals are
+      // reached via body_descent). src = the field/variable symbol itself.
+      const std::string sym_usr =
+          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+      if (!sym_usr.empty()) {
+        const auto sym = db_.lookup_symbol(sym_usr);
+        if (sym) {
+          emit_type_use(lib, db_, sym->id, lib.clang_getCursorType(cursor),
+                        file_id, cursor, 0);
+        }
+      }
+    } else if (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl) {
+      const std::string td_usr =
+          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+      if (!td_usr.empty()) {
+        const auto td_sym = db_.lookup_symbol(td_usr);
+        if (td_sym) {
+          emit_type_use(lib, db_, td_sym->id,
+                        lib.clang_getTypedefDeclUnderlyingType(cursor),
+                        file_id, cursor, 0);
         }
       }
     }
