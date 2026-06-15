@@ -53,7 +53,9 @@ struct ParsedArgs {
   bool no_graph = false;                  // index --no-graph
   bool rebuild = false;                   // resolve --rebuild
   std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
-  std::optional<std::string> index_db;    // set --db (index-path override)
+  std::optional<std::string> index_db;    // set/file/dump-cc --db (index override)
+  std::string target;                     // file COMPONENT://PATH
+  std::vector<std::string> op;            // file OP ... (REMAINDER tail)
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

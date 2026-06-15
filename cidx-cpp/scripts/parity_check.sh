@@ -214,6 +214,33 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve --rebuild
 
+  # `file` (per-file compile-flag editor) + dump-compile-commands (schema v8):
+  # addressed COMPONENT://RELPATH, the relpath is relative to the component
+  # root (parityproj's git root). REL makes the address independent of where
+  # that root sits. -set-flag/-unset-flag/-import-args mark the file
+  # args_overridden; -dump-args and dump-compile-commands emit JSON. Run before
+  # the delete block (which removes app.c + parityproj). Help, malformed
+  # target, unknown component, unknown op, and not-in-db all diff byte-strict.
+  GROOT="$(cd "$PROJECT_DIR" && git rev-parse --show-toplevel 2>/dev/null || echo "$LAB_ROOT")"
+  REL="${PROJECT_DIR#"$GROOT"/}"
+  APPADDR="parityproj://$REL/app.c"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -set-flag -DPARITY_FILE=1
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -set-flag -DPARITY_FILE=1
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -import-args "{\"directory\": \"$PROJECT_DIR\", \"file\": \"app.c\", \"arguments\": [\"cc\", \"-I.\", \"-DPARITY_IMP=2\", \"-c\", \"app.c\", \"-o\", \"app.o\"]}"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -unset-flag -DPARITY_IMP=2
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "parityproj://does/not/exist.c" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "bogustarget" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "nocomp://x.c" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -bogus-op
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands nosuchcomp
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands -h
+
   # delete subcommand: help, nested-choice errors, per-leaf help, the
   # required-mutex / mutex / bad-int / 0-match error paths, dry-run previews,
   # then REAL deletes exercising cascade + orphan-symbol purge. Placed last so

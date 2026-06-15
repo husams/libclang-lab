@@ -77,7 +77,8 @@ void check_migrated(const std::string &db_path) {
     CHECK_MESSAGE(has_col(scols, c), "symbol." << c << " present");
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
-  CHECK(meta_version(raw) == "7");
+  CHECK(has_col(table_columns(raw, "file"), "args_overridden"));
+  CHECK(meta_version(raw) == "8");
 
   // qual_name: longest parent_usr chain wins; the anonymous-namespace level
   // (empty parent spelling) is skipped.

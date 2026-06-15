@@ -26,7 +26,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 7;
+constexpr int kSchemaVersion = 8;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
 // SQL CHECK and by an application-side StorageError (§3.2).
@@ -121,6 +121,13 @@ public:
                          const std::optional<double> &mtime = std::nullopt);
   // Flip the indexed/pending flag in place; symbols are untouched.
   void set_file_indexed(int64_t file_id, bool indexed);
+  // Replace a file's stored compile flags (and optionally its driver) and mark
+  // it args_overridden=1 so a re-import (without --force) keeps the edit. Used
+  // by `cidx file -set-flag/-unset-flag/-import-args`.
+  void set_file_compile_options(
+      int64_t file_id, const std::vector<std::string> &options,
+      const std::optional<std::string> &driver = std::nullopt,
+      bool update_driver = false);
   bool is_file_indexed(const std::string &abs_path,
                        const std::optional<double> &mtime = std::nullopt,
                        const std::optional<std::string> &md5 = std::nullopt);

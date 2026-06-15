@@ -382,7 +382,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v7 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v8 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -419,7 +419,8 @@ TEST_CASE("fresh Storage produces schema v7 (file-backed and :memory:)") {
   CHECK(cols("file") == std::vector<std::string>{"id", "directory_id", "name",
                                                  "mtime", "md5",
                                                  "compile_options", "driver",
-                                                 "indexed", "indexed_at"});
+                                                 "indexed", "indexed_at",
+                                                 "args_overridden"});
   CHECK(cols("symbol") == std::vector<std::string>{
                               "id", "usr", "spelling", "qual_name",
                               "display_name", "kind", "type_info", "file_id",
@@ -447,7 +448,7 @@ TEST_CASE("fresh Storage produces schema v7 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "7");
+    CHECK(st.col_text(0) == "8");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");
