@@ -961,9 +961,14 @@ def cmd_graph_hierarchy(args) -> int:
     if sym is None:
         return rc
     direct = not args.transitive
+    access = getattr(args, "access", None)
     bases = g.bases(sym, direct=direct)
     subs = g.subclasses(sym, direct=direct)
-    mems = g.members(sym)
+    try:
+        mems = g.members(sym, access=None if access == "all" else access)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps({
             "symbol": sym.to_dict(),
@@ -1261,6 +1266,9 @@ def main(argv=None) -> int:
     _selector(q)
     q.add_argument("--transitive", action="store_true",
                    help="walk the whole inheritance tree, not just direct edges")
+    q.add_argument("--access", choices=("public", "protected", "private", "all"),
+                   default="all",
+                   help="filter members by C++ access specifier (default all)")
     q.set_defaults(fn=cmd_graph_hierarchy)
 
     q = gsub.add_parser("dispatch",

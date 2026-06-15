@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from indexer.query import (
-    GraphQuery, Site, NoIndexError, NoEdgesError, default_db_path,
+    GraphQuery, Sym, Site, NoIndexError, NoEdgesError, default_db_path,
 )
 
 
@@ -127,6 +127,21 @@ def test_neighbors_direction(g):
     assert g.neighbors(base, ("inherits",), "out") == []
 
 
+def test_neighbors_with_kind_returns_relation_type(g):
+    base = g.get("c:@S@Base")
+    # default: plain Syms (no relation type)
+    plain = g.neighbors(base, ("inherits",), "in")
+    assert all(isinstance(s, Sym) for s in plain)
+    # with_kind: (Sym, edge_kind) tuples
+    tagged = g.neighbors(base, ("inherits",), "in", with_kind=True)
+    assert tagged == [(plain[0], "inherits")]
+    # spanning multiple kinds annotates each peer with how it was reached
+    main = g.get("c:@F@main")
+    kinds = {kind for _s, kind in
+             g.neighbors(main, None, "out", with_kind=True)}
+    assert "calls" in kinds
+
+
 def test_walk_bounded_depth(g):
     main = g.get("c:@F@main")
     tr = g.walk(main, ("calls",), "out", depth=1)
@@ -180,6 +195,26 @@ def test_members_unions_in_and_out_edges(g):
     members = {s.name for s in g.members(base)}
     # field_of (in) + method_of (in) + contains (out) all included
     assert members == {"Base::x", "Base::draw", "Base::Nested"}
+
+
+def test_members_access_filter(g):
+    base = g.get("c:@S@Base")
+    # seed: Base::draw public (method), Base::Nested public (struct),
+    #       Base::x private (member)
+    assert {s.name for s in g.members(base, access="public")} == \
+        {"Base::draw", "Base::Nested"}
+    assert {s.name for s in g.members(base, access="private")} == {"Base::x"}
+    assert g.members(base, access="protected") == []
+    # None and 'all' both mean "every member"
+    assert {s.name for s in g.members(base)} == \
+        {s.name for s in g.members(base, access="all")} == \
+        {"Base::x", "Base::draw", "Base::Nested"}
+
+
+def test_members_access_invalid_raises(g):
+    base = g.get("c:@S@Base")
+    with pytest.raises(ValueError, match="unknown access"):
+        g.members(base, access="bogus")
 
 
 # --------------------------------------------------------------------------- #

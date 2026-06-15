@@ -59,10 +59,20 @@ def main() -> None:
         # ------------------------------------------------------------------- #
         # Each member Sym carries .access (public/protected/private) and .kind
         # (method / member / constructor / destructor / …).
-        print("\n== members ==")
+        #
+        # members(access=...) filters by access specifier:
+        #   None / 'all' (default) -> every member
+        #   'public' | 'protected' | 'private' -> just that visibility
+        # A member with no recorded access (e.g. C struct fields) only shows up
+        # under None/'all'. An unknown value raises ValueError.
+        print("\n== members (all) ==")
         for m in g.members(cls):
             acc = m.access or "?"
             print(f"   {acc:<10} {m.kind:<12} {m.name}")
+
+        print("\n== members (public only) ==")
+        for m in g.members(cls, access="public"):
+            print(f"   {m.kind:<12} {m.name}")
 
         # ------------------------------------------------------------------- #
         # virtual dispatch — expand a method into its run-time target set
