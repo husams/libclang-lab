@@ -273,6 +273,33 @@ public:
     return ::clang_getCanonicalCursor(c);
   }
 
+  // -- type navigation (signature/field/variable `uses` extraction) ---------
+
+  // Pointee of a pointer/reference type (Conf * -> Conf).
+  CXType clang_getPointeeType(CXType t) const {
+    return ::clang_getPointeeType(t);
+  }
+  // Element of an array type (Conf[] -> Conf).
+  CXType clang_getArrayElementType(CXType t) const {
+    return ::clang_getArrayElementType(t);
+  }
+  // Result (return) type of a function/method cursor.
+  CXType clang_getCursorResultType(CXCursor c) const {
+    return ::clang_getCursorResultType(c);
+  }
+  // Number of formal arguments of a function/method cursor (-1 if not a fn).
+  int clang_Cursor_getNumArguments(CXCursor c) const {
+    return ::clang_Cursor_getNumArguments(c);
+  }
+  // i-th formal-argument cursor of a function/method.
+  CXCursor clang_Cursor_getArgument(CXCursor c, unsigned i) const {
+    return ::clang_Cursor_getArgument(c, i);
+  }
+  // Underlying type behind a typedef/type-alias declaration cursor.
+  CXType clang_getTypedefDeclUnderlyingType(CXCursor c) const {
+    return ::clang_getTypedefDeclUnderlyingType(c);
+  }
+
   // Null cursor guard.
   CXCursor clang_getNullCursor() const { return ::clang_getNullCursor(); }
   int clang_Cursor_isNull(CXCursor c) const { return ::clang_Cursor_isNull(c); }
