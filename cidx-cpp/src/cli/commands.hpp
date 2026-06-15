@@ -45,6 +45,8 @@ int cmd_delete_component(const ParsedArgs &args, Context &ctx);
 int cmd_delete_dir(const ParsedArgs &args, Context &ctx);
 int cmd_delete_file(const ParsedArgs &args, Context &ctx);
 int cmd_delete_symbol(const ParsedArgs &args, Context &ctx);
+int cmd_file(const ParsedArgs &args, Context &ctx);
+int cmd_dump_compile_commands(const ParsedArgs &args, Context &ctx);
 
 // Dispatch on args.command/args.what (args.help_text handled by the caller).
 int run_command(const ParsedArgs &args, Context &ctx);

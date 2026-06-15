@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS file (
                                         -- at parse time (custom toolchains)
     indexed         INTEGER NOT NULL DEFAULT 0,
     indexed_at      TEXT,               -- ISO timestamp of last successful index
+    args_overridden INTEGER NOT NULL DEFAULT 0,  -- compile_options/driver were
+                                        -- edited by `cidx file`; a re-import
+                                        -- (without --force) must NOT clobber them
     UNIQUE (directory_id, name)
 );
 
@@ -203,6 +206,7 @@ class File:
     driver: Optional[str] = None
     indexed: bool = False
     indexed_at: Optional[str] = None
+    args_overridden: bool = False
     id: Optional[int] = None
 
 
@@ -239,6 +243,7 @@ def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
         kwargs["resolved"] = bool(kwargs["resolved"])
     if cls is File:
         kwargs["indexed"] = bool(kwargs["indexed"])
+        kwargs["args_overridden"] = bool(kwargs["args_overridden"])
         if kwargs["compile_options"] is not None:
             kwargs["compile_options"] = json.loads(kwargs["compile_options"])
     return cls(**kwargs)
@@ -272,6 +277,9 @@ class Storage:
         it is copied over; definition rows get their decl site on reindex.
         v5 -> v6: adds file.driver (compile-command argv[0]); backfilled on
         the next `import`.
+        v7 -> v8: adds file.args_overridden (0/1); marks files whose compile
+        flags were hand-edited via `cidx file` so re-import does not clobber
+        them. Defaults to 0; no backfill needed.
         """
         tables = {r[0] for r in self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -315,6 +323,13 @@ class Storage:
         if "file" in tables and "driver" not in fcols:
             # No backfill possible from stored data -- re-import to populate.
             self._conn.execute("ALTER TABLE file ADD COLUMN driver TEXT")
+            changed = True
+        if "file" in tables and "args_overridden" not in fcols:
+            # v7 -> v8: per-file flag override marker (`cidx file`). Existing
+            # rows default to 0 (not overridden), so re-import behaves as before.
+            self._conn.execute(
+                "ALTER TABLE file ADD COLUMN args_overridden INTEGER "
+                "NOT NULL DEFAULT 0")
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -556,8 +571,14 @@ class Storage:
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(directory_id, name) DO UPDATE SET "
             "  mtime           = COALESCE(excluded.mtime, file.mtime), "
-            "  compile_options = COALESCE(excluded.compile_options, file.compile_options), "
-            "  driver          = COALESCE(excluded.driver, file.driver), "
+            "  compile_options = CASE WHEN file.args_overridden = 1 "
+            "                         THEN file.compile_options "
+            "                         ELSE COALESCE(excluded.compile_options, "
+            "                                       file.compile_options) END, "
+            "  driver          = CASE WHEN file.args_overridden = 1 "
+            "                         THEN file.driver "
+            "                         ELSE COALESCE(excluded.driver, "
+            "                                       file.driver) END, "
             "  indexed         = CASE WHEN excluded.md5 IS NOT NULL "
             "                          AND excluded.md5 IS NOT file.md5 "
             "                         THEN 0 ELSE file.indexed END, "
@@ -664,6 +685,27 @@ class Storage:
             "UPDATE file SET indexed = ? WHERE id = ?",
             (int(bool(indexed)), file_id),
         )
+        self._commit()
+
+    def set_file_compile_options(self, file_id: int, options: list[str],
+                                 driver: Optional[str] = None,
+                                 update_driver: bool = False) -> None:
+        """Replace a file's stored compile flags (and optionally its driver) and
+        mark it args_overridden=1 so a later `import` (without --force) keeps the
+        edit. Used by `cidx file -set-flag/-unset-flag/-import-args`."""
+        opts = json.dumps(options)
+        if update_driver:
+            self._conn.execute(
+                "UPDATE file SET compile_options = ?, driver = ?, "
+                "args_overridden = 1 WHERE id = ?",
+                (opts, driver, file_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE file SET compile_options = ?, args_overridden = 1 "
+                "WHERE id = ?",
+                (opts, file_id),
+            )
         self._commit()
 
     def is_file_indexed(self, abs_path: str, mtime: Optional[float] = None,

@@ -393,6 +393,138 @@ def cmd_set(args) -> int:
     return 0
 
 
+# -- file (per-file compile-flag editor) --------------------------------------
+
+_FILE_OPS = ("-set-flag", "-unset-flag", "-import-args", "-dump-args")
+
+
+def _parse_file_target(db: Storage, target: str):
+    """'COMPONENT://RELPATH' -> (Component, abs_path).
+
+    Raises ValueError on a malformed target, LookupError on an unknown
+    component. The relative path is resolved against the component root; a
+    leading '/' is stripped so the address can never escape the component."""
+    sep = "://"
+    comp_name, found, rel = target.partition(sep)
+    if not found or not comp_name or not rel:
+        raise ValueError(
+            f"expected COMPONENT://PATH (e.g. 'mylib://src/foo.c'), "
+            f"got {target!r}")
+    comp = db.get_component_by_name(comp_name)
+    if comp is None:
+        raise LookupError(f"no component named {comp_name!r}")
+    abs_path = os.path.normpath(os.path.join(comp.path, rel.lstrip("/")))
+    return comp, abs_path
+
+
+def cmd_file(args) -> int:
+    """Inspect or edit one file's stored compile flags, addressed as
+    COMPONENT://RELPATH. Edits mark the file args_overridden so a later
+    `import` (without --force) keeps them."""
+    op = list(args.op)
+    if not op:
+        op = ["-dump-args"]
+    action, rest = op[0], op[1:]
+    if action not in _FILE_OPS:
+        print(f"error: unknown operation {action!r}; supported: "
+              f"{', '.join(_FILE_OPS)}", file=sys.stderr)
+        return 2
+
+    with Storage(args.index) as db:
+        try:
+            _comp, ap = _parse_file_target(db, args.target)
+        except (ValueError, LookupError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        rec = db.get_file(ap)
+        if rec is None:
+            print(f"error: not in index database: {ap}", file=sys.stderr)
+            return 1
+        opts = list(rec.compile_options or [])
+
+        if action == "-dump-args":
+            print(json.dumps(opts))
+            return 0
+
+        if action in ("-set-flag", "-unset-flag"):
+            if len(rest) != 1:
+                print(f"error: {action} takes exactly one FLAG",
+                      file=sys.stderr)
+                return 2
+            flag = rest[0]
+            if action == "-set-flag":
+                if flag in opts:
+                    print(f"flag already present on {ap}: {flag}")
+                    return 0
+                opts.append(flag)
+                db.set_file_compile_options(rec.id, opts)
+                print(f"added flag to {ap}: {flag}")
+                return 0
+            n = opts.count(flag)
+            if n == 0:
+                print(f"flag not present on {ap}: {flag}")
+                return 0
+            opts = [o for o in opts if o != flag]
+            db.set_file_compile_options(rec.id, opts)
+            print(f"removed flag from {ap}: {flag} "
+                  f"({n} {_plural(n, 'occurrence', 'occurrences')})")
+            return 0
+
+        # -import-args
+        if len(rest) != 1:
+            print("error: -import-args takes exactly one JSON entry (or @FILE)",
+                  file=sys.stderr)
+            return 2
+        raw = rest[0]
+        if raw.startswith("@"):
+            try:
+                with open(raw[1:]) as fh:
+                    raw = fh.read()
+            except OSError as e:
+                print(f"error: cannot read {raw[1:]}: {e}", file=sys.stderr)
+                return 1
+        try:
+            commands = compiledb.commands_from_text(raw)
+        except Exception as e:                          # cindex raises a plain error
+            print(f"error: -import-args: cannot parse compile command: {e}",
+                  file=sys.stderr)
+            return 1
+        if not commands:
+            print("error: -import-args: no compile command found (need "
+                  "directory, file, and arguments/command)", file=sys.stderr)
+            return 1
+        cmd = commands[0]
+        new_opts = compiledb.strip_for_libclang(cmd)
+        db.set_file_compile_options(rec.id, new_opts,
+                                    driver=compiledb.driver(cmd),
+                                    update_driver=True)
+        print(f"imported {len(new_opts)} arg(s) for {ap}")
+        return 0
+
+
+def cmd_dump_compile_commands(args) -> int:
+    """Emit a compile_commands.json for a component: one entry per file that has
+    stored compile flags, reconstructed as {directory, file, arguments}."""
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        entries = []
+        for f, ap in db.list_files(component_id=comp.id if comp else None):
+            if not f.compile_options:
+                continue
+            driver = f.driver or "cc"
+            entries.append({
+                "directory": comp.path if comp else os.path.dirname(ap),
+                "file": ap,
+                "arguments": [driver] + list(f.compile_options) + [ap],
+            })
+    print(json.dumps(entries, indent=2))
+    return 0
+
+
 def _print_symbols(db: Storage, hits, limit: int) -> None:
     """The symbol table shared by 'search' and 'list symbols'."""
     shown = hits[:limit] if limit else hits
@@ -1062,6 +1194,25 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="preview the matches without changing anything")
     p.set_defaults(fn=cmd_set)
+
+    p = sub.add_parser("file",
+                       help="inspect or edit one file's stored compile flags")
+    p.add_argument("target", metavar="COMPONENT://PATH",
+                   help="file address, e.g. 'mylib://src/foo.c'")
+    p.add_argument("op", nargs=argparse.REMAINDER, metavar="OP",
+                   help="-set-flag FLAG | -unset-flag FLAG | -import-args JSON "
+                        "| -dump-args (default when omitted)")
+    p.add_argument("--db", dest="graph_db", metavar="PATH",
+                   help="operate on this index DB (default: the standard index)")
+    p.set_defaults(fn=cmd_file)
+
+    p = sub.add_parser("dump-compile-commands",
+                       help="emit a compile_commands.json for a component")
+    p.add_argument("component", metavar="COMPONENT",
+                   help="component whose files to emit")
+    p.add_argument("--db", dest="graph_db", metavar="PATH",
+                   help="operate on this index DB (default: the standard index)")
+    p.set_defaults(fn=cmd_dump_compile_commands)
 
     p = sub.add_parser("search", help="fuzzy-search symbols by qualified name")
     p.add_argument("pattern",

@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS file (
     driver          TEXT,
     indexed         INTEGER NOT NULL DEFAULT 0,
     indexed_at      TEXT,
+    args_overridden INTEGER NOT NULL DEFAULT 0,
     UNIQUE (directory_id, name)
 );
 
@@ -143,7 +144,7 @@ CREATE TABLE IF NOT EXISTS template_arg (
     PRIMARY KEY (owner_id, position)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '7');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '8');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -190,7 +191,7 @@ constexpr char kComponentCols[] = "id, name, path, kind";
 constexpr char kDirectoryCols[] = "id, component_id, path";
 constexpr char kFileCols[] =
     "id, directory_id, name, mtime, md5, compile_options, driver, indexed, "
-    "indexed_at";
+    "indexed_at, args_overridden";
 constexpr char kSymbolCols[] =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
@@ -276,6 +277,7 @@ File file_from(const SqliteStmt &st) {
   f.driver = opt_text(st, 6);
   f.indexed = st.col_int64(7) != 0;
   f.indexed_at = opt_text(st, 8);
+  f.args_overridden = st.col_int64(9) != 0;
   return f;
 }
 
@@ -474,6 +476,13 @@ void Storage::migrate() {
     if (!has_col(fcols, "driver")) {
       // No backfill possible from stored data -- re-import to populate.
       db_.exec("ALTER TABLE file ADD COLUMN driver TEXT");
+      changed = true;
+    }
+    // v7 -> v8: per-file flag override marker (`cidx file`). Existing rows
+    // default to 0 (not overridden), so re-import behaves as before.
+    if (!has_col(fcols, "args_overridden")) {
+      db_.exec("ALTER TABLE file ADD COLUMN args_overridden INTEGER "
+               "NOT NULL DEFAULT 0");
       changed = true;
     }
   }
@@ -765,9 +774,14 @@ int64_t Storage::add_file(
                   "VALUES (?, ?, ?, ?, ?, ?) "
                   "ON CONFLICT(directory_id, name) DO UPDATE SET "
                   "  mtime           = COALESCE(excluded.mtime, file.mtime), "
-                  "  compile_options = COALESCE(excluded.compile_options, "
-                  "file.compile_options), "
-                  "  driver          = COALESCE(excluded.driver, file.driver), "
+                  "  compile_options = CASE WHEN file.args_overridden = 1 "
+                  "                         THEN file.compile_options "
+                  "                         ELSE COALESCE(excluded.compile_options, "
+                  "file.compile_options) END, "
+                  "  driver          = CASE WHEN file.args_overridden = 1 "
+                  "                         THEN file.driver "
+                  "                         ELSE COALESCE(excluded.driver, "
+                  "file.driver) END, "
                   "  indexed         = CASE WHEN excluded.md5 IS NOT NULL "
                   "                          AND excluded.md5 IS NOT file.md5 "
                   "                         THEN 0 ELSE file.indexed END, "
@@ -825,7 +839,7 @@ std::optional<File> Storage::get_file(const std::string &abs_path) {
   const auto &[comp_id, rel_dir, name] = *sp;
   auto st = db_.prepare(
       "SELECT f.id, f.directory_id, f.name, f.mtime, f.md5, f.compile_options, "
-      "f.driver, f.indexed, f.indexed_at "
+      "f.driver, f.indexed, f.indexed_at, f.args_overridden "
       "FROM file f JOIN directory d ON d.id = f.directory_id "
       "WHERE d.component_id = ? AND d.path = ? AND f.name = ?");
   st.bind(1, comp_id);
@@ -879,7 +893,8 @@ Storage::list_files(const std::optional<int64_t> &component_id,
                     const std::optional<bool> &indexed) {
   std::string sql =
       "SELECT f.id, f.directory_id, f.name, f.mtime, f.md5, f.compile_options, "
-      "f.driver, f.indexed, f.indexed_at, c.path AS root, d.path AS rel "
+      "f.driver, f.indexed, f.indexed_at, f.args_overridden, "
+      "c.path AS root, d.path AS rel "
       "FROM file f JOIN directory d ON d.id = f.directory_id "
       "JOIN component c ON c.id = d.component_id";
   std::vector<std::string> where;
@@ -911,7 +926,7 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   while (st.step()) {
     out.emplace_back(
         file_from(st),
-        reconstruct_path(st.col_text(9), st.col_text(10), st.col_text(2)));
+        reconstruct_path(st.col_text(10), st.col_text(11), st.col_text(2)));
   }
   return out;
 }
@@ -934,6 +949,28 @@ void Storage::set_file_indexed(int64_t file_id, bool indexed) {
   st.bind(1, static_cast<int64_t>(indexed ? 1 : 0));
   st.bind(2, file_id);
   st.step_done();
+}
+
+void Storage::set_file_compile_options(
+    int64_t file_id, const std::vector<std::string> &options,
+    const std::optional<std::string> &driver, bool update_driver) {
+  // Replace a file's stored flags (and optionally its driver) and mark it
+  // args_overridden=1 so a later `import` (without --force) keeps the edit.
+  const std::string opts = json_min::encode_string_array(options);
+  if (update_driver) {
+    auto st = db_.prepare("UPDATE file SET compile_options = ?, driver = ?, "
+                          "args_overridden = 1 WHERE id = ?");
+    st.bind(1, std::string_view(opts));
+    bind_opt(st, 2, driver);
+    st.bind(3, file_id);
+    st.step_done();
+  } else {
+    auto st = db_.prepare("UPDATE file SET compile_options = ?, "
+                          "args_overridden = 1 WHERE id = ?");
+    st.bind(1, std::string_view(opts));
+    st.bind(2, file_id);
+    st.step_done();
+  }
 }
 
 bool Storage::is_file_indexed(const std::string &abs_path,

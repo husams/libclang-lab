@@ -34,6 +34,7 @@ struct File {
   std::optional<std::string> driver;
   bool indexed = false;
   std::optional<std::string> indexed_at;
+  bool args_overridden = false; // flags hand-edited via `cidx file`
 };
 
 struct Symbol {

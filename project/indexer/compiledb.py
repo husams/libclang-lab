@@ -8,8 +8,26 @@ must NOT see; relative -I paths are resolved against the command's directory.
 from __future__ import annotations
 
 import os
+import tempfile
 
 from clang.cindex import CompilationDatabase
+
+
+def commands_from_text(text: str):
+    """Parse compile_commands.json text into clang compile-command objects.
+
+    Accepts either a single entry object ('{...}') or a full array ('[...]');
+    a lone object is wrapped in an array. The text is written to a throwaway
+    compile_commands.json and loaded through the same CompilationDatabase path
+    `import` uses, so `cidx file -import-args` strips args identically. Each
+    entry needs `directory`, `file`, and `arguments` (or `command`)."""
+    body = text.lstrip()
+    if body.startswith("{"):
+        text = "[" + text + "]"
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "compile_commands.json"), "w") as fh:
+            fh.write(text)
+        return load_commands(d)
 
 
 def db_directory(db_path: str) -> str:

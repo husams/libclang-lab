@@ -59,9 +59,10 @@ int main(int argc, char **argv) {
     ctx.cache_dir = cidx::cli::resolve_cache_dir();
     makedirs(ctx.cache_dir);
     ctx.index_path = cidx::pathutil::join(ctx.cache_dir, "index.db");
-    // `set --db PATH` operates on a non-standard index (parity with the Python
-    // tool, whose --db overrides the default index path for `set`).
-    if (parsed.command == "set" && parsed.index_db) {
+    // `--db PATH` operates on a non-standard index (parity with the Python
+    // tool, whose --db overrides the default index path for set/file/
+    // dump-compile-commands).
+    if (parsed.index_db) {
       ctx.index_path = *parsed.index_db;
     }
     cidx::Logger::root().set_file(

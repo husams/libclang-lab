@@ -321,7 +321,8 @@ struct GoldFixture {
 const char kTopUsage[] =
     "usage: cidx [-h]\n"
     "            "
-    "{init,add-source,import,index,resolve,set,search,show,list,ls,delete} "
+    "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
+    "search,show,list,ls,delete} "
     "...\n";
 
 // Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
@@ -387,8 +388,70 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, add-source, import, index, resolve, set, search, show, "
-            "list, ls, delete)\n");
+            "from init, add-source, import, index, resolve, set, file, "
+            "dump-compile-commands, search, show, list, ls, delete)\n");
+}
+
+TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
+  // $ cidx file demo://src/a.c -set-flag -I/x -DFOO
+  cli::ParsedArgs pa =
+      cli::parse_args({"file", "demo://src/a.c", "-set-flag", "-I/x", "-DFOO"});
+  CHECK(pa.command == "file");
+  CHECK(pa.target == "demo://src/a.c");
+  CHECK(pa.op == std::vector<std::string>{"-set-flag", "-I/x", "-DFOO"});
+
+  // No op -> empty REMAINDER (the handler defaults to -dump-args).
+  pa = cli::parse_args({"file", "demo://src/a.c"});
+  CHECK(pa.target == "demo://src/a.c");
+  CHECK(pa.op.empty());
+
+  // --db before the target is parsed as an option; the rest is the tail.
+  pa = cli::parse_args({"file", "--db", "/tmp/x.db", "demo://a.c", "-dump-args"});
+  CHECK(pa.index_db == "/tmp/x.db");
+  CHECK(pa.target == "demo://a.c");
+  CHECK(pa.op == std::vector<std::string>{"-dump-args"});
+}
+
+TEST_CASE("args: file — missing target -> exit 2, required positional") {
+  const ParseFail f = parse_fail({"file"});
+  CHECK(f.code == 2);
+  CHECK(f.msg ==
+        "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n"
+        "cidx file: error: the following arguments are required: "
+        "COMPONENT://PATH\n");
+}
+
+TEST_CASE("args: file -h returns help text") {
+  const cli::ParsedArgs pa = cli::parse_args({"file", "-h"});
+  REQUIRE(pa.help_text);
+  CHECK(*pa.help_text ==
+        "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n"
+        "\n"
+        "positional arguments:\n"
+        "  COMPONENT://PATH  file address, e.g. 'mylib://src/foo.c'\n"
+        "  OP                -set-flag FLAG | -unset-flag FLAG | -import-args "
+        "JSON |\n"
+        "                    -dump-args (default when omitted)\n"
+        "\n"
+        "options:\n"
+        "  -h, --help        show this help message and exit\n"
+        "  --db PATH         operate on this index DB (default: the standard "
+        "index)\n");
+}
+
+TEST_CASE("args: dump-compile-commands parses the component positional") {
+  cli::ParsedArgs pa =
+      cli::parse_args({"dump-compile-commands", "--db", "/tmp/x.db", "demo"});
+  CHECK(pa.command == "dump-compile-commands");
+  CHECK(pa.component == "demo");
+  CHECK(pa.index_db == "/tmp/x.db");
+
+  const ParseFail f = parse_fail({"dump-compile-commands"});
+  CHECK(f.code == 2);
+  CHECK(f.msg ==
+        "usage: cidx dump-compile-commands [-h] [--db PATH] COMPONENT\n"
+        "cidx dump-compile-commands: error: the following arguments are "
+        "required: COMPONENT\n");
 }
 
 TEST_CASE("args: unknown flag -> exit 2, TOP-level unrecognized arguments") {
@@ -723,7 +786,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "\n"
           "positional arguments:\n"
           "  "
-          "{init,add-source,import,index,resolve,set,search,show,list,ls,delete}"
+          "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
+          "search,show,list,ls,delete}"
           "\n"
           "    init                create a blank index database\n"
           "    add-source          register a component\n"
@@ -733,6 +797,11 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "counts\n"
           "    set                 set a mutable file attribute (e.g. pending "
           "status)\n"
+          "    file                inspect or edit one file's stored compile "
+          "flags\n"
+          "    dump-compile-commands\n"
+          "                        emit a compile_commands.json for a "
+          "component\n"
           "    search              fuzzy-search symbols by qualified name\n"
           "    show                show full details of one symbol or "
           "file\n"

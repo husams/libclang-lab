@@ -21,19 +21,22 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h]\n"
     "            "
-    "{init,add-source,import,index,resolve,set,search,show,list,ls,delete} "
+    "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
+    "search,show,list,ls,delete} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h]\n"
     "            "
-    "{init,add-source,import,index,resolve,set,search,show,list,ls,delete} "
+    "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
+    "search,show,list,ls,delete} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,index,resolve,set,search,show,list,ls,delete}\n"
+    "  {init,add-source,import,index,resolve,set,file,dump-compile-commands,"
+    "search,show,list,ls,delete}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
@@ -41,6 +44,9 @@ const char kTopHelp[] =
     "    resolve             finalize cross-repo edges and roll up edge counts\n"
     "    set                 set a mutable file attribute (e.g. pending "
     "status)\n"
+    "    file                inspect or edit one file's stored compile flags\n"
+    "    dump-compile-commands\n"
+    "                        emit a compile_commands.json for a component\n"
     "    search              fuzzy-search symbols by qualified name\n"
     "    show                show full details of one symbol or file\n"
     "    list (ls)           browse the index: components, dirs, files, "
@@ -140,6 +146,36 @@ const char kSetHelp[] =
     "  --db PATH             operate on this index DB (default: the standard "
     "index)\n"
     "  --dry-run             preview the matches without changing anything\n";
+
+const char kFileUsage[] =
+    "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n";
+
+const char kFileHelp[] =
+    "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  COMPONENT://PATH  file address, e.g. 'mylib://src/foo.c'\n"
+    "  OP                -set-flag FLAG | -unset-flag FLAG | -import-args JSON "
+    "|\n"
+    "                    -dump-args (default when omitted)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help        show this help message and exit\n"
+    "  --db PATH         operate on this index DB (default: the standard "
+    "index)\n";
+
+const char kDumpCcUsage[] =
+    "usage: cidx dump-compile-commands [-h] [--db PATH] COMPONENT\n";
+
+const char kDumpCcHelp[] =
+    "usage: cidx dump-compile-commands [-h] [--db PATH] COMPONENT\n"
+    "\n"
+    "positional arguments:\n"
+    "  COMPONENT   component whose files to emit\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   operate on this index DB (default: the standard index)\n";
 
 // The 17 symbol kinds, sorted — sorted(SYMBOL_KINDS) in cli.py.
 #define CIDX_KIND_BRACE                                                        \
@@ -409,8 +445,10 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",   "add-source", "import", "index", "resolve", "set",
-    "search", "show",       "list",   "ls",    "delete"};
+    "init",  "add-source", "import",                "index",
+    "resolve", "set",      "file",                  "dump-compile-commands",
+    "search",  "show",     "list",                  "ls",
+    "delete"};
 const std::vector<std::string> kShowWhats = {"symbol", "file"};
 const std::vector<std::string> kListWhats = {"components", "dirs", "files",
                                              "symbols"};
@@ -444,6 +482,9 @@ struct Spec {
   // mutex group ids that argparse marks required: when none of a group's
   // members is seen, argparse fails with "one of the arguments ... is required"
   std::vector<int> required_mutex = {};
+  // argparse.REMAINDER: once the fixed positionals are filled, every remaining
+  // token (option-looking ones included) is captured verbatim into st.rest.
+  bool remainder = false;
 };
 
 struct ParseState {
@@ -606,6 +647,13 @@ ParseState parse_leaf(const Spec &spec, const std::vector<std::string> &tokens,
   const std::size_t n = tokens.size();
   while (i < n) {
     const std::string &tok = tokens[i];
+    // argparse.REMAINDER: after the fixed positionals are filled, capture the
+    // rest verbatim (including -flag-looking tokens) without option parsing.
+    if (spec.remainder && st.positionals.size() >= spec.positionals.size()) {
+      st.rest.push_back(tok);
+      ++i;
+      continue;
+    }
     if (!only_positionals && tok == "--") {
       only_positionals = true;
       ++i;
@@ -875,6 +923,32 @@ const Spec kSetSpec = {
     {"FIELD=VALUE"}, // required
 };
 
+const Spec kFileSpec = {
+    "cidx file",
+    kFileUsage,
+    kFileHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"COMPONENT://PATH"}, // the required target positional
+    false,                // surplus is captured by the REMAINDER tail, not rest
+    {"COMPONENT://PATH"}, // required
+    {},                   // no required-mutex groups
+    true,                 // nargs=REMAINDER: capture OP ... verbatim
+};
+
+const Spec kDumpCcSpec = {
+    "cidx dump-compile-commands",
+    kDumpCcUsage,
+    kDumpCcHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"COMPONENT"}, // the required component positional
+    false,
+    {"COMPONENT"}, // required
+};
+
 const Spec kSearchSpec = {
     "cidx search",
     kSearchUsage,
@@ -1110,6 +1184,23 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.file_filter = opt_value(st, "--file");
     pa.index_db = opt_value(st, "--db");
     pa.dry_run = st.flags.count("--dry-run") != 0;
+  } else if (pa.command == "file") {
+    ParseState st = parse_leaf(kFileSpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kFileHelp;
+      return pa;
+    }
+    pa.target = st.positionals[0];
+    pa.op = st.rest; // REMAINDER tail: the operation + its args, verbatim
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.command == "dump-compile-commands") {
+    ParseState st = parse_leaf(kDumpCcSpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kDumpCcHelp;
+      return pa;
+    }
+    pa.component = st.positionals[0];
+    pa.index_db = opt_value(st, "--db");
   } else if (pa.command == "search") {
     ParseState st = parse_leaf(kSearchSpec, argv, i, extras);
     if (st.help) {
