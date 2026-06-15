@@ -178,11 +178,19 @@ int index_pending(Storage &db, Parser &parser, AstIndexer &indexer,
   int done = 0;
   int skipped = 0;
   int failed = 0;
+  int deferred = 0;
   for (const auto &row : db.list_files()) {
     const File &rec = row.first;
     const std::string &path = row.second;
     if (files::index_status(rec, path) == files::IndexStatus::kOk) {
       ++skipped;
+      continue;
+    }
+    // Header rows carry no compile command; they are indexed via their
+    // including TU's index_headers() pass (full -I/-std context, deduped once
+    // per run against the live DB), never parsed standalone. Defer them here.
+    if (!rec.compile_options || rec.compile_options->empty()) {
+      ++deferred;
       continue;
     }
     *ctx.out << "indexing " << path << "\n";
@@ -193,7 +201,11 @@ int index_pending(Storage &db, Parser &parser, AstIndexer &indexer,
     }
   }
   *ctx.out << "index: " << done << " indexed, " << failed << " failed, "
-           << skipped << " already indexed\n";
+           << skipped << " already indexed";
+  if (deferred > 0) {
+    *ctx.out << ", " << deferred << " headers via TUs";
+  }
+  *ctx.out << "\n";
   return failed != 0 ? 1 : 0;
 }
 

@@ -254,18 +254,31 @@ def _index_files(db: Storage, files: list[str], root: str | None,
 
 
 def _index_pending(db: Storage, no_graph: bool = False) -> int:
-    """index (no args): index every file still pending in the database."""
-    done, skipped, failed = 0, 0, 0
+    """index (no args): index every pending file that has a compile command.
+
+    Header rows carry no compile command (index_headers adds them with NULL
+    options). A header is indexed via its including TU's index_headers() pass --
+    where the TU's -I/-std context resolves its types and a single live-DB
+    dedup scans it exactly once per run -- never parsed standalone (no flags =
+    a broken, truncated AST). So pending headers are deferred here, not parsed
+    on their own; the sources that include them regenerate their edges.
+    """
+    done, skipped, failed, deferred = 0, 0, 0, 0
     for rec, path in db.files():
         if index_status(rec, path)[0]:
             skipped += 1
+            continue
+        if not rec.compile_options:
+            deferred += 1  # header: indexed via its TU, not standalone
             continue
         print(f"indexing {path}")
         if _index_one(db, rec, path, no_graph=no_graph) == 0:
             done += 1
         else:
             failed += 1
-    print(f"index: {done} indexed, {failed} failed, {skipped} already indexed")
+    tail = f", {deferred} headers via TUs" if deferred else ""
+    print(f"index: {done} indexed, {failed} failed, "
+          f"{skipped} already indexed{tail}")
     return 1 if failed else 0
 
 
