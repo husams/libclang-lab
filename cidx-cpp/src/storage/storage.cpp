@@ -926,6 +926,16 @@ void Storage::mark_file_indexed(int64_t file_id,
   st.step_done();
 }
 
+void Storage::set_file_indexed(int64_t file_id, bool indexed) {
+  // Flip the indexed/pending flag in place; symbols are untouched. Setting
+  // indexed=0 marks the file pending so the next `index` re-parses it
+  // (regenerating graph edges) without losing its existing symbols.
+  auto st = db_.prepare("UPDATE file SET indexed = ? WHERE id = ?");
+  st.bind(1, static_cast<int64_t>(indexed ? 1 : 0));
+  st.bind(2, file_id);
+  st.step_done();
+}
+
 bool Storage::is_file_indexed(const std::string &abs_path,
                               const std::optional<double> &mtime,
                               const std::optional<std::string> &md5) {

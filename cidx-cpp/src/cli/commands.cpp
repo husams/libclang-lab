@@ -907,6 +907,151 @@ int cmd_resolve(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+namespace {
+
+std::string str_trim(const std::string &s) {
+  std::size_t a = s.find_first_not_of(" \t");
+  if (a == std::string::npos) {
+    return "";
+  }
+  std::size_t b = s.find_last_not_of(" \t");
+  return s.substr(a, b - a + 1);
+}
+
+std::string str_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return s;
+}
+
+// Parse 'FIELD = VALUE' in any spacing -> (field, value). Returns false on a
+// malformed assignment. Mirrors cli.py _parse_assignment.
+bool parse_assignment(const std::vector<std::string> &tokens, std::string &key,
+                      std::string &val) {
+  std::string expr;
+  for (std::size_t k = 0; k < tokens.size(); ++k) {
+    if (k != 0) {
+      expr += " ";
+    }
+    expr += tokens[k];
+  }
+  const std::size_t eq = expr.find('=');
+  if (eq != std::string::npos) {
+    key = expr.substr(0, eq);
+    val = expr.substr(eq + 1);
+  } else {
+    // exactly two whitespace-separated tokens ("pending False")
+    std::vector<std::string> parts;
+    std::size_t p = 0;
+    while (p < expr.size()) {
+      while (p < expr.size() && (expr[p] == ' ' || expr[p] == '\t')) {
+        ++p;
+      }
+      std::size_t q = p;
+      while (q < expr.size() && expr[q] != ' ' && expr[q] != '\t') {
+        ++q;
+      }
+      if (q > p) {
+        parts.push_back(expr.substr(p, q - p));
+      }
+      p = q;
+    }
+    if (parts.size() != 2) {
+      return false;
+    }
+    key = parts[0];
+    val = parts[1];
+  }
+  key = str_lower(str_trim(key));
+  val = str_trim(val);
+  return !key.empty() && !val.empty();
+}
+
+// true/false/1/0/yes/no/on/off (case-insensitive). Mirrors _parse_set_bool.
+bool parse_set_bool(const std::string &raw, bool &out) {
+  const std::string t = str_lower(str_trim(raw));
+  if (t == "true" || t == "1" || t == "yes" || t == "on" || t == "t" ||
+      t == "y") {
+    out = true;
+    return true;
+  }
+  if (t == "false" || t == "0" || t == "no" || t == "off" || t == "f" ||
+      t == "n") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
+} // namespace
+
+// cmd_set (cli.py cmd_set): set a mutable file attribute (the pending/indexed
+// flag) over a component's files or one file, WITHOUT deleting any symbols.
+int cmd_set(const ParsedArgs &args, Context &ctx) {
+  std::string key;
+  std::string raw_val;
+  if (!parse_assignment(args.assignment, key, raw_val)) {
+    *ctx.err << "error: expected 'FIELD=VALUE' (e.g. pending=False)\n";
+    return 1;
+  }
+  // field -> invert (pending is the inverse of the 'indexed' flag).
+  bool invert = false;
+  if (key == "pending") {
+    invert = true;
+  } else if (key == "indexed") {
+    invert = false;
+  } else {
+    *ctx.err << "error: unknown field '" << key
+             << "'; supported: indexed, pending\n";
+    return 1;
+  }
+  bool bval = false;
+  if (!parse_set_bool(raw_val, bval)) {
+    *ctx.err << "error: expected a boolean (true/false), got '" << raw_val
+             << "'\n";
+    return 1;
+  }
+  const bool indexed_value = invert ? !bval : bval;
+
+  Storage db(ctx.index_path);
+  std::optional<Component> comp;
+  if (!lookup_component(db, args.component, comp, *ctx.err)) {
+    return 1;
+  }
+  std::vector<std::pair<int64_t, std::string>> matches; // (id, abs path)
+  if (args.file_filter) {
+    const std::string ap = files::resolve_file_arg(
+        *args.file_filter,
+        comp ? std::optional<std::string>(comp->path) : std::nullopt);
+    if (std::optional<File> rec = db.get_file(ap)) {
+      if (under_component(ap, comp)) {
+        matches.emplace_back(rec->id, ap);
+      }
+    }
+  } else {
+    for (const std::pair<File, std::string> &pr : db.list_files(
+             comp ? std::optional<int64_t>(comp->id) : std::nullopt)) {
+      matches.emplace_back(pr.first.id, pr.second);
+    }
+  }
+  if (matches.empty()) {
+    *ctx.err << "error: no files match the given selector\n";
+    return 1;
+  }
+  for (const std::pair<int64_t, std::string> &m : matches) {
+    *ctx.out << "  #" << m.first << "  " << m.second << "\n";
+  }
+  if (!args.dry_run) {
+    for (const std::pair<int64_t, std::string> &m : matches) {
+      db.set_file_indexed(m.first, indexed_value);
+    }
+  }
+  *ctx.out << (args.dry_run ? "would set " : "set ") << key << "="
+           << (bval ? "True" : "False") << " on " << matches.size() << " "
+           << plural(matches.size(), "file", "files") << "\n";
+  return 0;
+}
+
 int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "init") {
     return cmd_init(args, ctx);
@@ -922,6 +1067,9 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   }
   if (args.command == "resolve") {
     return cmd_resolve(args, ctx);
+  }
+  if (args.command == "set") {
+    return cmd_set(args, ctx);
   }
   if (args.command == "search") {
     return cmd_search(args, ctx);

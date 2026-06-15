@@ -319,9 +319,36 @@ struct GoldFixture {
 // Usage blocks shared by several expected error messages (transcribed from
 // the captured Python argparse output, COLUMNS=80).
 const char kTopUsage[] =
-    "usage: cidx [-h] "
-    "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
+    "usage: cidx [-h]\n"
+    "            "
+    "{init,add-source,import,index,resolve,set,search,show,list,ls,delete} "
     "...\n";
+
+// Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
+// COLUMNS=80) — catches drift if the production help_text ever changes.
+const char kSetUsage[] =
+    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                [--dry-run]\n"
+    "                FIELD=VALUE [FIELD=VALUE ...]\n";
+
+const char kSetHelp[] =
+    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                [--dry-run]\n"
+    "                FIELD=VALUE [FIELD=VALUE ...]\n"
+    "\n"
+    "positional arguments:\n"
+    "  FIELD=VALUE           attribute assignment, e.g. 'pending=False' "
+    "(fields:\n"
+    "                        pending, indexed)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component, -c NAME  restrict to this component's files\n"
+    "  --file REL_PATH       restrict to one file (path relative to component "
+    "root)\n"
+    "  --db PATH             operate on this index DB (default: the standard "
+    "index)\n"
+    "  --dry-run             preview the matches without changing anything\n";
 
 const char kSearchUsage[] =
     "usage: cidx search [-h]\n"
@@ -360,7 +387,7 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, add-source, import, index, resolve, search, show, "
+            "from init, add-source, import, index, resolve, set, search, show, "
             "list, ls, delete)\n");
 }
 
@@ -696,13 +723,16 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "\n"
           "positional arguments:\n"
           "  "
-          "{init,add-source,import,index,resolve,search,show,list,ls,delete}\n"
+          "{init,add-source,import,index,resolve,set,search,show,list,ls,delete}"
+          "\n"
           "    init                create a blank index database\n"
           "    add-source          register a component\n"
           "    import              import a compile_commands.json\n"
           "    index               index imported C/C++ files\n"
           "    resolve             finalize cross-repo edges and roll up edge "
           "counts\n"
+          "    set                 set a mutable file attribute (e.g. pending "
+          "status)\n"
           "    search              fuzzy-search symbols by qualified name\n"
           "    show                show full details of one symbol or "
           "file\n"
@@ -738,6 +768,48 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
   REQUIRE(pa.help_text);
   CHECK(pa.help_text->compare(0, std::string(kListFilesUsage).size(),
                               kListFilesUsage) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// set grammar (cli.py cmd_set) — parity with the Python `cidx set` subcommand
+// ---------------------------------------------------------------------------
+
+TEST_CASE("args: set grammar — assignment positional + component/file/db") {
+  // $ cidx set pending=False --component demo --file sub/b.c
+  cli::ParsedArgs pa = cli::parse_args(
+      {"set", "pending=False", "--component", "demo", "--file", "sub/b.c"});
+  CHECK(pa.command == "set");
+  REQUIRE(pa.assignment.size() == 1);
+  CHECK(pa.assignment[0] == "pending=False");
+  REQUIRE(pa.component);
+  CHECK(*pa.component == "demo");
+  REQUIRE(pa.file_filter);
+  CHECK(*pa.file_filter == "sub/b.c");
+  CHECK_FALSE(pa.dry_run);
+
+  // spaced form 'pending = True' -> three positional tokens (nargs="+")
+  pa = cli::parse_args({"set", "pending", "=", "True", "-c", "demo",
+                        "--db", "/tmp/i.db", "--dry-run"});
+  REQUIRE(pa.assignment.size() == 3);
+  CHECK(pa.assignment[0] == "pending");
+  CHECK(pa.assignment[1] == "=");
+  CHECK(pa.assignment[2] == "True");
+  REQUIRE(pa.index_db);
+  CHECK(*pa.index_db == "/tmp/i.db");
+  CHECK(pa.dry_run);
+
+  // missing positional -> exit 2, required FIELD=VALUE
+  const ParseFail f = parse_fail({"set", "--component", "demo"});
+  CHECK(f.code == 2);
+  CHECK(f.msg == std::string(kSetUsage) +
+                     "cidx set: error: the following arguments are required: "
+                     "FIELD=VALUE\n");
+}
+
+TEST_CASE("args: set -h is byte-identical to Python argparse") {
+  cli::ParsedArgs pa = cli::parse_args({"set", "-h"});
+  REQUIRE(pa.help_text);
+  CHECK(*pa.help_text == std::string(kSetHelp));
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,18 +1422,14 @@ TEST_CASE("args: init grammar — --force flag, no positionals") {
   // unknown flag -> TOP-level unrecognized arguments, exit 2
   ParseFail f = parse_fail({"init", "--bogus"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx [-h] "
-        "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
-        "...\ncidx: error: unrecognized arguments: --bogus\n");
+  CHECK(f.msg == std::string(kTopUsage) +
+                     "cidx: error: unrecognized arguments: --bogus\n");
 
   // stray positional -> unrecognized arguments, exit 2
   f = parse_fail({"init", "extra"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx [-h] "
-        "{init,add-source,import,index,resolve,search,show,list,ls,delete} "
-        "...\ncidx: error: unrecognized arguments: extra\n");
+  CHECK(f.msg == std::string(kTopUsage) +
+                     "cidx: error: unrecognized arguments: extra\n");
 }
 
 TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {
