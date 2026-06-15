@@ -38,8 +38,8 @@ subcommands. Anything the CLI prints, you can compute (and post-process) here.
 |--------|-------|
 | `01_basics.py`            | open the index, `stats()`, look symbols up (`find`/`by_name`/`get`), read `Sym` fields |
 | `02_references.py`        | `callers` / `callees` / `references`, raw `edges_in/out`, call `sites` (file:line grounding) |
-| `03_navigation.py`        | `neighbors`, bounded `walk` (BFS), `reaches` (reachability path), `path_to` |
-| `04_hierarchy_dispatch.py`| class `bases` / `subclasses` / `members`; virtual `overrides` / `dispatch_targets` (C++) |
+| `03_navigation.py`        | `neighbors` (+ `with_kind=True` for relation types), bounded `walk` (BFS), `reaches`, `path_to` |
+| `04_hierarchy_dispatch.py`| class `bases` / `subclasses` / `members` (+ `access=` filter); virtual `overrides` / `dispatch_targets` (C++) |
 | `05_json_export.py`       | `.to_dict()` → stable JSON for piping into other tools / languages |
 
 ## The data model in one paragraph

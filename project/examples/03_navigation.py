@@ -38,10 +38,18 @@ def main() -> None:
         # ------------------------------------------------------------------- #
         # direction='out' = edges leaving the symbol; 'in' = edges arriving.
         # kinds=None = any kind; or restrict, e.g. kinds=('calls','uses').
-        # Returns the peer symbols (deduped, capped at limit).
+        # Returns the peer symbols (capped at limit).
         print("== neighbors out (calls) ==")
         for s in g.neighbors(fn, kinds=("calls",), direction="out", limit=8):
             print(f"   -> {s.name:<28} {s.loc}")
+
+        # with_kind=True annotates each neighbour with the RELATIONSHIP type it
+        # was reached by -- returns (Sym, edge_kind) tuples. Pass kinds=None to
+        # see the full mix (calls / uses / contains / field_of / ...).
+        print("\n== neighbors out, ALL kinds, with relation type ==")
+        for s, kind in g.neighbors(fn, kinds=None, direction="out", limit=12,
+                                   with_kind=True):
+            print(f"   --{kind}--> {s.name:<26} {s.loc}")
 
         # ------------------------------------------------------------------- #
         # walk — bounded BFS, returns a Traversal (a small sub-graph)

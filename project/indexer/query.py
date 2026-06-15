@@ -45,7 +45,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Literal, Optional, Sequence, overload
 
 # edge_kind.id <-> name -- seeded identically by the indexer (storage.py). We
 # hardcode to avoid a query and to validate any DB that disagrees.
@@ -54,6 +54,9 @@ EDGE_KINDS = {
     "instantiates": 5, "overrides": 6, "uses": 7, "field_of": 8, "method_of": 9,
 }
 EDGE_NAMES = {v: k for k, v in EDGE_KINDS.items()}
+
+#: C++ access specifiers, used to validate the members(access=...) filter.
+_ACCESS = ("public", "protected", "private")
 
 _CACHE_ENV = "INDEXER_CACHE"
 _DEFAULT_CACHE = "~/.cache/cidx"
@@ -507,11 +510,38 @@ class GraphQuery:
     # 3. NAVIGATION (walk the graph)
     # ===================================================================== #
 
+    @overload
+    def neighbors(self, sym, kinds: Optional[Sequence[str]] = ...,
+                  direction: str = ..., limit: int = ...,
+                  with_kind: Literal[False] = ...) -> list[Sym]: ...
+    @overload
+    def neighbors(self, sym, kinds: Optional[Sequence[str]] = ...,
+                  direction: str = ..., limit: int = ...,
+                  *, with_kind: Literal[True]) -> list[tuple[Sym, str]]: ...
+
     def neighbors(self, sym, kinds: Optional[Sequence[str]] = None,
-                  direction: str = "out", limit: int = 500) -> list[Sym]:
-        """One hop. direction='out'|'in'. Returns the peer symbols."""
+                  direction: str = "out", limit: int = 500,
+                  with_kind: bool = False
+                  ) -> "list[Sym] | list[tuple[Sym, str]]":
+        """One hop. direction='out'|'in'. Returns the peer symbols.
+
+        with_kind=False (default) returns a plain list[Sym] -- the peers.
+        with_kind=True returns list[tuple[Sym, str]] -- each peer paired with
+        the edge kind it was reached by ('calls'/'uses'/'contains'/...), so the
+        caller knows the RELATIONSHIP type, not just the neighbour. A peer
+        reachable by two kinds appears once per kind. For the full edge object
+        (count + sites) use edges_in()/edges_out() instead.
+        """
         edges = self._edges(sym, direction, kinds, limit)
+        if with_kind:
+            return [(e.peer, e.kind) for e in edges]
         return [e.peer for e in edges]
+
+    def _peers(self, sym, kinds: Optional[Sequence[str]],
+               direction: str = "out", limit: int = 500) -> list[Sym]:
+        """Internal one-hop peers (no edge kind). Typed plain list[Sym] so the
+        graph-internal callers don't inherit neighbors()'s with_kind union."""
+        return [e.peer for e in self._edges(sym, direction, kinds, limit)]
 
     def walk(self, start, kinds: Sequence[str], direction: str = "out",
              depth: int = 3, max_nodes: int = 500) -> "Traversal":
@@ -560,7 +590,7 @@ class GraphQuery:
         for _ in range(max_depth):
             nxt = []
             for nid in frontier:
-                for peer in self.neighbors(nid, kinds, direction):
+                for peer in self._peers(nid, kinds, direction):
                     if peer.id in seen:
                         continue
                     seen.add(peer.id)
@@ -583,7 +613,7 @@ class GraphQuery:
         """Base classes of `sym` (outgoing `inherits`). direct=False walks up the
         whole hierarchy."""
         if direct:
-            return self.neighbors(sym, ("inherits",), "out")
+            return self._peers(sym, ("inherits",), "out")
         return [s for s in self.walk(sym, ("inherits",), "out", depth=16).nodes
                 if s.id != self._resolve_id(sym)]
 
@@ -591,24 +621,35 @@ class GraphQuery:
         """Derived classes of `sym` (incoming `inherits`). direct=False walks the
         whole subtree."""
         if direct:
-            return self.neighbors(sym, ("inherits",), "in")
+            return self._peers(sym, ("inherits",), "in")
         return [s for s in self.walk(sym, ("inherits",), "in", depth=16).nodes
                 if s.id != self._resolve_id(sym)]
 
-    def members(self, sym) -> list[Sym]:
+    def members(self, sym, access: Optional[str] = None) -> list[Sym]:
         """Members of a record/namespace.
 
         `contains` points scope->child (outbound: namespace members, nested
         types), but `field_of`/`method_of` point member->record (so a record's
         fields and methods are INbound). This unions both so you get the full
-        member set regardless of edge direction."""
-        out = self.neighbors(sym, ("contains",), "out")
-        inn = self.neighbors(sym, ("field_of", "method_of"), "in")
+        member set regardless of edge direction.
+
+        access filters by C++ access specifier: 'public' | 'protected' |
+        'private'. None (default) or 'all' returns every member. A member with
+        no recorded access (e.g. C struct fields) only matches None/'all'.
+        """
+        if access is not None and access != "all" and access not in _ACCESS:
+            raise ValueError(
+                f"unknown access {access!r}; valid: {', '.join(_ACCESS)}, all")
+        out = [e.peer for e in self._edges(sym, "out", ("contains",), 500)]
+        inn = [e.peer for e in
+               self._edges(sym, "in", ("field_of", "method_of"), 500)]
         seen, merged = set(), []
         for s in out + inn:
             if s.id not in seen:
                 seen.add(s.id)
                 merged.append(s)
+        if access not in (None, "all"):
+            merged = [s for s in merged if s.access == access]
         return merged
 
     # ===================================================================== #
@@ -617,11 +658,11 @@ class GraphQuery:
 
     def overrides(self, method) -> list[Sym]:
         """Base methods that `method` overrides (outgoing `overrides`)."""
-        return self.neighbors(method, ("overrides",), "out")
+        return self._peers(method, ("overrides",), "out")
 
     def overridden_by(self, method) -> list[Sym]:
         """Methods that directly override `method` (incoming `overrides`)."""
-        return self.neighbors(method, ("overrides",), "in")
+        return self._peers(method, ("overrides",), "in")
 
     def is_virtual_method(self, method) -> bool:
         """True if `method` participates in dynamic dispatch -- it is pure, it
