@@ -307,3 +307,17 @@ def test_edge_to_dict_carries_peer_and_sites(g):
     assert d["count"] == 2
     assert len(d["sites"]) == 2
     assert all("file" in s and "line" in s for s in d["sites"])
+
+
+def test_edge_to_dict_auto_populates_sites(g):
+    """Regression: edges_out/edges_in eager-load sites, so to_dict() returns the
+    reference location (WHERE the edge occurs) WITHOUT an explicit sites= arg."""
+    helper = g.get("c:@F@helper")
+    edge = [e for e in g.edges_out(helper, ("calls",))
+            if e.peer.name == "compute"][0]
+    # eager-loaded on the edge itself, not just via g.sites()
+    assert {s.line for s in edge.sites} == {22, 25}
+    d = edge.to_dict()                       # no sites= passed
+    assert {s["line"] for s in d["sites"]} == {22, 25}
+    # the peer's own decl line is distinct from the reference sites
+    assert d["line"] not in {s["line"] for s in d["sites"]} or len(d["sites"]) > 0

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable, Literal, Optional, Sequence, overload
 
 # edge_kind.id <-> name -- seeded identically by the indexer (storage.py). We
@@ -162,13 +162,20 @@ class Edge:
     count: int                # call/use multiplicity
     base_access: Optional[int]
     is_virtual: Optional[int]
+    sites: Sequence["Site"] = ()   # WHERE the edge occurs (use/call locations);
+                                   # eager-loaded by _edges so to_dict() always
+                                   # surfaces the reference site, not just the peer
 
     def to_dict(self, sites: Optional[Sequence["Site"]] = None) -> dict[str, Any]:
         """Stable JSON view: the peer symbol's fields, plus edge metadata.
 
         The result is the *peer* (id/usr/qual_name/kind/file/line) augmented with
-        the edge `kind`, `count`, and -- when provided -- `sites[]`. This is the
-        shape the cidx-graph skill consumes for callers/callees/refs/neighbors.
+        the edge `kind`, `count`, and `sites[]`. This is the shape the cidx-graph
+        skill consumes for callers/callees/refs/neighbors.
+
+        `sites[]` records WHERE the relationship occurs (e.g. the line a type is
+        used, distinct from the peer symbol's own declaration line). It defaults
+        to the edge's eager-loaded `self.sites`; pass `sites=` to override.
         """
         d = self.peer.to_dict()
         d["edge_kind"] = self.kind
@@ -177,7 +184,8 @@ class Edge:
             d["base_access"] = self.base_access
         if self.is_virtual is not None:
             d["is_virtual"] = bool(self.is_virtual)
-        d["sites"] = [s.to_dict() for s in sites] if sites is not None else []
+        effective = sites if sites is not None else self.sites
+        d["sites"] = [s.to_dict() for s in effective]
         return d
 
     def __repr__(self) -> str:
@@ -433,7 +441,8 @@ class GraphQuery:
         """Outgoing edges: what this symbol points to (peer = the destination)."""
         return self._edges(sym, "out", kinds, limit)
 
-    def _edges(self, sym, direction: str, kinds, limit: int) -> list[Edge]:
+    def _edges(self, sym, direction: str, kinds, limit: int,
+               with_sites: bool = True) -> list[Edge]:
         sid = self._resolve_id(sym)
         kids = self._kind_ids(kinds)
         if direction == "in":
@@ -473,6 +482,32 @@ class GraphQuery:
                 count=cnt, base_access=r["base_access"],
                 is_virtual=r["is_virtual"],
             ))
+        # Eager-load the reference sites (WHERE each edge occurs) so a serialized
+        # edge always carries the use/call location, not just the peer's decl
+        # line. Internal traversals that discard sites pass with_sites=False.
+        if with_sites and out:
+            smap = self._sites_for([e.edge_id for e in out])
+            out = [replace(e, sites=tuple(smap.get(e.edge_id, ()))) for e in out]
+        return out
+
+    def _sites_for(self, edge_ids: Sequence[int]) -> dict[int, list["Site"]]:
+        """Batch-fetch edge_site rows for many edges in one query (avoids the
+        N+1 a per-edge sites() call would incur). Returns {edge_id: [Site, ...]}."""
+        if not edge_ids:
+            return {}
+        files = self._files()
+        q = ",".join("?" * len(edge_ids))
+        out: dict[int, list[Site]] = {}
+        for r in self._c.execute(
+            "SELECT edge_id, file_id, line, col, conditional, args_sig "
+            f"FROM edge_site WHERE edge_id IN ({q}) "
+            "ORDER BY edge_id, file_id, line, col",
+            list(edge_ids),
+        ):
+            p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
+            out.setdefault(r["edge_id"], []).append(
+                Site(file=p, line=r["line"], col=r["col"],
+                     conditional=bool(r["conditional"]), args_sig=r["args_sig"]))
         return out
 
     def references(self, sym, limit: int = 500) -> list[Edge]:
@@ -483,11 +518,11 @@ class GraphQuery:
 
     def callers(self, sym, limit: int = 500) -> list[Sym]:
         """Symbols that call `sym` (incoming `calls`)."""
-        return [e.peer for e in self.edges_in(sym, ("calls",), limit)]
+        return self._peers(sym, ("calls",), "in", limit)
 
     def callees(self, sym, limit: int = 500) -> list[Sym]:
         """Symbols that `sym` calls (outgoing `calls`)."""
-        return [e.peer for e in self.edges_out(sym, ("calls",), limit)]
+        return self._peers(sym, ("calls",), "out", limit)
 
     def sites(self, edge, limit: int = 200) -> list[Site]:
         """Concrete source locations for an edge (the file:line grounding).
@@ -532,7 +567,7 @@ class GraphQuery:
         reachable by two kinds appears once per kind. For the full edge object
         (count + sites) use edges_in()/edges_out() instead.
         """
-        edges = self._edges(sym, direction, kinds, limit)
+        edges = self._edges(sym, direction, kinds, limit, with_sites=False)
         if with_kind:
             return [(e.peer, e.kind) for e in edges]
         return [e.peer for e in edges]
@@ -541,7 +576,8 @@ class GraphQuery:
                direction: str = "out", limit: int = 500) -> list[Sym]:
         """Internal one-hop peers (no edge kind). Typed plain list[Sym] so the
         graph-internal callers don't inherit neighbors()'s with_kind union."""
-        return [e.peer for e in self._edges(sym, direction, kinds, limit)]
+        return [e.peer for e in
+                self._edges(sym, direction, kinds, limit, with_sites=False)]
 
     def walk(self, start, kinds: Sequence[str], direction: str = "out",
              depth: int = 3, max_nodes: int = 500) -> "Traversal":
@@ -560,7 +596,8 @@ class GraphQuery:
         for d in range(1, depth + 1):
             nxt = []
             for nid in frontier:
-                for e in self._edges(nid, direction, kinds, limit=max_nodes):
+                for e in self._edges(nid, direction, kinds, limit=max_nodes,
+                                     with_sites=False):
                     if e.peer.id not in seen:
                         seen[e.peer.id] = e.peer
                         level[e.peer.id] = d
@@ -640,9 +677,11 @@ class GraphQuery:
         if access is not None and access != "all" and access not in _ACCESS:
             raise ValueError(
                 f"unknown access {access!r}; valid: {', '.join(_ACCESS)}, all")
-        out = [e.peer for e in self._edges(sym, "out", ("contains",), 500)]
+        out = [e.peer for e in
+               self._edges(sym, "out", ("contains",), 500, with_sites=False)]
         inn = [e.peer for e in
-               self._edges(sym, "in", ("field_of", "method_of"), 500)]
+               self._edges(sym, "in", ("field_of", "method_of"), 500,
+                           with_sites=False)]
         seen, merged = set(), []
         for s in out + inn:
             if s.id not in seen:
