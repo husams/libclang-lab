@@ -163,10 +163,17 @@ public:
   std::vector<Symbol> unresolved_symbols();
 
   // -- graph layer (v7) ------------------------------------------------------
-  // Mint a stub symbol row (resolved=0, spelling='', kind='function') for an
-  // unknown USR; INSERT OR IGNORE keeps an existing real row intact. Returns
-  // the stable symbol.id regardless of whether the row was minted or found.
-  int64_t mint_symbol_id(const std::string &usr);
+  // Mint a stub symbol row (resolved=0, kind='function') for an unknown USR.
+  // The reference cursor is always in hand at the call site, so its name
+  // travels with the USR: a stub is born NAMED -- essential for targets whose
+  // definition is never indexed (stdlib calls, implicit template
+  // instantiations, defaulted ctors), where no add_symbol ever backfills it.
+  // An existing real row is kept intact; a repeat mint only UPGRADES an empty
+  // name, never clobbers a real one. Returns the stable symbol.id either way.
+  int64_t mint_symbol_id(const std::string &usr,
+                         const std::string &spelling = "",
+                         const std::string &qual_name = "",
+                         const std::string &display_name = "");
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.

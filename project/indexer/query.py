@@ -124,9 +124,13 @@ class Sym:
 
     @property
     def is_stub(self) -> bool:
-        """A minted placeholder for a target that was never indexed (storage
-        mints these with spelling='' and resolved=0)."""
-        return self.spelling == "" and not self.resolved
+        """A minted placeholder for a target that was never indexed: a call/base
+        /override/primary USR anchored by an edge but with no definition or
+        declaration in any indexed file. Such a row has NO location at all
+        (mint sets none; add_symbol always sets at least a decl site), so the
+        absence of a location is the robust signal. NOT keyed on spelling --
+        stubs are minted NAMED from the reference cursor."""
+        return self.file is None and not self.resolved
 
     def to_dict(self) -> dict[str, Any]:
         """Stable JSON-serializable view. Identical-by-spec to the C++ port."""
@@ -793,8 +797,8 @@ class GraphQuery:
             "components": one("SELECT COUNT(*) FROM component"),
             "files_indexed": one("SELECT COUNT(*) FROM file WHERE indexed = 1"),
             "symbols": one("SELECT COUNT(*) FROM symbol"),
-            "stubs": one("SELECT COUNT(*) FROM symbol WHERE spelling = '' "
-                         "AND resolved = 0"),
+            "stubs": one("SELECT COUNT(*) FROM symbol WHERE resolved = 0 "
+                         "AND file_id IS NULL AND decl_file_id IS NULL"),
             "edges": one("SELECT COUNT(*) FROM edge"),
             "edges_by_kind": by_edge,
             "resolved_at": (lambda r: r[0] if r else None)(self._c.execute(

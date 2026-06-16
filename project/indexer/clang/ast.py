@@ -74,7 +74,11 @@ def _get_overridden_cursors(cursor: cx.Cursor) -> list[cx.Cursor]:
     result: list[cx.Cursor] = []
     if out_num.value > 0 and out_ptr:
         for i in range(out_num.value):
-            result.append(out_ptr[i])
+            c = out_ptr[i]
+            # Cursors from this C-array API lack the binding's `_tu` backref;
+            # without it `.semantic_parent` (hence _qualified_name) raises.
+            c._tu = cursor._tu
+            result.append(c)
         _lib.clang_disposeOverriddenCursors(out_ptr)
     return result
 from ..utils import md5_of
@@ -165,13 +169,22 @@ def _linkage(cursor: cx.Cursor) -> str | None:
 
 def _qualified_name(cursor: cx.Cursor) -> str:
     """'ns::Class::name' built from SEMANTIC parents, so an out-of-line method
-    definition is qualified by its class, not the file scope it sits in."""
+    definition is qualified by its class, not the file scope it sits in.
+
+    Defensive against cursors minted by C-array APIs (e.g.
+    clang_getOverriddenCursors) that lack the binding's `_tu` backref, on which
+    `.semantic_parent` depends -- those raise AttributeError mid-walk. We fall
+    back to whatever prefix we gathered (at worst the bare spelling) rather than
+    crash the whole index."""
     parts: list[str] = []
     c: cx.Cursor | None = cursor
-    while c is not None and c.kind != cx.CursorKind.TRANSLATION_UNIT:
-        if c.spelling:              # anonymous namespace/struct: skip the level
-            parts.append(c.spelling)
-        c = c.semantic_parent
+    try:
+        while c is not None and c.kind != cx.CursorKind.TRANSLATION_UNIT:
+            if c.spelling:          # anonymous namespace/struct: skip the level
+                parts.append(c.spelling)
+            c = c.semantic_parent
+    except (AttributeError, ValueError):
+        pass
     return "::".join(reversed(parts))
 
 
@@ -469,7 +482,9 @@ def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                         _dst = db.lookup_symbol(callee_usr)
                         dst_id = _dst.id if _dst is not None else None
                     else:
-                        dst_id = db.mint_symbol_id(callee_usr)
+                        dst_id = db.mint_symbol_id(
+                            callee_usr, ref.spelling,
+                            _qualified_name(ref), ref.displayname)
                     if dst_id is not None:
                         edge_id = db.add_edge(src_id, dst_id, 1)  # calls
                         loc = child.location
@@ -683,7 +698,8 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             src_sym = db.lookup_symbol(derived_usr)
             if src_sym is None:
                 continue
-            dst_id = db.mint_symbol_id(base_usr)
+            dst_id = db.mint_symbol_id(
+                base_usr, ref.spelling, _qualified_name(ref), ref.displayname)
             acc_map = {
                 cx.AccessSpecifier.PUBLIC: 1,
                 cx.AccessSpecifier.PROTECTED: 2,
@@ -739,7 +755,8 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                     ov_usr = ov.get_usr()
                     if not ov_usr:
                         continue
-                    dst_ov = db.mint_symbol_id(ov_usr)
+                    dst_ov = db.mint_symbol_id(
+                        ov_usr, ov.spelling, _qualified_name(ov), ov.displayname)
                     db.add_edge(src_sym.id, dst_ov, 6)  # overrides
             continue
 
@@ -784,7 +801,9 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             spec_sym = db.lookup_symbol(spec_usr)
             if spec_sym is None:
                 continue
-            prim_id = db.mint_symbol_id(prim_usr)
+            prim_id = db.mint_symbol_id(
+                prim_usr, primary.spelling, _qualified_name(primary),
+                primary.displayname)
             db.add_edge(spec_sym.id, prim_id, 4)  # specializes
 
             # template_arg rows

@@ -1279,15 +1279,34 @@ std::vector<Symbol> Storage::unresolved_symbols() {
 // -- graph layer (v7)
 // -----------------------------------------------------------------
 
-int64_t Storage::mint_symbol_id(const std::string &usr) {
-  // INSERT OR IGNORE keeps a concurrent/earlier real row intact; the
-  // follow-up SELECT returns the stable id either way. kind='function' is the
-  // sentinel for stubs (callee targets are usually functions; the real def's
-  // add_symbol upsert overwrites kind/spelling/resolved).
+int64_t Storage::mint_symbol_id(const std::string &usr,
+                                const std::string &spelling,
+                                const std::string &qual_name,
+                                const std::string &display_name) {
+  // The follow-up SELECT returns the stable id whether the row was minted or
+  // already present. kind='function' is the sentinel for stubs (the real def's
+  // add_symbol upsert overwrites kind/location/resolved). On a repeat mint we
+  // only UPGRADE an empty name -- never clobber a real symbol's name.
   auto ins = db_.prepare(
-      "INSERT OR IGNORE INTO symbol (usr, spelling, kind, resolved) "
-      "VALUES (?, '', 'function', 0)");
+      "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, resolved) "
+      "VALUES (?, ?, ?, ?, 'function', 0) "
+      "ON CONFLICT(usr) DO UPDATE SET "
+      "  spelling     = CASE WHEN symbol.spelling = '' "
+      "                      THEN excluded.spelling ELSE symbol.spelling END, "
+      "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
+      "  display_name = COALESCE(symbol.display_name, excluded.display_name)");
   ins.bind(1, std::string_view(usr));
+  ins.bind(2, std::string_view(spelling));
+  if (qual_name.empty()) {
+    ins.bind_null(3);
+  } else {
+    ins.bind(3, std::string_view(qual_name));
+  }
+  if (display_name.empty()) {
+    ins.bind_null(4);
+  } else {
+    ins.bind(4, std::string_view(display_name));
+  }
   ins.step_done();
   auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
   sel.bind(1, std::string_view(usr));
@@ -1417,10 +1436,13 @@ std::vector<Edge> Storage::cross_repo_edges() {
 int Storage::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
   rollup_edge_counts();
-  // Count remaining stub symbols (spelling='' AND resolved=0 means never-defined
-  // externals like printf).
+  // Count remaining stub symbols: a minted placeholder never backfilled by a
+  // real symbol -- resolved=0 with NO location (neither a definition nor a decl
+  // site). NOT keyed on spelling -- stubs are now minted NAMED, so the absence
+  // of any location is the robust signal (matches Sym::is_stub).
   auto st = db_.prepare(
-      "SELECT COUNT(*) FROM symbol WHERE resolved = 0 AND spelling = ''");
+      "SELECT COUNT(*) FROM symbol "
+      "WHERE resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL");
   if (!st.step()) {
     return 0;
   }

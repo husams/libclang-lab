@@ -667,3 +667,45 @@ TEST_CASE("add_edge stores base_access and is_virtual for inherits kind") {
     CHECK(st.col_int64(1) == 0);
   }
 }
+
+// ---------------------------------------------------------------------------
+// T3 NAMING — a minted stub is born NAMED (spelling/qual_name carried from the
+// reference cursor). Regression for the nameless-callee bug: stdlib calls and
+// implicit template instantiations have no backfilling add_symbol, so the name
+// MUST travel with the USR at mint time.
+// ---------------------------------------------------------------------------
+TEST_CASE("T3 naming: mint carries spelling/qual_name; upgrades empty, never clobbers") {
+  Storage db(":memory:");
+  auto &raw = db.raw_db();
+
+  auto name_of = [&](const std::string &usr) {
+    auto st = raw.prepare("SELECT spelling, qual_name, resolved FROM symbol WHERE usr=?");
+    st.bind(1, std::string_view(usr));
+    REQUIRE(st.step());
+    return std::tuple<std::string, std::string, int64_t>(
+        st.col_text(0), st.col_text(1), st.col_int64(2));
+  };
+
+  // Named mint: a never-indexed stdlib target keeps its name.
+  const std::string vusr = "c:@N@std@S@vector@F@push_back#";
+  db.mint_symbol_id(vusr, "push_back", "std::vector::push_back",
+                    "push_back(const value_type &)");
+  {
+    auto [sp, q, res] = name_of(vusr);
+    CHECK(sp == "push_back");
+    CHECK(q == "std::vector::push_back");
+    CHECK(res == 0); // still an unresolved stub
+  }
+
+  // Bare mint stays nameless (back-compat with a truly-unknown target).
+  db.mint_symbol_id("c:@F@unknown");
+  CHECK(std::get<0>(name_of("c:@F@unknown")).empty());
+
+  // Repeat mint upgrades an empty name, then NEVER clobbers a real one.
+  db.mint_symbol_id("c:@F@f");                      // nameless first
+  db.mint_symbol_id("c:@F@f", "f", "ns::f");        // upgrade empty
+  CHECK(std::get<0>(name_of("c:@F@f")) == "f");
+  db.mint_symbol_id("c:@F@f", "WRONG", "x::WRONG"); // must not clobber
+  CHECK(std::get<0>(name_of("c:@F@f")) == "f");
+  CHECK(std::get<1>(name_of("c:@F@f")) == "ns::f");
+}

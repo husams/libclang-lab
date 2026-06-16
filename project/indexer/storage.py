@@ -921,16 +921,30 @@ class Storage:
 
     # -- graph (v7) ------------------------------------------------------------
 
-    def mint_symbol_id(self, usr: str) -> int:
-        """INSERT OR IGNORE a stub row for `usr`, then SELECT its id.
+    def mint_symbol_id(self, usr: str, spelling: str = "",
+                       qual_name: Optional[str] = None,
+                       display_name: Optional[str] = None) -> int:
+        """Insert a stub row for `usr` (if absent), then SELECT its id.
+
+        The callee/base/override/primary reference cursor is always in hand at
+        the call site, so its name travels with the USR: a stub is born NAMED.
+        This matters for targets whose definition is never indexed (stdlib
+        calls, implicit template instantiations, defaulted ctors) -- without a
+        backfilling `add_symbol`, the stub is all the graph will ever have.
 
         kind='function' is the sentinel for stubs; the real def's add_symbol
-        upsert overwrites kind/spelling/resolved later.
+        upsert overwrites kind/spelling/location/resolved later. On a repeat
+        mint we only UPGRADE an empty name -- never clobber a real symbol's.
         """
         self._conn.execute(
-            "INSERT OR IGNORE INTO symbol (usr, spelling, kind, resolved) "
-            "VALUES (?, '', 'function', 0)",
-            (usr,),
+            "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, resolved) "
+            "VALUES (?, ?, ?, ?, 'function', 0) "
+            "ON CONFLICT(usr) DO UPDATE SET "
+            "  spelling     = CASE WHEN symbol.spelling = '' "
+            "                      THEN excluded.spelling ELSE symbol.spelling END, "
+            "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
+            "  display_name = COALESCE(symbol.display_name, excluded.display_name)",
+            (usr, spelling, qual_name or None, display_name or None),
         )
         row = self._conn.execute(
             "SELECT id FROM symbol WHERE usr = ?", (usr,)
@@ -1059,8 +1073,13 @@ class Storage:
         """
         from datetime import datetime, timezone
         self.rollup_edge_counts()
+        # A still-stub is a minted placeholder never backfilled by a real
+        # symbol: resolved=0 with NO location (neither a definition nor a decl
+        # site). NOT keyed on spelling -- stubs are now minted NAMED, so the
+        # absence of any location is the robust signal (matches Sym.is_stub).
         row = self._conn.execute(
-            "SELECT COUNT(*) FROM symbol WHERE resolved = 0 AND spelling = ''"
+            "SELECT COUNT(*) FROM symbol "
+            "WHERE resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL"
         ).fetchone()
         stubs = row[0] if row else 0
         cross = self.cross_repo_edges()
