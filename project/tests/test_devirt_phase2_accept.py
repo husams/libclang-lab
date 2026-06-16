@@ -725,3 +725,236 @@ def test_acc10_real_parse_prunes_to_b_rank(chain_real_accept_cb):
             assert any("chain" in u and "B" in u for u in step.gamma_receiver), (
                 f"ACC-10b: gamma_receiver should include chain::B, got {step.gamma_receiver}"
             )
+
+
+# ===========================================================================
+# ACC-11..ACC-15  Real-extractor coverage for the OTHER argument source kinds.
+#
+# ACC-10 already locks `local` end-to-end.  These run the REAL libclang
+# extractor over source that passes a `B` to top_rank() via each remaining
+# src_kind, then assert (a) the classifier records the right src_kind +
+# provenance column, and (b) the Gamma engine's outcome is SOUND:
+#   - construct  (top_rank(B{}))      -> precise: prunes a.rank() to B::rank only
+#   - member     (top_rank(h.b))      -> Gamma=TOP -> sound fallback (no prune)
+#   - global     (top_rank(g_b))      -> Gamma=TOP -> sound fallback (no prune)
+#   - call_result(top_rank(make_b())) -> Gamma=TOP -> sound fallback (no prune)
+# Member/global/call_result default to TOP today (a value's *static* type is
+# not narrowed to a singleton); the point is that the real extractor classifies
+# them correctly AND pruning degrades to the full Phase-1 set — never unsound.
+# ===========================================================================
+
+# Real C++ exercising each remaining argument source kind, all flowing a `B`
+# into top_rank(const A&).  Kept tiny and committed-fixture-independent: the
+# fixture writes these next to copies of the real chain.{hpp,cpp}.
+_PROV_HPP = """\
+#ifndef GRAPHLAB_PROV_HPP
+#define GRAPHLAB_PROV_HPP
+#include "chain.hpp"
+namespace chain {
+struct Holder { B b; };           // a B-typed data member
+B make_b();                       // a factory returning a B by value
+extern B g_b;                     // a global B
+void f_construct();               // top_rank(B{})       -> src_kind=construct
+void f_member(Holder& h);         // top_rank(h.b)       -> src_kind=member
+void f_global();                  // top_rank(g_b)       -> src_kind=global
+void f_callresult();              // top_rank(make_b())  -> src_kind=call_result
+}
+#endif
+"""
+
+_PROV_CPP = """\
+#include "prov.hpp"
+namespace chain {
+B g_b;
+B make_b() { return B{}; }
+void f_construct()       { top_rank(B{}); }
+void f_member(Holder& h) { top_rank(h.b); }
+void f_global()          { top_rank(g_b); }
+void f_callresult()      { top_rank(make_b()); }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def prov_real_cb(tmp_path_factory):
+    """Real libclang index of prov.{hpp,cpp} (+ real chain.{hpp,cpp}) into a
+    dedicated temp DB.  Exercises the construct/member/global/call_result
+    argument source kinds through the actual extractor (no hermetic seeding).
+    """
+    import shutil
+    import clang.cindex as cx
+
+    sys.path.insert(0, os.path.join(_LAB_ROOT, "scripts"))
+    from _helpers import clang_args  # noqa: E402 -- dynamically added path
+
+    from indexer.clang import ast as A  # noqa: E402
+
+    tmp = tmp_path_factory.mktemp("prov_accept")
+    shutil.copy(os.path.join(_GRAPHLAB_DIR, "chain.hpp"), str(tmp / "chain.hpp"))
+    shutil.copy(os.path.join(_GRAPHLAB_DIR, "chain.cpp"), str(tmp / "chain.cpp"))
+    (tmp / "prov.hpp").write_text(_PROV_HPP)
+    (tmp / "prov.cpp").write_text(_PROV_CPP)
+
+    db_path = str(tmp / "prov_accept.db")
+    args = clang_args(str(tmp / "prov.cpp")) + ["-std=c++17", "-I", str(tmp)]
+    idx = cx.Index.create()
+
+    # (file, is_header) in dependency order: headers first, then sources.
+    layout = [("chain.hpp", True), ("prov.hpp", True),
+              ("chain.cpp", False), ("prov.cpp", False)]
+    tus = {name: idx.parse(str(tmp / name), args=args) for name, _ in layout}
+    for name, tu in tus.items():
+        fatal = [d for d in tu.diagnostics if d.severity >= 3]
+        assert not fatal, f"{name} parse errors: {[d.spelling for d in fatal]}"
+
+    db = Storage(db_path)
+    db.add_component("graphlab", str(tmp))
+    for name, is_header in layout:
+        fid = db.add_file_path(str(tmp / name))
+        with db.transaction():
+            A.index_symbols(db, tus[name], fid)
+        if not is_header:
+            with db.transaction():
+                db.delete_edges_for_file(fid)
+                A._index_edges_notxn(db, tus[name], str(tmp / name), fid)
+    db.resolve_pass()
+    db.close()
+
+    cb = CodeBase(GraphQuery(db_path))
+    yield cb, db_path
+    cb.close()
+
+
+def _arg0_to_top_rank(cb, caller_spelling):
+    """The (src_kind, type_usr, decl_usr, callee_usr) call_arg row for
+    caller_spelling()'s position-0 argument to top_rank()."""
+    return cb.graph._c.execute(
+        "SELECT ca.src_kind, ca.type_usr, ca.decl_usr, ca.callee_usr "
+        "FROM call_arg ca "
+        "JOIN edge e ON ca.edge_id = e.id "
+        "JOIN symbol src ON e.src_id = src.id "
+        "JOIN symbol dst ON e.dst_id = dst.id "
+        "WHERE src.spelling = ? AND dst.spelling = 'top_rank' AND ca.position = 0",
+        (caller_spelling,),
+    ).fetchone()
+
+
+def _virtual_steps(cb, caller_spelling):
+    """devirtualized_callgraph(prune=True) virtual dispatch steps for caller."""
+    sym = None
+    for (usr,) in cb.graph._c.execute(
+        "SELECT usr FROM symbol WHERE spelling = ? AND kind = 'function'",
+        (caller_spelling,),
+    ).fetchall():
+        sym = cb.graph.get(usr)
+        if sym is not None:
+            break
+    assert sym is not None, f"{caller_spelling} not found in real index"
+    entity = cb.wrap(sym)
+    assert entity is not None
+    steps = entity.devirtualized_callgraph(expand_virtual=True, prune=True)
+    return [s for s in steps if s.dispatch_site is not None]
+
+
+def test_acc11_real_parse_construct_prunes_to_b_rank(prov_real_cb):
+    """ACC-11: top_rank(B{}) — src_kind='construct', prunes a.rank() to B::rank only."""
+    cb, _ = prov_real_cb
+
+    row = _arg0_to_top_rank(cb, "f_construct")
+    assert row is not None, "ACC-11: no call_arg row for f_construct()->top_rank(B{})"
+    src_kind, type_usr, decl_usr, callee_usr = row
+    assert src_kind == "construct", f"ACC-11: expected 'construct', got {src_kind!r}"
+    assert type_usr and "chain" in type_usr and "B" in type_usr, (
+        f"ACC-11: construct type_usr should reference chain::B, got {type_usr!r}"
+    )
+
+    steps = _virtual_steps(cb, "f_construct")
+    pruned = [s for s in steps if s.pruned_candidates is not None]
+    assert pruned, "ACC-11: construct arg should prune a.rank() but no step was pruned"
+    kept = {
+        sel.target.sym.usr
+        for step in pruned for sel in step.pruned_candidates
+        if sel.target is not None
+    }
+    assert any("@S@B@" in u for u in kept), f"ACC-11: B::rank missing from {kept}"
+    for absent in ("A", "C", "D"):
+        offenders = [u for u in kept if f"@S@{absent}@" in u]
+        assert not offenders, f"ACC-11: {absent}::rank should be pruned, found {offenders}"
+
+
+def test_acc12_real_parse_member_sound_fallback(prov_real_cb):
+    """ACC-12: top_rank(h.b) — src_kind='member' (decl_usr=field), Gamma=TOP -> no prune."""
+    cb, _ = prov_real_cb
+
+    row = _arg0_to_top_rank(cb, "f_member")
+    assert row is not None, "ACC-12: no call_arg row for f_member()->top_rank(h.b)"
+    src_kind, type_usr, decl_usr, callee_usr = row
+    assert src_kind == "member", f"ACC-12: expected 'member', got {src_kind!r}"
+    assert decl_usr is not None, "ACC-12: member decl_usr (the field) must be set"
+    assert "Holder" in decl_usr and "b" in decl_usr, (
+        f"ACC-12: member decl_usr should name Holder::b, got {decl_usr!r}"
+    )
+
+    steps = _virtual_steps(cb, "f_member")
+    assert steps, "ACC-12: expected at least one virtual dispatch step"
+    assert all(s.pruned_candidates is None for s in steps), (
+        "ACC-12: member src is TOP today -> must keep the full Phase-1 set (sound "
+        f"fallback), but a step was pruned: {[s.pruned_candidates for s in steps]}"
+    )
+
+
+def test_acc13_real_parse_global_sound_fallback(prov_real_cb):
+    """ACC-13: top_rank(g_b) — src_kind='global' (decl_usr=g_b), Gamma=TOP -> no prune."""
+    cb, _ = prov_real_cb
+
+    row = _arg0_to_top_rank(cb, "f_global")
+    assert row is not None, "ACC-13: no call_arg row for f_global()->top_rank(g_b)"
+    src_kind, type_usr, decl_usr, callee_usr = row
+    assert src_kind == "global", f"ACC-13: expected 'global', got {src_kind!r}"
+    assert decl_usr is not None and "g_b" in decl_usr, (
+        f"ACC-13: global decl_usr should name chain::g_b, got {decl_usr!r}"
+    )
+
+    steps = _virtual_steps(cb, "f_global")
+    assert steps, "ACC-13: expected at least one virtual dispatch step"
+    assert all(s.pruned_candidates is None for s in steps), (
+        "ACC-13: global src is TOP today -> must keep the full Phase-1 set (sound "
+        f"fallback), but a step was pruned: {[s.pruned_candidates for s in steps]}"
+    )
+
+
+def test_acc14_real_parse_call_result_sound_fallback(prov_real_cb):
+    """ACC-14: top_rank(make_b()) — src_kind='call_result' (callee=make_b), TOP -> no prune."""
+    cb, _ = prov_real_cb
+
+    row = _arg0_to_top_rank(cb, "f_callresult")
+    assert row is not None, "ACC-14: no call_arg row for f_callresult()->top_rank(make_b())"
+    src_kind, type_usr, decl_usr, callee_usr = row
+    assert src_kind == "call_result", f"ACC-14: expected 'call_result', got {src_kind!r}"
+    assert callee_usr is not None and "make_b" in callee_usr, (
+        f"ACC-14: call_result callee_usr should name chain::make_b, got {callee_usr!r}"
+    )
+
+    steps = _virtual_steps(cb, "f_callresult")
+    assert steps, "ACC-14: expected at least one virtual dispatch step"
+    assert all(s.pruned_candidates is None for s in steps), (
+        "ACC-14: call_result src is TOP today -> must keep the full Phase-1 set (sound "
+        f"fallback), but a step was pruned: {[s.pruned_candidates for s in steps]}"
+    )
+
+
+def test_acc15_real_parse_all_kinds_monotone(prov_real_cb):
+    """ACC-15: across every src_kind, any prune is a SUBSET of the Phase-1 set
+    (monotonicity holds end-to-end through the real extractor — never adds edges)."""
+    cb, _ = prov_real_cb
+    for caller in ("f_construct", "f_member", "f_global", "f_callresult"):
+        for step in _virtual_steps(cb, caller):
+            if step.pruned_candidates is None:
+                continue
+            full = {sel.target.sym.usr for sel in step.dispatch_site.selections
+                    if sel.target is not None}
+            kept = {sel.target.sym.usr for sel in step.pruned_candidates
+                    if sel.target is not None}
+            assert kept <= full, (
+                f"ACC-15: {caller} pruned set {kept} is not a subset of Phase-1 {full}"
+            )
