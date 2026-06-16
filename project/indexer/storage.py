@@ -924,33 +924,46 @@ class Storage:
     def mint_symbol_id(self, usr: str, spelling: str = "",
                        qual_name: Optional[str] = None,
                        display_name: Optional[str] = None,
-                       kind: str = "function") -> int:
+                       kind: str = "function",
+                       decl_file_id: Optional[int] = None,
+                       decl_line: Optional[int] = None,
+                       decl_col: Optional[int] = None) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
         The callee/base/override/primary reference cursor is always in hand at
-        the call site, so its name AND kind travel with the USR: a stub is born
-        NAMED and correctly typed (e.g. a defaulted ctor stub is 'constructor',
-        not the bare 'function' sentinel). This matters for targets whose
-        definition is never indexed (stdlib calls, implicit template
-        instantiations, defaulted ctors) -- without a backfilling `add_symbol`,
-        the stub is all the graph will ever have.
+        the call site, so its name, kind AND declaration location travel with
+        the USR: a stub is born NAMED, correctly typed, and -- when the
+        reference cursor carries a source location in an indexed file -- LOCATED
+        (e.g. a defaulted ctor anchored to its `struct` line). This matters for
+        targets whose definition is never separately indexed (implicit/defaulted
+        special members, implicit template instantiations) -- without a
+        backfilling `add_symbol`, this mint is all the graph will ever have, so
+        dropping libclang's location here is what made `chain::D::D` print
+        `@<no-location>`. `decl_file_id` is None for targets in unregistered
+        (e.g. system/stdlib) headers, which correctly stay location-less.
 
         'function' is the fallback kind when the cursor kind is unknown; the
         real def's add_symbol upsert overwrites kind/spelling/location/resolved
         later. On a repeat mint we only UPGRADE an unnamed stub (empty spelling)
-        -- name and kind together -- never clobber a real symbol's.
+        -- name and kind together -- never clobber a real symbol's; the decl
+        location is filled in only when still absent (COALESCE).
         """
         self._conn.execute(
-            "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, resolved) "
-            "VALUES (?, ?, ?, ?, ?, 0) "
+            "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
+            "                    decl_file_id, decl_line, decl_col, resolved) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) "
             "ON CONFLICT(usr) DO UPDATE SET "
             "  kind         = CASE WHEN symbol.spelling = '' "
             "                      THEN excluded.kind ELSE symbol.kind END, "
             "  spelling     = CASE WHEN symbol.spelling = '' "
             "                      THEN excluded.spelling ELSE symbol.spelling END, "
             "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
-            "  display_name = COALESCE(symbol.display_name, excluded.display_name)",
-            (usr, spelling, qual_name or None, display_name or None, kind),
+            "  display_name = COALESCE(symbol.display_name, excluded.display_name), "
+            "  decl_file_id = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
+            "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
+            "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col)",
+            (usr, spelling, qual_name or None, display_name or None, kind,
+             decl_file_id, decl_line, decl_col),
         )
         row = self._conn.execute(
             "SELECT id FROM symbol WHERE usr = ?", (usr,)
