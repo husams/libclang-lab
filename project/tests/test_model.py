@@ -69,6 +69,55 @@ def test_function_callers_callees(cb, ids):
     assert ids["ext_fn"] in callee_ids
 
 
+def test_callgraph_unbounded(cb, ids):
+    # main -> helper -> {compute, ext_fn(stub leaf)}
+    main = cb.get(ids["main"])
+    reached = {e.id: d for e, d in main.callgraph()}
+    assert reached == {
+        ids["helper"]: 1,
+        ids["compute"]: 2,
+        ids["ext_fn"]: 2,        # external stub: reached, then a leaf
+    }
+
+
+def test_callgraph_is_lazy_generator(cb, ids):
+    import types
+    gen = cb.get(ids["main"]).callgraph()
+    assert isinstance(gen, types.GeneratorType)
+    first, depth = next(gen)            # only the first level is computed so far
+    assert first.id == ids["helper"] and depth == 1
+
+
+def test_callgraph_depth_bound(cb, ids):
+    main = cb.get(ids["main"])
+    # depth=1 -> direct callees only
+    assert {e.id for e, _ in main.callgraph(depth=1)} == {ids["helper"]}
+    # depth=2 reaches the leaves
+    assert {e.id for e, _ in main.callgraph(depth=2)} == {
+        ids["helper"], ids["compute"], ids["ext_fn"]}
+
+
+def test_callgraph_leaf_has_empty_walk(cb, ids):
+    # compute calls nothing -> the generator yields nothing and terminates
+    compute = cb.get(ids["compute"])
+    assert list(compute.callgraph()) == []
+
+
+def test_callgraph_reaches_method_callee(cb, ids):
+    # render -> Base::draw: the walk surfaces a Method callee
+    render = cb.get(ids["render"])
+    assert {e.id for e, _ in render.callgraph()} == {ids["Base::draw"]}
+
+
+def test_callgraph_available_on_all_callable_kinds(cb, ids):
+    # Method / Constructor / Destructor / FunctionTemplate inherit it from
+    # Callable; here Base::draw is a Method whose walk is empty (no callees).
+    draw = cb.get(ids["Base::draw"])
+    assert isinstance(draw, Method)
+    assert hasattr(draw, "callgraph")
+    assert list(draw.callgraph()) == []
+
+
 # --------------------------------------------------------------------------- #
 # methods: owner / virtual / dispatch
 # --------------------------------------------------------------------------- #
