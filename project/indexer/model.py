@@ -48,12 +48,13 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Sequence
 
-from .query import (Edge, GraphQuery, Site, Sym, TemplateArg, TemplateParam,
-                    open_query)
+from .query import (DispatchSite, Edge, GraphQuery, Site, Sym,
+                    TemplateArg, TemplateParam, open_query)
 
 __all__ = [
     "CodeBase", "open_codebase", "Location", "Type", "Reference",
-    "TemplateParam", "TemplateArg",
+    "TemplateParam", "TemplateArg", "SelectionModel", "DispatchSiteModel",
+    "CallStep",
     "Entity", "Callable", "Function", "Method", "Constructor", "Destructor",
     "Record", "Class", "Field", "Enum", "EnumConstant", "Typedef",
     "Namespace", "Variable", "Macro", "FunctionTemplate", "ClassTemplate",
@@ -150,6 +151,60 @@ class Reference:
         return f"Reference({self.kind} by {self.by.name} @{where})"
 
 
+@dataclass(frozen=True)
+class SelectionModel:
+    """Entity-typed view of a :class:`indexer.query.Selection`: if the receiver's
+    run-time type is ``selecting_type``, the virtual call lands on ``target``.
+    ``inherited`` marks a subtype that inherits an ancestor's override."""
+    selecting_type: "Optional[Entity]"
+    target: "Optional[Entity]"
+    inherited: bool = False
+
+    def __repr__(self) -> str:
+        st = self.selecting_type.name if self.selecting_type else "?"
+        tg = self.target.name if self.target else "?"
+        tag = " inherited" if self.inherited else ""
+        return f"SelectionModel({st} -> {tg}{tag})"
+
+
+@dataclass(frozen=True)
+class DispatchSiteModel:
+    """Entity-typed view of a :class:`indexer.query.DispatchSite` -- the Phase-1
+    over-approximation of one virtual call: the full ``selections`` map plus a
+    ``prunable`` flag (and ``unprunable_reasons`` when not). NO pruning happens
+    in Phase 1; this just records what Phase 2 may later narrow."""
+    receiver_static_type: "Optional[Entity]"
+    declared_target: "Optional[Entity]"
+    selections: "list[SelectionModel]"
+    prunable: bool
+    unprunable_reasons: tuple[str, ...]
+
+    @property
+    def targets(self) -> "list[Entity]":
+        return [s.target for s in self.selections if s.target is not None]
+
+    def __repr__(self) -> str:
+        tg = self.declared_target.name if self.declared_target else "?"
+        state = "prunable" if self.prunable else \
+            f"unprunable({','.join(self.unprunable_reasons)})"
+        return (f"DispatchSiteModel({tg}: "
+                f"{len(self.selections)} candidate(s), {state})")
+
+
+@dataclass(frozen=True)
+class CallStep:
+    """One step of a devirtualized call-graph walk: the ``callee`` reached at
+    ``depth`` (call edges from the root), plus the ``dispatch_site`` when that
+    callee is a virtual dispatch point (None for an ordinary static call)."""
+    callee: "Entity"
+    depth: int
+    dispatch_site: "Optional[DispatchSiteModel]" = None
+
+    def __repr__(self) -> str:
+        v = " [virtual]" if self.dispatch_site is not None else ""
+        return f"CallStep({self.callee.name} @depth {self.depth}{v})"
+
+
 # --------------------------------------------------------------------------- #
 # The codebase handle / entity factory
 # --------------------------------------------------------------------------- #
@@ -197,6 +252,21 @@ class CodeBase:
             if e is not None:
                 out.append(e)
         return out
+
+    def _wrap_dispatch_site(self, ds: DispatchSite) -> DispatchSiteModel:
+        """Wrap a low-level :class:`DispatchSite` into the entity-typed
+        :class:`DispatchSiteModel`."""
+        selections = [SelectionModel(selecting_type=self.wrap(s.selecting_type),
+                                     target=self.wrap(s.target),
+                                     inherited=s.inherited)
+                      for s in ds.candidates]
+        return DispatchSiteModel(
+            receiver_static_type=self.wrap(ds.receiver_static_type),
+            declared_target=self.wrap(ds.declared_target),
+            selections=selections,
+            prunable=ds.prunable,
+            unprunable_reasons=ds.unprunable_reasons,
+        )
 
     # -- lookup -------------------------------------------------------------- #
 
@@ -432,6 +502,57 @@ class Callable(Entity):
             else:
                 stack.pop()
 
+    def devirtualized_callgraph(self, depth: Optional[int] = None, *,
+                                fanout: int = 500, expand_virtual: bool = False
+                                ) -> "Iterator[CallStep]":
+        """Like :meth:`callgraph`, but each step is a :class:`CallStep` that
+        carries the Phase-1 ``dispatch_site`` (the selection map) whenever the
+        reached callee is a virtual dispatch point.
+
+        By default the walk is **identical to ``callgraph()``** in the nodes and
+        depths it visits -- it descends into the statically-declared callee, NOT
+        every dispatch target -- so it is a faithful, behaviour-preserving view
+        with dispatch metadata attached (this is Phase 1: no pruning, no
+        expansion). Pass ``expand_virtual=True`` to ALSO walk into every concrete
+        dispatch target of each virtual callee (the conservative superset)."""
+        seen = {self.id}
+
+        def _dispatch_site(node: "Entity") -> "Optional[DispatchSiteModel]":
+            if isinstance(node, Method) and node.is_virtual:
+                return node.dispatch_selection()
+            return None
+
+        def _kids(node: "Entity", d: int) -> "Iterator[Entity]":
+            if depth is not None and d >= depth:
+                return iter(())
+            if not isinstance(node, Callable):
+                return iter(())
+            callees = node.callees(limit=fanout)
+            if not expand_virtual:
+                return iter(callees)
+            # Superset mode: append each virtual callee's concrete targets as
+            # siblings (dedup happens in the walk via `seen`).
+            out: list[Entity] = []
+            for c in callees:
+                out.append(c)
+                if isinstance(c, Method) and c.is_virtual:
+                    out.extend(c.dispatch_targets())
+            return iter(out)
+
+        stack: list[tuple[Iterator[Entity], int]] = [(_kids(self, 0), 1)]
+        while stack:
+            it, d = stack[-1]
+            for callee in it:
+                if callee.id in seen:
+                    continue
+                seen.add(callee.id)
+                yield CallStep(callee=callee, depth=d,
+                               dispatch_site=_dispatch_site(callee))
+                stack.append((_kids(callee, d), d + 1))
+                break
+            else:
+                stack.pop()
+
 
 class Function(Callable):
     """A free function."""
@@ -479,6 +600,18 @@ class Method(Callable):
         return [e for e in
                 self._cb._wrap_all(self._cb.graph.dispatch_targets(self.sym))
                 if isinstance(e, Method)]
+
+    def dispatch_selection(self, close_subtypes: bool = False
+                           ) -> DispatchSiteModel:
+        """The Phase-1 selection map for a virtual call to this method: every
+        concrete receiver type paired with the target it would dispatch to, plus
+        a ``prunable`` flag (see :class:`DispatchSiteModel`). With
+        ``close_subtypes=True``, subtypes that inherit (rather than declare) an
+        override are included as ``inherited`` candidates. Records data only --
+        no pruning happens until Phase 2."""
+        ds = self._cb.graph.dispatch_selection(self.sym,
+                                               close_subtypes=close_subtypes)
+        return self._cb._wrap_dispatch_site(ds)
 
 
 class Constructor(Method):
