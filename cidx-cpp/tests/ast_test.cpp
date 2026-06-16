@@ -1132,6 +1132,59 @@ TEST_SUITE("clang") {
     CHECK(users.count("RdKafka::Conf") == 0);              // no self-edge
   }
 
+  TEST_CASE("dependent calls inside a template body are recovered: a template "
+            "method calling a function template earns a calls edge to the "
+            "primary; ambiguous overload sets are NOT linked") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/tmplcalls.cpp";
+    write_file(path,
+               "namespace nn {\n"
+               "template <class T> T combine(T a, T b) { return a + b; }\n"
+               "template <class T> int describe(const T&) { return 0; }\n"
+               "template <class T>\n"
+               "struct Stack {\n"
+               "  T data_[4]; int n_ = 0;\n"
+               "  int summary() const {\n"
+               "    T acc = data_[0];\n"
+               "    for (int i = 1; i < n_; ++i) acc = combine(acc, data_[i]);\n"
+               "    return describe(acc);\n"
+               "  }\n"
+               "};\n"
+               "int over(int); double over(double);\n"
+               "template <class T> int caller(T v) { return (int)over(v); }\n"
+               "}\n");
+
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    // calls map: src qual_name -> set of dst qual_names (kind = 1).
+    auto callees_of = [&](const std::string &src_qual) {
+      std::unordered_set<std::string> out;
+      auto &raw = f.db.raw_db();
+      auto st = raw.prepare("SELECT b.qual_name FROM edge e "
+                            "JOIN symbol a ON a.id = e.src_id "
+                            "JOIN symbol b ON b.id = e.dst_id "
+                            "WHERE e.kind = 1 AND a.qual_name = ?");
+      st.bind(1, std::string_view{src_qual});
+      while (st.step()) {
+        out.insert(st.col_text(0));
+      }
+      return out;
+    };
+
+    const auto summary_callees = callees_of("nn::Stack::summary");
+    CHECK(summary_callees.count("nn::combine") == 1);  // recovered fn template
+    CHECK(summary_callees.count("nn::describe") == 1); // recovered fn template
+
+    // `over(v)` in caller<T> is an overload SET (int/double) -> no guess.
+    CHECK(callees_of("nn::caller").count("nn::over") == 0);
+  }
+
 } // TEST_SUITE("clang") — S06
 
 int main(int argc, char **argv) {

@@ -383,6 +383,38 @@ class GraphQuery:
         ).fetchone()
         return self._sym(r) if r else None
 
+    def def_decl_locations(
+        self, sym
+    ) -> "tuple[Optional[tuple[Optional[str], Optional[int], Optional[int]]], Optional[tuple[Optional[str], Optional[int], Optional[int]]]]":
+        """Return ``(definition_loc, declaration_loc)`` for `sym`.
+
+        The compact `Sym` collapses a symbol to a single best-known location
+        (definition, else declaration). This additive accessor surfaces BOTH so
+        a caller can distinguish "declared here, defined there". Each loc is
+        ``(abs_path, line, col)`` or None when that site is unknown. The
+        declaration loc is returned even when it coincides with the definition;
+        callers that only want the *distinct* declaration should compare them.
+
+        Read-only and additive -- it does not alter any existing behaviour.
+        """
+        sid = self._resolve_id(sym)
+        r = self._c.execute(
+            "SELECT file_id, line, col, decl_file_id, decl_line, decl_col "
+            "FROM symbol s WHERE s.id = ?", (sid,)
+        ).fetchone()
+        if r is None:
+            return None, None
+        files = self._files()
+
+        def _loc(fid, line, col):
+            if fid is None:
+                return None
+            path = files.get(fid, (None, None))[0]
+            return (path, line, col)
+
+        return (_loc(r["file_id"], r["line"], r["col"]),
+                _loc(r["decl_file_id"], r["decl_line"], r["decl_col"]))
+
     def find(self, pattern: str, kind: Optional[str] = None,
              limit: int = 50) -> list[Sym]:
         """Fuzzy lookup by qualified name. '::'-separated segments must appear in

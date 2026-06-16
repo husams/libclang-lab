@@ -614,6 +614,70 @@ void emit_body_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
   ctx->db->add_edge_site(site);
 }
 
+// --- dependent-call recovery ------------------------------------------------
+// A call to a dependent/overloaded name inside a template body (e.g.
+// `combine(a, b)` in Stack<T>::summary) has a null getCursorReferenced, even
+// though the call IS present in the AST. The callee sub-expression still carries
+// an OverloadedDeclRef listing the candidate declarations. When that set names
+// exactly ONE declaration we recover the callee; ambiguous sets (stdlib
+// to_string, etc.) are left unresolved so we never guess a wrong target.
+struct FirstChildCtx {
+  CXCursor out;
+  bool found = false;
+};
+CXChildVisitResult first_child_visitor(CXCursor c, CXCursor /*parent*/,
+                                       CXClientData d) noexcept {
+  auto *x = static_cast<FirstChildCtx *>(d);
+  x->out = c;
+  x->found = true;
+  return CXChildVisit_Break; // callee is the FIRST child; args follow
+}
+
+struct OverloadRefCtx {
+  LibClang *lib;
+  CXCursor out;
+  bool found = false;
+};
+CXChildVisitResult overload_ref_visitor(CXCursor c, CXCursor /*parent*/,
+                                        CXClientData d) noexcept {
+  auto *x = static_cast<OverloadRefCtx *>(d);
+  if (x->lib->clang_getCursorKind(c) == CXCursor_OverloadedDeclRef) {
+    x->out = c;
+    x->found = true;
+    return CXChildVisit_Break;
+  }
+  return CXChildVisit_Recurse;
+}
+
+// Returns the unique overloaded declaration, or a null cursor when the callee
+// cannot be unambiguously recovered. Only the FIRST child (the callee position)
+// is searched, so an argument that is itself an overloaded name is not mistaken
+// for the callee.
+CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
+  FirstChildCtx fc{};
+  lib.clang_visitChildren(call, &first_child_visitor, &fc);
+  if (!fc.found) {
+    return lib.clang_getNullCursor();
+  }
+  CXCursor odr = lib.clang_getNullCursor();
+  if (lib.clang_getCursorKind(fc.out) == CXCursor_OverloadedDeclRef) {
+    odr = fc.out;
+  } else {
+    OverloadRefCtx oc{&lib, {}, false};
+    lib.clang_visitChildren(fc.out, &overload_ref_visitor, &oc);
+    if (oc.found) {
+      odr = oc.out;
+    }
+  }
+  if (lib.clang_Cursor_isNull(odr)) {
+    return lib.clang_getNullCursor();
+  }
+  if (lib.clang_getNumOverloadedDecls(odr) == 1) {
+    return lib.clang_getOverloadedDecl(odr, 0);
+  }
+  return lib.clang_getNullCursor();
+}
+
 // Non-recursive entry point: visits all children via clang_visitChildren,
 // capturing CALL_EXPR (calls) + DECL_REF_EXPR / MEMBER_REF_EXPR (uses)
 // nodes and recursing depth-first.
@@ -626,36 +690,57 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
 
     if (kind == CXCursor_CallExpr) {
       // Get callee USR via getCursorReferenced. Mint-stub if not yet indexed.
-      const CXCursor ref = lib.clang_getCursorReferenced(cursor);
+      CXCursor ref = lib.clang_getCursorReferenced(cursor);
+      bool recovered = false;
+      if (lib.clang_Cursor_isNull(ref)) {
+        // Dependent/overloaded callee inside a template body (e.g.
+        // `combine(a, b)` in Stack<T>::summary): recover it from the callee's
+        // single-overload OverloadedDeclRef. See recover_overloaded_callee.
+        ref = recover_overloaded_callee(lib, cursor);
+        recovered = !lib.clang_Cursor_isNull(ref);
+      }
       if (!lib.clang_Cursor_isNull(ref)) {
         const std::string callee_usr =
             CxString(lib, lib.clang_getCursorUSR(ref)).str();
         if (!callee_usr.empty()) {
-          const int64_t dst_id = ctx->db->mint_symbol_id(callee_usr);
-          emit_body_edge(ctx, lib, cursor, dst_id, 1 /* calls */);
+          // Resolved calls mint a stub for an unindexed target; RECOVERED
+          // (dependent) calls only link to an already-indexed target, so a
+          // single-overload stdlib call never mints a stub.
+          int64_t dst_id = -1;
+          if (recovered) {
+            if (const auto dst = ctx->db->lookup_symbol(callee_usr)) {
+              dst_id = dst->id;
+            }
+          } else {
+            dst_id = ctx->db->mint_symbol_id(callee_usr);
+          }
+          if (dst_id >= 0) {
+            emit_body_edge(ctx, lib, cursor, dst_id, 1 /* calls */);
 
-          // B3 instantiates (kind=5): when the callee is a template
-          // specialization, emit an edge to the primary template symbol.
-          // clang_getSpecializedCursorTemplate returns the primary (or a
-          // partial specialization) for both function and class templates.
-          // System-header filter: skip if the primary is in a system header.
-          const CXCursor primary = lib.clang_getSpecializedCursorTemplate(ref);
-          if (!lib.clang_Cursor_isNull(primary) &&
-              !is_invalid_kind(lib.clang_getCursorKind(primary))) {
-            const std::string prim_usr =
-                CxString(lib, lib.clang_getCursorUSR(primary)).str();
-            if (!prim_usr.empty() && prim_usr != callee_usr) {
-              // Only emit when primary is already indexed (no stubs for
-              // stdlib templates — prevents inflating the stub count for
-              // std::vector, std::move, etc.).
-              const auto prim_sym = ctx->db->lookup_symbol(prim_usr);
-              if (prim_sym) {
-                Edge inst;
-                inst.src_id = ctx->src_id;
-                inst.dst_id = prim_sym->id;
-                inst.kind = 5; // instantiates
-                inst.count = 1;
-                ctx->db->add_edge(inst);
+            // B3 instantiates (kind=5): when the callee is a template
+            // specialization, emit an edge to the primary template symbol.
+            // clang_getSpecializedCursorTemplate returns the primary (or a
+            // partial specialization) for both function and class templates.
+            // For a recovered primary template this is a no-op (no parent).
+            const CXCursor primary =
+                lib.clang_getSpecializedCursorTemplate(ref);
+            if (!lib.clang_Cursor_isNull(primary) &&
+                !is_invalid_kind(lib.clang_getCursorKind(primary))) {
+              const std::string prim_usr =
+                  CxString(lib, lib.clang_getCursorUSR(primary)).str();
+              if (!prim_usr.empty() && prim_usr != callee_usr) {
+                // Only emit when primary is already indexed (no stubs for
+                // stdlib templates — prevents inflating the stub count for
+                // std::vector, std::move, etc.).
+                const auto prim_sym = ctx->db->lookup_symbol(prim_usr);
+                if (prim_sym) {
+                  Edge inst;
+                  inst.src_id = ctx->src_id;
+                  inst.dst_id = prim_sym->id;
+                  inst.kind = 5; // instantiates
+                  inst.count = 1;
+                  ctx->db->add_edge(inst);
+                }
               }
             }
           }
