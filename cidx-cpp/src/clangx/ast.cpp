@@ -712,7 +712,11 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
               dst_id = dst->id;
             }
           } else {
-            dst_id = ctx->db->mint_symbol_id(callee_usr);
+            dst_id = ctx->db->mint_symbol_id(
+                callee_usr,
+                CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
+                qualified_name(lib, ref),
+                CxString(lib, lib.clang_getCursorDisplayName(ref)).str());
           }
           if (dst_id >= 0) {
             emit_body_edge(ctx, lib, cursor, dst_id, 1 /* calls */);
@@ -1006,7 +1010,11 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       if (!src_sym) {
         return;
       }
-      const int64_t dst_id = db_.mint_symbol_id(base_usr);
+      const int64_t dst_id = db_.mint_symbol_id(
+          base_usr,
+          CxString(lib, lib.clang_getCursorSpelling(base_ref)).str(),
+          qualified_name(lib, base_ref),
+          CxString(lib, lib.clang_getCursorDisplayName(base_ref)).str());
       Edge e;
       e.src_id = src_sym->id;
       e.dst_id = dst_id;
@@ -1095,7 +1103,11 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
           if (ov_usr.empty()) {
             continue;
           }
-          const int64_t dst_ov = db_.mint_symbol_id(ov_usr);
+          const int64_t dst_ov = db_.mint_symbol_id(
+              ov_usr,
+              CxString(lib, lib.clang_getCursorSpelling(overridden[oi])).str(),
+              qualified_name(lib, overridden[oi]),
+              CxString(lib, lib.clang_getCursorDisplayName(overridden[oi])).str());
           Edge oe;
           oe.src_id = src_sym->id;
           oe.dst_id = dst_ov;
@@ -1177,7 +1189,11 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
         if (!spec_usr.empty() && !prim_usr.empty() && spec_usr != prim_usr) {
           const auto spec_sym = db_.lookup_symbol(spec_usr);
           if (spec_sym) {
-            const int64_t prim_id = db_.mint_symbol_id(prim_usr);
+            const int64_t prim_id = db_.mint_symbol_id(
+                prim_usr,
+                CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
+                qualified_name(lib, primary),
+                CxString(lib, lib.clang_getCursorDisplayName(primary)).str());
             Edge e;
             e.src_id = spec_sym->id;
             e.dst_id = prim_id;
