@@ -219,6 +219,17 @@ public:
     return ::clang_getSpecializedCursorTemplate(c);
   }
 
+  // Overloaded-declaration set carried by an OverloadedDeclRef cursor. Used to
+  // recover the callee of a dependent CALL_EXPR inside a template body (the
+  // call's getCursorReferenced is null, but the callee sub-expression still
+  // names the candidate set here).
+  unsigned clang_getNumOverloadedDecls(CXCursor c) const {
+    return ::clang_getNumOverloadedDecls(c);
+  }
+  CXCursor clang_getOverloadedDecl(CXCursor c, unsigned i) const {
+    return ::clang_getOverloadedDecl(c, i);
+  }
+
   // Overridden cursors — caller MUST release with clang_disposeOverriddenCursors.
   void clang_getOverriddenCursors(CXCursor cursor,
                                   CXCursor **overridden,

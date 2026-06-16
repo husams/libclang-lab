@@ -1,0 +1,244 @@
+"""Tests for the high-level OO model layer (indexer.model).
+
+Reuses the hermetic fixture graph from conftest.py (resolved_db / ids) and adds
+a couple of bespoke tiny DBs where the fixture lacks the needed shape (distinct
+decl-vs-def locations, a function with a real type_info signature).
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from indexer.storage import Storage, Symbol
+from indexer.query import GraphQuery
+from indexer.model import (
+    CodeBase, Function, Method, Class, Field, Variable, Type, Location,
+    Reference, _parse_signature, _base_type_name, _split_top_level,
+)
+
+
+@pytest.fixture
+def cb(resolved_db):
+    """A CodeBase over the resolved fixture DB."""
+    c = CodeBase(GraphQuery(resolved_db))
+    yield c
+    c.close()
+
+
+# --------------------------------------------------------------------------- #
+# factory: kind -> entity class
+# --------------------------------------------------------------------------- #
+
+def test_wrap_maps_kinds_to_classes(cb, ids):
+    assert isinstance(cb.get(ids["main"]), Function)
+    assert not isinstance(cb.get(ids["main"]), Method)
+    assert isinstance(cb.get(ids["Base"]), Class)
+    assert isinstance(cb.get(ids["Base::draw"]), Method)
+    assert isinstance(cb.get(ids["Base::x"]), Field)
+    assert isinstance(cb.get(ids["g_config"]), Variable)
+    # struct is also a Class
+    assert isinstance(cb.get(ids["Base::Nested"]), Class)
+    assert cb.get(ids["Base::Nested"]).kind == "struct"
+
+
+def test_find_returns_typed_entities(cb):
+    hits = cb.find("Base")
+    assert any(isinstance(e, Class) and e.name == "Base" for e in hits)
+
+
+def test_escape_hatch_to_low_level(cb, ids):
+    fn = cb.get(ids["main"])
+    assert fn.sym.id == ids["main"]
+    assert isinstance(cb.graph, GraphQuery)        # underlying handle reachable
+
+
+# --------------------------------------------------------------------------- #
+# callables: call graph
+# --------------------------------------------------------------------------- #
+
+def test_function_callers_callees(cb, ids):
+    main = cb.get(ids["main"])
+    helper = cb.get(ids["helper"])
+    assert helper in main.callees()
+    assert main in helper.callers()
+    # helper calls compute and the never-indexed stub ext_fn
+    callee_ids = {e.id for e in helper.callees()}
+    assert ids["compute"] in callee_ids
+    assert ids["ext_fn"] in callee_ids
+
+
+# --------------------------------------------------------------------------- #
+# methods: owner / virtual / dispatch
+# --------------------------------------------------------------------------- #
+
+def test_method_owner_and_pure(cb, ids):
+    draw = cb.get(ids["Base::draw"])
+    assert isinstance(draw, Method)
+    assert draw.owner == cb.get(ids["Base"])
+    assert draw.is_pure is True
+    assert draw.is_virtual is True
+    assert draw.access == "public"
+
+
+def test_method_override_relations(cb, ids):
+    base_draw = cb.get(ids["Base::draw"])
+    derived_draw = cb.get(ids["Derived::draw"])
+    assert base_draw in derived_draw.overrides()
+    assert derived_draw in base_draw.overridden_by()
+
+
+def test_dispatch_targets_excludes_pure_root(cb, ids):
+    base_draw = cb.get(ids["Base::draw"])
+    targets = {m.id for m in base_draw.dispatch_targets()}
+    # pure root excluded; both concrete overriders included
+    assert ids["Base::draw"] not in targets
+    assert ids["Derived::draw"] in targets
+    assert ids["Derived2::draw"] in targets
+
+
+# --------------------------------------------------------------------------- #
+# records: members / inheritance / abstractness
+# --------------------------------------------------------------------------- #
+
+def test_record_fields_and_methods(cb, ids):
+    base = cb.get(ids["Base"])
+    assert cb.get(ids["Base::x"]) in base.fields
+    assert cb.get(ids["Base::draw"]) in base.methods
+
+
+def test_record_member_access_filter(cb, ids):
+    base = cb.get(ids["Base"])
+    private = base.members(access="private")
+    assert cb.get(ids["Base::x"]) in private
+    assert cb.get(ids["Base::draw"]) not in private   # draw is public
+
+
+def test_inheritance_parents_children(cb, ids):
+    base = cb.get(ids["Base"])
+    derived = cb.get(ids["Derived"])
+    derived2 = cb.get(ids["Derived2"])
+    # direct
+    assert derived.parents == [base]
+    assert derived2.parents == [derived]
+    # transitive
+    assert base in derived2.ancestors and derived in derived2.ancestors
+    child_ids = {c.id for c in base.children}
+    assert ids["Derived"] in child_ids and ids["Derived2"] in child_ids
+
+
+def test_is_abstract(cb, ids):
+    # Base declares a pure-virtual draw -> abstract
+    assert cb.get(ids["Base"]).is_abstract is True
+    # Derived overrides draw with a concrete method -> not abstract
+    assert cb.get(ids["Derived"]).is_abstract is False
+
+
+# --------------------------------------------------------------------------- #
+# references
+# --------------------------------------------------------------------------- #
+
+def test_references_calls_and_uses(cb, ids):
+    compute = cb.get(ids["compute"])
+    refs = compute.references()
+    assert len(refs) == 1
+    r = refs[0]
+    assert isinstance(r, Reference)
+    assert r.by == cb.get(ids["helper"])
+    assert r.kind == "calls"
+    assert r.sites and all(s.line for s in r.sites)
+
+    g_config = cb.get(ids["g_config"])
+    uses = g_config.references()
+    assert uses[0].kind == "uses"
+    assert uses[0].by == cb.get(ids["helper"])
+
+
+# --------------------------------------------------------------------------- #
+# locations: definition vs declaration
+# --------------------------------------------------------------------------- #
+
+def test_definition_only_has_no_separate_declaration(cb, ids):
+    main = cb.get(ids["main"])
+    assert main.definition is not None
+    assert main.definition.line == 10
+    # fixture symbols carry only a def location -> no distinct declaration
+    assert main.declaration is None
+
+
+def test_distinct_decl_and_def(tmp_path):
+    repo = str(tmp_path / "r")
+    os.makedirs(repo)
+    db_path = str(tmp_path / "i.db")
+    with Storage(db_path) as db:
+        comp = db.add_component("lab", repo)
+        root = db.add_directory(comp, "")
+        f_h = db.add_file(root, "m.h")
+        f_c = db.add_file(root, "m.c")
+        # prototype in header (decl), body in .c (def): both sites recorded
+        db.add_symbol(Symbol(
+            usr="c:@F@multiply", spelling="multiply", kind="function",
+            qual_name="multiply", file_id=f_c, line=40, col=1,
+            decl_file_id=f_h, decl_line=3, decl_col=1,
+            is_definition=True, resolved=True,
+            type_info="int (int, int)"))
+    with CodeBase(GraphQuery(db_path)) as cb:
+        fn = cb.by_name("multiply")[0]
+        assert isinstance(fn, Function)
+        assert fn.definition == Location(os.path.join(repo, "m.c"), 40, 1)
+        decl = fn.declaration
+        assert decl is not None and decl.line == 3 and decl.file.endswith("m.h")
+        # signature parsed from type_info
+        assert fn.return_type.spelling == "int"
+        assert [a.spelling for a in fn.arguments] == ["int", "int"]
+
+
+# --------------------------------------------------------------------------- #
+# signature / type parsing units
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("sig, ret, args", [
+    ("int (void)", "int", []),
+    ("int (int, int)", "int", ["int", "int"]),
+    ("std::list<std::string> *()", "std::list<std::string> *", []),
+    ("RdKafka::Conf *(ConfType)", "RdKafka::Conf *", ["ConfType"]),
+    ("Error *(ErrorCode, const std::string *)", "Error *",
+     ["ErrorCode", "const std::string *"]),
+    ("void (const std::pair<int, int> &)", "void",
+     ["const std::pair<int, int> &"]),       # comma inside <> not a separator
+])
+def test_parse_signature(sig, ret, args):
+    assert _parse_signature(sig) == (ret, args)
+
+
+def test_parse_signature_non_function():
+    assert _parse_signature("int") == ("int", None)
+    assert _parse_signature(None) == (None, None)
+
+
+@pytest.mark.parametrize("spelling, base", [
+    ("const std::string &", "std::string"),
+    ("Foo<int> *", "Foo"),
+    ("unsigned int", "int"),
+    ("struct error", "error"),
+    ("uint32_t[8][256]", "uint32_t"),
+])
+def test_base_type_name(spelling, base):
+    assert _base_type_name(spelling) == base
+
+
+def test_split_top_level_respects_brackets():
+    assert _split_top_level("a, b<c, d>, e") == ["a", "b<c, d>", "e"]
+
+
+# --------------------------------------------------------------------------- #
+# type resolution
+# --------------------------------------------------------------------------- #
+
+def test_type_resolves_to_declaration(cb, ids):
+    # a Type naming Base resolves to the Base class entity
+    t = Type("const Base &", cb)
+    assert t.name == "Base"
+    decl = t.declaration()
+    assert decl == cb.get(ids["Base"])

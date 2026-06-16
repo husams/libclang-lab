@@ -34,6 +34,17 @@ _lib.clang_isVirtualBase.argtypes = [cx.Cursor]
 _lib.clang_getSpecializedCursorTemplate.restype = cx.Cursor
 _lib.clang_getSpecializedCursorTemplate.argtypes = [cx.Cursor]
 
+# clang_getNumOverloadedDecls(CXCursor) -> unsigned ;
+# clang_getOverloadedDecl(CXCursor, unsigned) -> CXCursor
+# Used to recover the callee of a CALL_EXPR whose `.referenced` is None because
+# the callee names a DEPENDENT/overloaded symbol inside a template body
+# (e.g. `combine(a, b)` in Stack<T>::summary). libclang exposes the candidate
+# set via the callee's OVERLOADED_DECL_REF cursor.
+_lib.clang_getNumOverloadedDecls.restype = ctypes.c_uint
+_lib.clang_getNumOverloadedDecls.argtypes = [cx.Cursor]
+_lib.clang_getOverloadedDecl.restype = cx.Cursor
+_lib.clang_getOverloadedDecl.argtypes = [cx.Cursor, ctypes.c_uint]
+
 # clang_getOverriddenCursors + clang_disposeOverriddenCursors
 _CursorArrayPtr = ctypes.POINTER(cx.Cursor)
 _lib.clang_getOverriddenCursors.restype = None
@@ -396,6 +407,34 @@ def _emit_type_use(db: Storage, src_id: int, ctype: cx.Type, file_id: int,
                          conditional=conditional)
 
 
+def _recover_overloaded_callee(call_cursor: cx.Cursor) -> Optional[cx.Cursor]:
+    """Recover the callee of a CALL_EXPR whose ``referenced`` is None.
+
+    Inside a template body, a call to a dependent/overloaded name (e.g.
+    ``combine(a, b)`` in ``Stack<T>::summary``) has ``CALL_EXPR.referenced is
+    None``, even though the call IS present in the AST. The callee sub-expression
+    still carries an ``OVERLOADED_DECL_REF`` listing the candidate declarations.
+    When that set names exactly ONE declaration, return it; otherwise return None
+    (ambiguous overload sets such as stdlib ``to_string`` are left unresolved, so
+    we never guess a wrong target).
+
+    Only the FIRST child (the callee position) is searched -- an argument that is
+    itself an overloaded name must not be mistaken for the callee.
+    """
+    children = list(call_cursor.get_children())
+    if not children:
+        return None
+    stack = [children[0]]
+    while stack:
+        cur = stack.pop()
+        if cur.kind == cx.CursorKind.OVERLOADED_DECL_REF:
+            if _lib.clang_getNumOverloadedDecls(cur) == 1:
+                return _lib.clang_getOverloadedDecl(cur, 0)
+            return None
+        stack.extend(cur.get_children())
+    return None
+
+
 def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                   src_id: int, file_id: int,
                   cond_depth: int = 0) -> None:
@@ -411,33 +450,51 @@ def _body_descent(db: Storage, fn_cursor: cx.Cursor,
         kind = child.kind
         if kind == cx.CursorKind.CALL_EXPR:
             ref = child.referenced
+            recovered = False
+            if ref is None:
+                # Dependent/overloaded callee inside a template body (e.g.
+                # `combine(a, b)` in Stack<T>::summary): recover it from the
+                # callee's single-overload OVERLOADED_DECL_REF. See
+                # _recover_overloaded_callee.
+                ref = _recover_overloaded_callee(child)
+                recovered = ref is not None
             if ref is not None:
                 callee_usr: str = ref.get_usr()
                 if callee_usr:
-                    dst_id = db.mint_symbol_id(callee_usr)
-                    edge_id = db.add_edge(src_id, dst_id, 1)  # calls
-                    loc = child.location
-                    db.add_edge_site(
-                        edge_id, file_id, loc.line, loc.column,
-                        conditional=1 if cond_depth > 0 else 0,
-                    )
-                    # B3 instantiates (kind=5): when the callee is a template
-                    # specialization, emit an edge to the primary template.
-                    # Only emit when primary is already indexed (no stubs for
-                    # stdlib templates — prevents inflating stub count for
-                    # std::vector, std::move, etc.).
-                    primary = _lib.clang_getSpecializedCursorTemplate(ref)
-                    if (primary is not None and
-                            primary.kind.value > 0 and
-                            primary.kind not in (
-                                cx.CursorKind.NO_DECL_FOUND,
-                                cx.CursorKind.INVALID_FILE,
-                            )):
-                        prim_usr = primary.get_usr()
-                        if prim_usr and prim_usr != callee_usr:
-                            prim_sym = db.lookup_symbol(prim_usr)
-                            if prim_sym is not None:
-                                db.add_edge(src_id, prim_sym.id, 5)  # instantiates
+                    # Resolved calls mint a stub for an unindexed target;
+                    # RECOVERED (dependent) calls only link to an already-indexed
+                    # target, so a single-overload stdlib call (e.g. one-arg
+                    # std::move) never mints a stub.
+                    if recovered:
+                        _dst = db.lookup_symbol(callee_usr)
+                        dst_id = _dst.id if _dst is not None else None
+                    else:
+                        dst_id = db.mint_symbol_id(callee_usr)
+                    if dst_id is not None:
+                        edge_id = db.add_edge(src_id, dst_id, 1)  # calls
+                        loc = child.location
+                        db.add_edge_site(
+                            edge_id, file_id, loc.line, loc.column,
+                            conditional=1 if cond_depth > 0 else 0,
+                        )
+                        # B3 instantiates (kind=5): when the callee is a template
+                        # specialization, emit an edge to the primary template.
+                        # Only emit when primary is already indexed (no stubs for
+                        # stdlib templates — prevents inflating stub count for
+                        # std::vector, std::move, etc.). For a recovered primary
+                        # template this is a no-op (it has no specialized parent).
+                        primary = _lib.clang_getSpecializedCursorTemplate(ref)
+                        if (primary is not None and
+                                primary.kind.value > 0 and
+                                primary.kind not in (
+                                    cx.CursorKind.NO_DECL_FOUND,
+                                    cx.CursorKind.INVALID_FILE,
+                                )):
+                            prim_usr = primary.get_usr()
+                            if prim_usr and prim_usr != callee_usr:
+                                prim_sym = db.lookup_symbol(prim_usr)
+                                if prim_sym is not None:
+                                    db.add_edge(src_id, prim_sym.id, 5)  # instantiates
         elif kind in (cx.CursorKind.DECL_REF_EXPR, cx.CursorKind.MEMBER_REF_EXPR):
             # B2 uses: non-function indexed symbols referenced in function body.
             # Only emit for symbols already in the DB (lookup, no stub) —
