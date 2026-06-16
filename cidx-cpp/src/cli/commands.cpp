@@ -590,6 +590,15 @@ int cmd_show_symbol(const ParsedArgs &args, Context &ctx) {
         fmt::py_str(parent->qual_name) + "  [" + *s->parent_usr + "]";
   }
 
+  // declaration: a registered decl site, else the raw external decl_path of a
+  // stub whose target lives in an unregistered (system/stdlib) file.
+  std::optional<std::string> declaration =
+      loc(s->decl_file_id, s->decl_line, s->decl_col);
+  if (!declaration && s->decl_path) {
+    declaration = *s->decl_path + ":" + fmt::py_str(s->decl_line) + ":" +
+                  fmt::py_str(s->decl_col);
+  }
+
   const std::vector<std::pair<const char *, std::optional<std::string>>>
       fields = {
           {"id", std::to_string(s->id)},
@@ -608,7 +617,7 @@ int cmd_show_symbol(const ParsedArgs &args, Context &ctx) {
                               : std::nullopt},
           {"definition",
            s->is_definition ? loc(s->file_id, s->line, s->col) : std::nullopt},
-          {"declaration", loc(s->decl_file_id, s->decl_line, s->decl_col)},
+          {"declaration", declaration},
           {"resolved", s->resolved  ? std::string("yes")
                        : s->is_pure ? std::string("n/a (pure virtual)")
                                     : std::string("no (definition not seen)")},

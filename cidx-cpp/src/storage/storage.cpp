@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS symbol (
     decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
     decl_line    INTEGER,
     decl_col     INTEGER,
+    decl_path    TEXT,                         -- raw decl path for a target in an
+                                              -- UNREGISTERED (system/stdlib) file
+                                              -- no component owns: the AST has the
+                                              -- location but there is no file row,
+                                              -- so the stub keeps the path here
     is_definition INTEGER NOT NULL DEFAULT 0,
     is_pure      INTEGER NOT NULL DEFAULT 0,
     linkage      TEXT,
@@ -144,7 +149,7 @@ CREATE TABLE IF NOT EXISTS template_arg (
     PRIMARY KEY (owner_id, position)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '8');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '9');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -179,11 +184,11 @@ constexpr std::array<std::string_view, 17> kSymbolKinds = {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 18> kSymbolInsertCols = {
+constexpr std::array<std::string_view, 19> kSymbolInsertCols = {
     "usr",       "spelling",   "qual_name",     "display_name", "kind",
     "type_info", "file_id",    "line",          "col",          "decl_file_id",
-    "decl_line", "decl_col",   "is_definition", "is_pure",      "linkage",
-    "access",    "parent_usr", "resolved",
+    "decl_line", "decl_col",   "decl_path",     "is_definition", "is_pure",
+    "linkage",   "access",     "parent_usr",    "resolved",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
@@ -195,12 +200,12 @@ constexpr char kFileCols[] =
 constexpr char kSymbolCols[] =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
-    "linkage, access, parent_usr, resolved";
+    "linkage, access, parent_usr, resolved, decl_path";
 constexpr char kSymbolColsS[] =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.linkage, s.access, "
-    "s.parent_usr, s.resolved";
+    "s.parent_usr, s.resolved, s.decl_path";
 
 std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -302,6 +307,7 @@ Symbol symbol_from(const SqliteStmt &st) {
   s.access = opt_text(st, 16);
   s.parent_usr = opt_text(st, 17);
   s.resolved = st.col_int64(18) != 0;
+  s.decl_path = opt_text(st, 19);
   return s;
 }
 
@@ -469,6 +475,13 @@ void Storage::migrate() {
     // No backfill possible from stored data -- reindex to populate.
     db_.exec(
         "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0");
+    changed = true;
+  }
+  if (!has_col(cols, "decl_path")) {
+    // v8 -> v9: raw decl path for stubs whose target lives in an unregistered
+    // (system/stdlib) file. No backfill -- those rows had no location to
+    // recover; a reindex repopulates it from the AST.
+    db_.exec("ALTER TABLE symbol ADD COLUMN decl_path TEXT");
     changed = true;
   }
   if (has_table("file")) {
@@ -999,8 +1012,9 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   auto st = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
-      "is_definition, is_pure, linkage, access, parent_usr, resolved) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "is_definition, is_pure, linkage, access, parent_usr, resolved, "
+      "decl_path) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  spelling      = excluded.spelling, "
       "  qual_name     = COALESCE(excluded.qual_name, symbol.qual_name), "
@@ -1044,6 +1058,9 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   bind_opt(st, 16, sym.access);
   bind_opt(st, 17, sym.parent_usr);
   st.bind(18, static_cast<int64_t>(sym.resolved ? 1 : 0));
+  // decl_path is INSERTed but intentionally NOT in the ON CONFLICT SET: a real
+  // add_symbol never clobbers a stub's recorded external path (mirrors Python).
+  bind_opt(st, 19, sym.decl_path);
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }
@@ -1286,17 +1303,21 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
                                 const std::string &kind,
                                 const std::optional<int64_t> &decl_file_id,
                                 const std::optional<int64_t> &decl_line,
-                                const std::optional<int64_t> &decl_col) {
+                                const std::optional<int64_t> &decl_col,
+                                const std::optional<std::string> &decl_path) {
   // The follow-up SELECT returns the stable id whether the row was minted or
   // already present. 'function' is the fallback kind when the cursor kind is
   // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
   // later. On a repeat mint we only UPGRADE an unnamed stub (empty spelling) --
   // name and kind together -- never clobber a real symbol's; the decl location
-  // is filled in only when still absent (COALESCE).
+  // (registered id or raw path) is filled in only when still absent (COALESCE).
+  // decl_path carries the location of a target in an UNREGISTERED (system/
+  // stdlib) file so the stub stays located instead of @<no-location>.
   auto ins = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
-      "                    decl_file_id, decl_line, decl_col, resolved) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) "
+      "                    decl_file_id, decl_line, decl_col, decl_path, "
+      "                    resolved) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  kind         = CASE WHEN symbol.spelling = '' "
       "                      THEN excluded.kind ELSE symbol.kind END, "
@@ -1306,7 +1327,8 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
       "  display_name = COALESCE(symbol.display_name, excluded.display_name), "
       "  decl_file_id = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
       "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
-      "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col)");
+      "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col), "
+      "  decl_path    = COALESCE(symbol.decl_path, excluded.decl_path)");
   ins.bind(1, std::string_view(usr));
   ins.bind(2, std::string_view(spelling));
   if (qual_name.empty()) {
@@ -1323,6 +1345,7 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   bind_opt(ins, 6, decl_file_id);
   bind_opt(ins, 7, decl_line);
   bind_opt(ins, 8, decl_col);
+  bind_opt(ins, 9, decl_path);
   ins.step_done();
   auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
   sel.bind(1, std::string_view(usr));

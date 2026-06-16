@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -109,6 +109,12 @@ CREATE TABLE IF NOT EXISTS symbol (
     decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
     decl_line    INTEGER,                     -- declaration site (e.g. the .h
     decl_col     INTEGER,                     -- prototype); NULL if none seen
+    decl_path    TEXT,                         -- raw decl path for a target in an
+                                              -- UNREGISTERED file (system/stdlib
+                                              -- header no component owns): the AST
+                                              -- has the location but there is no
+                                              -- file row to point decl_file_id at,
+                                              -- so the stub keeps the path here
     is_definition INTEGER NOT NULL DEFAULT 0,
     is_pure      INTEGER NOT NULL DEFAULT 0,  -- C++: pure virtual ('= 0'), so
                                               -- no definition can ever exist
@@ -224,6 +230,8 @@ class Symbol:
     decl_file_id: Optional[int] = None
     decl_line: Optional[int] = None
     decl_col: Optional[int] = None
+    decl_path: Optional[str] = None       # raw decl path for an unregistered
+                                          # (system/stdlib) target -- see schema
     is_definition: bool = False
     is_pure: bool = False
     linkage: Optional[str] = None
@@ -318,6 +326,12 @@ class Storage:
             # No backfill possible from stored data -- reindex to populate.
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0")
+            changed = True
+        if "decl_path" not in cols:
+            # v8 -> v9: raw decl path for stubs whose target lives in an
+            # unregistered (system/stdlib) file. No backfill -- those rows had no
+            # location to recover; a reindex repopulates it from the AST.
+            self._conn.execute("ALTER TABLE symbol ADD COLUMN decl_path TEXT")
             changed = True
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
@@ -764,7 +778,7 @@ class Storage:
 
     _SYMBOL_COLS = ("usr", "spelling", "qual_name", "display_name", "kind",
                     "type_info", "file_id", "line", "col",
-                    "decl_file_id", "decl_line", "decl_col",
+                    "decl_file_id", "decl_line", "decl_col", "decl_path",
                     "is_definition", "is_pure", "linkage", "access",
                     "parent_usr", "resolved")
 
@@ -927,7 +941,8 @@ class Storage:
                        kind: str = "function",
                        decl_file_id: Optional[int] = None,
                        decl_line: Optional[int] = None,
-                       decl_col: Optional[int] = None) -> int:
+                       decl_col: Optional[int] = None,
+                       decl_path: Optional[str] = None) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
         The callee/base/override/primary reference cursor is always in hand at
@@ -940,18 +955,25 @@ class Storage:
         backfilling `add_symbol`, this mint is all the graph will ever have, so
         dropping libclang's location here is what made `chain::D::D` print
         `@<no-location>`. `decl_file_id` is None for targets in unregistered
-        (e.g. system/stdlib) headers, which correctly stay location-less.
+        (e.g. system/stdlib) headers; for those the AST still carries a real
+        source location, so the caller passes the raw path as `decl_path` (with
+        decl_line/decl_col) and the stub stays located -- e.g. a libstdc++
+        `__normal_iterator::operator*` resolves to `stl_iterator.h:1234` instead
+        of `@<no-location>`. Only a target with no source location at all
+        (implicit/builtin) is truly location-less.
 
         'function' is the fallback kind when the cursor kind is unknown; the
         real def's add_symbol upsert overwrites kind/spelling/location/resolved
         later. On a repeat mint we only UPGRADE an unnamed stub (empty spelling)
         -- name and kind together -- never clobber a real symbol's; the decl
-        location is filled in only when still absent (COALESCE).
+        location (registered or raw path) is filled in only when still absent
+        (COALESCE).
         """
         self._conn.execute(
             "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
-            "                    decl_file_id, decl_line, decl_col, resolved) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) "
+            "                    decl_file_id, decl_line, decl_col, decl_path, "
+            "                    resolved) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
             "ON CONFLICT(usr) DO UPDATE SET "
             "  kind         = CASE WHEN symbol.spelling = '' "
             "                      THEN excluded.kind ELSE symbol.kind END, "
@@ -961,9 +983,10 @@ class Storage:
             "  display_name = COALESCE(symbol.display_name, excluded.display_name), "
             "  decl_file_id = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
             "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
-            "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col)",
+            "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col), "
+            "  decl_path    = COALESCE(symbol.decl_path, excluded.decl_path)",
             (usr, spelling, qual_name or None, display_name or None, kind,
-             decl_file_id, decl_line, decl_col),
+             decl_file_id, decl_line, decl_col, decl_path or None),
         )
         row = self._conn.execute(
             "SELECT id FROM symbol WHERE usr = ?", (usr,)

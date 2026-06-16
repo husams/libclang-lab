@@ -101,18 +101,25 @@ ExpansionLoc cursor_location(LibClang &lib, CXCursor cursor) {
   return loc;
 }
 
-// Declaration location (file_id, line, col) of a mint target's reference
-// cursor. The target of a mint (callee/base/override/primary) carries a real
-// source location even when its definition body is never separately indexed --
-// e.g. an implicit/defaulted ctor is anchored to its `struct` line. Recording
-// it here is what lets chain::D::D resolve to chain.hpp:25 instead of
-// `@<no-location>`. Lookup-only (db.get_file, never add_file_path): a target in
-// a file no registered component owns -- system/stdlib headers -- yields all
-// nullopt and correctly stays location-less. Mirrors ast.py:_ref_decl_loc.
+// Declaration location of a mint target's reference cursor. The target of a
+// mint (callee/base/override/primary) carries a real source location even when
+// its definition body is never separately indexed -- e.g. an implicit/defaulted
+// ctor is anchored to its `struct` line. Recording it here is what lets
+// chain::D::D resolve to chain.hpp:25 instead of `@<no-location>`.
+//
+// Lookup-only for the registered file id (db.get_file, never add_file_path). A
+// target in a file no registered component owns -- system/stdlib headers -- has
+// no file row, so `file_id` is nullopt; but the AST still knows where it is, so
+// `path` carries the raw file path (with line/col). The stub then keeps that
+// location instead of going `@<no-location>` (e.g. libstdc++
+// __normal_iterator::operator* shows stl_iterator.h:NNNN). Only a cursor with no
+// source location at all (implicit/builtin) yields all nullopt. Mirrors
+// ast.py:_ref_decl_loc.
 struct RefDeclLoc {
   std::optional<int64_t> file_id;
   std::optional<int64_t> line;
   std::optional<int64_t> col;
+  std::optional<std::string> path; // raw path when file_id is unregistered
 };
 
 RefDeclLoc ref_decl_loc(LibClang &lib, Storage &db, CXCursor ref) {
@@ -125,13 +132,14 @@ RefDeclLoc ref_decl_loc(LibClang &lib, Storage &db, CXCursor ref) {
   if (fname.empty()) {
     return out;
   }
+  out.line = static_cast<int64_t>(loc.line);
+  out.col = static_cast<int64_t>(loc.col);
   const auto row = db.get_file(fname);
   if (!row) {
+    out.path = fname; // unregistered (system/stdlib) header: keep the raw path
     return out;
   }
   out.file_id = row->id;
-  out.line = static_cast<int64_t>(loc.line);
-  out.col = static_cast<int64_t>(loc.col);
   return out;
 }
 
@@ -760,7 +768,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
                 CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
                 qualified_name(lib, ref),
                 CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
-                stub_kind(lib, ref), dl.file_id, dl.line, dl.col);
+                stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path);
           }
           if (dst_id >= 0) {
             emit_body_edge(ctx, lib, cursor, dst_id, 1 /* calls */);
@@ -1060,7 +1068,8 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
           CxString(lib, lib.clang_getCursorSpelling(base_ref)).str(),
           qualified_name(lib, base_ref),
           CxString(lib, lib.clang_getCursorDisplayName(base_ref)).str(),
-          stub_kind(lib, base_ref), base_dl.file_id, base_dl.line, base_dl.col);
+          stub_kind(lib, base_ref), base_dl.file_id, base_dl.line, base_dl.col,
+          base_dl.path);
       Edge e;
       e.src_id = src_sym->id;
       e.dst_id = dst_id;
@@ -1156,7 +1165,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
               qualified_name(lib, overridden[oi]),
               CxString(lib, lib.clang_getCursorDisplayName(overridden[oi])).str(),
               stub_kind(lib, overridden[oi]), ov_dl.file_id, ov_dl.line,
-              ov_dl.col);
+              ov_dl.col, ov_dl.path);
           Edge oe;
           oe.src_id = src_sym->id;
           oe.dst_id = dst_ov;
@@ -1245,7 +1254,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                 qualified_name(lib, primary),
                 CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
                 stub_kind(lib, primary), prim_dl.file_id, prim_dl.line,
-                prim_dl.col);
+                prim_dl.col, prim_dl.path);
             Edge e;
             e.src_id = spec_sym->id;
             e.dst_id = prim_id;

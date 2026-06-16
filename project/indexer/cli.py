@@ -659,7 +659,10 @@ def cmd_show_symbol(args) -> int:
                      if s.is_pure else None),
             ("definition", loc(s.file_id, s.line, s.col)
                            if s.is_definition else None),
-            ("declaration", loc(s.decl_file_id, s.decl_line, s.decl_col)),
+            ("declaration", loc(s.decl_file_id, s.decl_line, s.decl_col)
+                            # external/unregistered (system/stdlib) decl: raw path
+                            or (f"{s.decl_path}:{s.decl_line}:{s.decl_col}"
+                                if s.decl_path else None)),
             ("resolved", "yes" if s.resolved else
                          "n/a (pure virtual)" if s.is_pure else
                          "no (definition not seen)"),

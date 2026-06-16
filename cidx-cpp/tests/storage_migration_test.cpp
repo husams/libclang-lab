@@ -72,13 +72,13 @@ void check_migrated(const std::string &db_path) {
   cidx::SqliteDb raw(db_path);
 
   const auto scols = table_columns(raw, "symbol");
-  for (const char *c :
-       {"qual_name", "decl_file_id", "decl_line", "decl_col", "is_pure"}) {
+  for (const char *c : {"qual_name", "decl_file_id", "decl_line", "decl_col",
+                        "is_pure", "decl_path"}) {
     CHECK_MESSAGE(has_col(scols, c), "symbol." << c << " present");
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
   CHECK(has_col(table_columns(raw, "file"), "args_overridden"));
-  CHECK(meta_version(raw) == "8");
+  CHECK(meta_version(raw) == "9");
 
   // qual_name: longest parent_usr chain wins; the anonymous-namespace level
   // (empty parent spelling) is skipped.
@@ -235,7 +235,8 @@ TEST_CASE("newer DB opens without refusal (no downgrade path)") {
   {
     cidx::SqliteDb raw(path);
     raw.exec("ALTER TABLE symbol ADD COLUMN future_col TEXT");
-    raw.exec("UPDATE meta SET value = '8' WHERE key = 'schema_version'");
+    // A version NEWER than this build must be left untouched (no downgrade).
+    raw.exec("UPDATE meta SET value = '99' WHERE key = 'schema_version'");
   }
   {
     cidx::Storage db(path); // must not throw, must not downgrade
@@ -243,6 +244,6 @@ TEST_CASE("newer DB opens without refusal (no downgrade path)") {
     CHECK(db.get_component_by_name("c").has_value());
   }
   cidx::SqliteDb raw(path);
-  CHECK(meta_version(raw) == "8"); // column-presence detection found no work
+  CHECK(meta_version(raw) == "99"); // future schema left untouched, not bumped
   CHECK(has_col(table_columns(raw, "symbol"), "future_col"));
 }
