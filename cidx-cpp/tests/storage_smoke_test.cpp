@@ -382,7 +382,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v9 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -400,7 +400,7 @@ TEST_CASE("fresh Storage produces schema v9 (file-backed and :memory:)") {
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "edge_kind", "edge",
                                         "edge_site", "template_param",
-                                        "template_arg"});
+                                        "template_arg", "call_arg"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -442,14 +442,15 @@ TEST_CASE("fresh Storage produces schema v9 (file-backed and :memory:)") {
                                          "idx_symbol_qual", "idx_symbol_file",
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
-                                         "idx_edge_src", "idx_edge_dst"});
+                                         "idx_edge_src", "idx_edge_dst",
+                                         "idx_call_arg_edge"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "9");
+    CHECK(st.col_text(0) == "10");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

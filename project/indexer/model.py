@@ -48,30 +48,64 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Sequence
 
-from .query import (DispatchSite, Edge, GraphQuery, Site, Sym,
-                    TemplateArg, TemplateParam, open_query)
+from .query import (
+    CallArg,
+    DispatchSite,
+    Edge,
+    GraphQuery,
+    Selection,
+    Site,
+    Sym,
+    TemplateArg,
+    TemplateParam,
+    open_query,
+)
 
 __all__ = [
-    "CodeBase", "open_codebase", "Location", "Type", "Reference",
-    "TemplateParam", "TemplateArg", "SelectionModel", "DispatchSiteModel",
+    "CodeBase",
+    "open_codebase",
+    "Location",
+    "Type",
+    "Reference",
+    "TemplateParam",
+    "TemplateArg",
+    "SelectionModel",
+    "DispatchSiteModel",
     "CallStep",
-    "Entity", "Callable", "Function", "Method", "Constructor", "Destructor",
-    "Record", "Class", "Field", "Enum", "EnumConstant", "Typedef",
-    "Namespace", "Variable", "Macro", "FunctionTemplate", "ClassTemplate",
+    "Entity",
+    "Callable",
+    "Function",
+    "Method",
+    "Constructor",
+    "Destructor",
+    "Record",
+    "Class",
+    "Field",
+    "Enum",
+    "EnumConstant",
+    "Typedef",
+    "Namespace",
+    "Variable",
+    "Macro",
+    "FunctionTemplate",
+    "ClassTemplate",
 ]
 
 #: kinds that name a type a `Type` can resolve to
-_TYPE_DECL_KINDS = frozenset({"class", "struct", "union", "enum", "typedef",
-                              "type-alias", "class-template"})
+_TYPE_DECL_KINDS = frozenset(
+    {"class", "struct", "union", "enum", "typedef", "type-alias", "class-template"}
+)
 
 
 # --------------------------------------------------------------------------- #
 # Plain value types
 # --------------------------------------------------------------------------- #
 
+
 @dataclass(frozen=True)
 class Location:
     """A resolved source position (file + line + col)."""
+
     file: Optional[str]
     line: Optional[int]
     col: Optional[int]
@@ -81,6 +115,7 @@ class Location:
         if not self.file:
             return "<no-location>"
         import os
+
         base = os.path.basename(self.file)
         return f"{base}:{self.line}" if self.line else base
 
@@ -100,6 +135,7 @@ class Type:
     arguments stripped (``std::string``). `declaration()` resolves that base
     name to the entity that declares it, when one is indexed -- best-effort.
     """
+
     spelling: str
     _cb: "CodeBase"
 
@@ -125,11 +161,15 @@ class Type:
         base = self.name
         if not base:
             return None
-        cands = [e for e in self._cb.find(base, limit=50)
-                 if e.kind in _TYPE_DECL_KINDS and e.name == base]
+        cands = [
+            e
+            for e in self._cb.find(base, limit=50)
+            if e.kind in _TYPE_DECL_KINDS and e.name == base
+        ]
         if not cands:
-            cands = [e for e in self._cb.find(base, limit=50)
-                     if e.kind in _TYPE_DECL_KINDS]
+            cands = [
+                e for e in self._cb.find(base, limit=50) if e.kind in _TYPE_DECL_KINDS
+            ]
         if not cands:
             return None
         cands.sort(key=lambda e: (not e.is_definition,))
@@ -142,9 +182,10 @@ class Type:
 @dataclass(frozen=True)
 class Reference:
     """A place that refers to an entity: who, how, and where."""
-    by: "Entity"            # the referring entity
-    kind: str               # 'calls' | 'uses'
-    sites: Sequence[Site]   # concrete file:line locations of the reference
+
+    by: "Entity"  # the referring entity
+    kind: str  # 'calls' | 'uses'
+    sites: Sequence[Site]  # concrete file:line locations of the reference
 
     def __repr__(self) -> str:
         where = self.sites[0].loc if self.sites else self.by.location.loc
@@ -156,6 +197,7 @@ class SelectionModel:
     """Entity-typed view of a :class:`indexer.query.Selection`: if the receiver's
     run-time type is ``selecting_type``, the virtual call lands on ``target``.
     ``inherited`` marks a subtype that inherits an ancestor's override."""
+
     selecting_type: "Optional[Entity]"
     target: "Optional[Entity]"
     inherited: bool = False
@@ -173,6 +215,7 @@ class DispatchSiteModel:
     over-approximation of one virtual call: the full ``selections`` map plus a
     ``prunable`` flag (and ``unprunable_reasons`` when not). NO pruning happens
     in Phase 1; this just records what Phase 2 may later narrow."""
+
     receiver_static_type: "Optional[Entity]"
     declared_target: "Optional[Entity]"
     selections: "list[SelectionModel]"
@@ -185,32 +228,50 @@ class DispatchSiteModel:
 
     def __repr__(self) -> str:
         tg = self.declared_target.name if self.declared_target else "?"
-        state = "prunable" if self.prunable else \
-            f"unprunable({','.join(self.unprunable_reasons)})"
-        return (f"DispatchSiteModel({tg}: "
-                f"{len(self.selections)} candidate(s), {state})")
+        state = (
+            "prunable"
+            if self.prunable
+            else f"unprunable({','.join(self.unprunable_reasons)})"
+        )
+        return f"DispatchSiteModel({tg}: {len(self.selections)} candidate(s), {state})"
 
 
 @dataclass(frozen=True)
 class CallStep:
     """One step of a devirtualized call-graph walk: the ``callee`` reached at
     ``depth`` (call edges from the root), plus the ``dispatch_site`` when that
-    callee is a virtual dispatch point (None for an ordinary static call)."""
+    callee is a virtual dispatch point (None for an ordinary static call).
+
+    Phase-2 fields (``prune=True`` only):
+      * ``pruned_candidates``: the subset of ``dispatch_site.selections`` kept
+        after Gamma pruning; None when prune=False OR site is kept-all.
+      * ``gamma_receiver``: the Gamma TypeSet (frozenset of class USRs) for
+        the receiver; None == TOP (unknown/non-finite)."""
+
     callee: "Entity"
     depth: int
     dispatch_site: "Optional[DispatchSiteModel]" = None
+    pruned_candidates: "Optional[list[SelectionModel]]" = None
+    gamma_receiver: "Optional[frozenset[str]]" = None
 
     def __repr__(self) -> str:
         v = " [virtual]" if self.dispatch_site is not None else ""
-        return f"CallStep({self.callee.name} @depth {self.depth}{v})"
+        p = (
+            f" pruned={len(self.pruned_candidates)}"
+            if self.pruned_candidates is not None
+            else ""
+        )
+        return f"CallStep({self.callee.name} @depth {self.depth}{v}{p})"
 
 
 # --------------------------------------------------------------------------- #
 # The codebase handle / entity factory
 # --------------------------------------------------------------------------- #
 
-def open_codebase(db_path: Optional[str] = None,
-                  require_edges: bool = False) -> "CodeBase":
+
+def open_codebase(
+    db_path: Optional[str] = None, require_edges: bool = False
+) -> "CodeBase":
     """Open the standard cidx index and wrap it as a CodeBase."""
     return CodeBase(open_query(db_path, require_edges=require_edges))
 
@@ -256,10 +317,14 @@ class CodeBase:
     def _wrap_dispatch_site(self, ds: DispatchSite) -> DispatchSiteModel:
         """Wrap a low-level :class:`DispatchSite` into the entity-typed
         :class:`DispatchSiteModel`."""
-        selections = [SelectionModel(selecting_type=self.wrap(s.selecting_type),
-                                     target=self.wrap(s.target),
-                                     inherited=s.inherited)
-                      for s in ds.candidates]
+        selections = [
+            SelectionModel(
+                selecting_type=self.wrap(s.selecting_type),
+                target=self.wrap(s.target),
+                inherited=s.inherited,
+            )
+            for s in ds.candidates
+        ]
         return DispatchSiteModel(
             receiver_static_type=self.wrap(ds.receiver_static_type),
             declared_target=self.wrap(ds.declared_target),
@@ -276,8 +341,9 @@ class CodeBase:
             return ident
         return self.wrap(self.graph.get(ident))
 
-    def find(self, pattern: str, kind: Optional[str] = None,
-             limit: int = 50) -> "list[Entity]":
+    def find(
+        self, pattern: str, kind: Optional[str] = None, limit: int = 50
+    ) -> "list[Entity]":
         """Fuzzy qualified-name lookup -> typed entities (see GraphQuery.find)."""
         return self._wrap_all(self.graph.find(pattern, kind=kind, limit=limit))
 
@@ -292,8 +358,11 @@ class CodeBase:
 
     def function(self, name: str) -> "Optional[Function]":
         """The first free function matching `name`, or None."""
-        hits = [e for e in self.find(name) if isinstance(e, Function)
-                and not isinstance(e, Method)]
+        hits = [
+            e
+            for e in self.find(name)
+            if isinstance(e, Function) and not isinstance(e, Method)
+        ]
         return hits[0] if hits else None
 
     def klass(self, name: str) -> "Optional[Record]":
@@ -308,6 +377,7 @@ class CodeBase:
 # --------------------------------------------------------------------------- #
 # Entity hierarchy
 # --------------------------------------------------------------------------- #
+
 
 class Entity:
     """Base for every indexed declaration. Wraps a low-level ``Sym``.
@@ -414,6 +484,320 @@ class Entity:
         return f"{type(self).__name__}({self.name!r} @{self.location.loc})"
 
 
+# --------------------------------------------------------------------------- #
+# Phase 2 — Gamma propagation engine (internal, Python-only, EXEMPT from C++)
+# --------------------------------------------------------------------------- #
+
+#: Maximum number of distinct calling contexts cloned per callable before
+#: the analysis falls back to TOP (sound, terminates cloning).
+K_LIMIT: int = 3
+
+
+# Sentinel for the "unknown / non-finite" type set (TOP).
+class _Top:
+    """Singleton sentinel for the TOP type-set (unknown receiver type)."""
+
+    _instance: "Optional[_Top]" = None
+
+    def __new__(cls) -> "_Top":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "TOP"
+
+
+TOP = _Top()
+
+# TypeSet = TOP | frozenset[str]  (str = class USR)
+TypeSet = "_Top | frozenset[str]"
+
+
+def _join(gamma: dict, key: tuple, ts: "_Top | frozenset[str]") -> None:
+    """Flow-insensitive union join; never kills an existing binding."""
+    cur = gamma.get(key, frozenset())
+    if cur is TOP or ts is TOP:
+        gamma[key] = TOP
+    else:
+        gamma[key] = cur | ts  # type: ignore[operator]
+
+
+class _GammaEngine:
+    """Pure-Python type-environment propagation over the query layer.
+
+    Computes a Gamma mapping (callable-context, decl-usr) -> TypeSet so
+    that the devirtualized_callgraph(prune=True) walk can narrow virtual
+    dispatch candidates to the receiver's statically-determined type set.
+
+    Constructed once per ``devirtualized_callgraph(prune=True)`` call and
+    seeded by ``analyse(root_sym)``. Afterwards use ``decide()`` to prune
+    a dispatch site inside a given context.
+    """
+
+    def __init__(self, cb: "CodeBase") -> None:
+        self._cb = cb
+        self._g = cb.graph
+        # gamma[(ctx, decl_usr)] -> TypeSet
+        self._gamma: dict[tuple, "_Top | frozenset[str]"] = {}
+        # context (callee_id, param_sig) -> PENDING (in-flight) | result
+        self._analysed: set[tuple] = set()
+        # count distinct contexts analysed per callable USR (k-limit)
+        self._ctx_count: dict[str, int] = {}
+
+    # ------------------------------------------------------------------ #
+    # Public entry point
+    # ------------------------------------------------------------------ #
+
+    def analyse(self, root: Sym) -> None:
+        """Seed Gamma starting from ``root`` (the walk root).
+
+        After this call, ``decide()`` can be queried for any site inside
+        any callable reachable from root."""
+        root_ctx = (root.usr, ())
+        self._visit(root_ctx, root)
+
+    # ------------------------------------------------------------------ #
+    # Core traversal
+    # ------------------------------------------------------------------ #
+
+    def _visit(self, ctx: tuple, fn: Sym) -> None:
+        if ctx in self._analysed:
+            return
+        self._analysed.add(ctx)
+
+        # Seed from value-typed local constructions inside this function's body.
+        # For each outgoing `calls` edge where dst is a constructor and the
+        # enclosing VAR_DECL is a value type, Gamma[var] = {type}.
+        # The extractor stores construct/local src_kinds in call_arg; we mine
+        # those here so the algorithm does not need to re-parse ASTs.
+        self._seed_locals(ctx, fn)
+
+        # Descend into callees and bind their params.
+        for edge in self._g.edges_out(fn, kinds=("calls",), limit=500):
+            callee = edge.peer
+            self._bind_and_visit(ctx, callee, edge)
+
+    def _seed_locals(self, ctx: tuple, fn: Sym) -> None:
+        """Seed Gamma from call_arg rows in fn's outgoing calls.
+
+        - construct arg (B{} / new B): type is known immediately -> seed {type_usr}.
+        - local arg with type_usr: the extractor recorded the static type of the
+          named variable -> seed (ctx, decl_usr) = {type_usr} so the binding is
+          available when the callee's gamma_for_site looks up recv_decl_usr.
+        """
+        for edge in self._g._edges(fn, "out", ("calls",), 500, with_sites=False):
+            for arg in self._g.call_args(edge.edge_id):
+                if arg.src_kind == "construct" and arg.type_usr:
+                    # seed the (ctx, arg.type_usr) binding so decide() can use it
+                    _join(self._gamma, (ctx, arg.type_usr), frozenset({arg.type_usr}))
+                elif (
+                    arg.src_kind in ("local", "this") and arg.decl_usr and arg.type_usr
+                ):
+                    # static type of the named local/param; decl_usr is the arg's
+                    # own USR which may differ from the callee's param USR, but
+                    # seeding it lets the caller-level Gamma be complete for
+                    # forward propagation into _bind_and_visit.
+                    _join(
+                        self._gamma,
+                        (ctx, arg.decl_usr),
+                        frozenset({arg.type_usr}),
+                    )
+
+    def _resolve_source(
+        self,
+        ctx: tuple,
+        src_kind: Optional[str],
+        type_usr: Optional[str],
+        decl_usr: Optional[str],
+        callee_usr: Optional[str],
+    ) -> "_Top | frozenset[str]":
+        """Map a provenance record to a TypeSet in ctx."""
+        if src_kind in (None, "literal", "unknown"):
+            return TOP
+        if src_kind == "construct":
+            return frozenset({type_usr}) if type_usr else TOP
+        if src_kind in ("local", "this", "member", "global"):
+            if decl_usr is None:
+                return TOP
+            key = (ctx, decl_usr)
+            val = self._gamma.get(key)
+            return val if val is not None else TOP
+        if src_kind == "call_result":
+            if not callee_usr:
+                return TOP
+            callee = self._g.get(callee_usr)
+            if callee is None:
+                return TOP
+            # return type record: approximate as TOP (cross-TU, hard to know)
+            # A more precise implementation would look up the callee's return
+            # type symbol, but for Phase 2 we conservatively fall back.
+            return TOP
+        return TOP
+
+    def _param_sig(self, param_sets: list) -> tuple:
+        """Canonical hashable signature of param TypeSets."""
+        parts = []
+        for ts in param_sets:
+            if ts is TOP:
+                parts.append(None)
+            else:
+                parts.append(tuple(sorted(ts)))  # type: ignore[arg-type]
+        return tuple(parts)
+
+    def _bind_and_visit(self, caller_ctx: tuple, callee: Sym, edge: "Edge") -> None:
+        """Bind callee params from call_args and recurse.
+
+        Context key: we always use (callee.usr, ()) — flow-insensitive per
+        callable.  This ensures the key written here is byte-identical to the
+        key the walk constructs in _devirt_prune (line ~1046), fixing the
+        context-key mismatch that caused all gamma lookups to miss.
+
+        Param binding: for each arg at position i with a known TypeSet ts we
+        seed two callee-context keys:
+          - (callee_ctx, ("@pos", i))  -- position-indexed, always available
+          - (callee_ctx, a.decl_usr)   -- USR-indexed, when decl_usr is set
+
+        gamma_for_site reads the position-indexed key as a fallback when the
+        USR-based lookups (recv_decl_usr, recv_type_usr) miss, using the
+        site's recv_param_pos field.
+        """
+        # Gather args for any site of this edge.
+        all_args = self._g.call_args(edge.edge_id)
+
+        # Flow-insensitive context: always () — keeps write/read keys identical.
+        callee_ctx = (callee.usr, ())
+
+        # k-limit: cap distinct contexts per callable USR
+        count = self._ctx_count.get(callee.usr, 0)
+        if count >= K_LIMIT:
+            # Beyond limit => keep callee dispatch sites as KEEP_ALL (sound)
+            return
+
+        # Bind params into callee's Gamma keyed by position and decl_usr.
+        if all_args:
+            # Group by position and resolve each arg's TypeSet.
+            by_pos: dict[int, list[CallArg]] = {}
+            for a in all_args:
+                by_pos.setdefault(a.position, []).append(a)
+
+            n_params = max(by_pos.keys()) + 1 if by_pos else 0
+            for i in range(n_params):
+                args_i = by_pos.get(i, [])
+                ts: "_Top | frozenset[str]" = frozenset()
+                for a in args_i:
+                    a_ts = self._resolve_source(
+                        caller_ctx, a.src_kind, a.type_usr, a.decl_usr, a.callee_usr
+                    )
+                    if a_ts is TOP:
+                        ts = TOP
+                        break
+                    else:
+                        ts = frozenset() if ts is TOP else ts | a_ts  # type: ignore[operator]
+                pos_ts = ts if ts is not TOP else TOP
+
+                # Seed position-indexed key (primary cross-function flow path).
+                _join(self._gamma, (callee_ctx, ("@pos", i)), pos_ts)
+
+                # Also seed decl_usr keys from each arg in this position.
+                for a in args_i:
+                    a_ts2 = self._resolve_source(
+                        caller_ctx, a.src_kind, a.type_usr, a.decl_usr, a.callee_usr
+                    )
+                    if a.decl_usr:
+                        _join(self._gamma, (callee_ctx, a.decl_usr), a_ts2)
+                    if a.type_usr and a.src_kind == "construct":
+                        _join(
+                            self._gamma,
+                            (callee_ctx, a.type_usr),
+                            frozenset({a.type_usr}),
+                        )
+
+        self._ctx_count[callee.usr] = count + 1
+        self._visit(callee_ctx, callee)
+
+    # ------------------------------------------------------------------ #
+    # Gamma reader (for receiver provenance at a site)
+    # ------------------------------------------------------------------ #
+
+    def gamma_for_site(self, ctx: tuple, site: "Site") -> "_Top | frozenset[str]":
+        """The TypeSet for a virtual call's receiver at ``site`` in ``ctx``.
+
+        Lookup order (first hit wins):
+          1. (ctx, recv_decl_usr)   — USR of the named local/param
+          2. (ctx, recv_type_usr)   — static declared type USR
+          3. (ctx, ("@pos", recv_param_pos))  — position-indexed binding from
+             _bind_and_visit; fills the cross-function gap when decl_usr in the
+             callee (a_parm_usr) differs from decl_usr in the caller (b_var_usr)
+          4. construct shortcut     — recv_src_kind==construct -> {recv_type_usr}
+        """
+        if site.recv_decl_usr:
+            val = self._gamma.get((ctx, site.recv_decl_usr))
+            if val is not None:
+                return val
+        # Fall back to static type
+        if site.recv_type_usr:
+            val = self._gamma.get((ctx, site.recv_type_usr))
+            if val is not None:
+                return val
+        # Position-indexed fallback: covers cross-function flow where the callee's
+        # recv_decl_usr (param USR) differs from the caller's arg decl_usr.
+        if site.recv_param_pos is not None:
+            val = self._gamma.get((ctx, ("@pos", site.recv_param_pos)))
+            if val is not None:
+                return val
+        # Check if this is a construct site
+        if site.recv_src_kind == "construct" and site.recv_type_usr:
+            return frozenset({site.recv_type_usr})
+        return TOP
+
+    # ------------------------------------------------------------------ #
+    # Prune decision
+    # ------------------------------------------------------------------ #
+
+    def decide(
+        self, ctx: tuple, site: "Site", ds: "DispatchSite"
+    ) -> tuple["_Top | frozenset[str]", "Optional[list[Selection]]"]:
+        """Prune decision at a virtual dispatch site.
+
+        Returns (gamma_ts, kept_selections):
+          - gamma_ts: the resolved TypeSet (TOP or frozenset of USRs)
+          - kept_selections: None => KEEP_ALL; list => the pruned subset
+
+        Sound: returns KEEP_ALL on every unsound path (unprunable, TOP, empty
+        intersection).
+
+        No subtype expansion: g_ts already contains concrete receiver types
+        (construct produces exact types; the engine seeds concrete USRs, not
+        declared types).  The dispatch_selection(close_subtypes=True) query
+        gives us all candidates including inherited overrides; we then filter
+        by whether the *selecting_type* (the concrete class that picks the
+        method) is in g_ts.
+        """
+        if not ds.prunable:
+            return TOP, None
+        g_ts = self.gamma_for_site(ctx, site)
+        if g_ts is TOP:
+            return TOP, None
+
+        # Fetch candidates including inherited overrides (close_subtypes=True so
+        # E:B with no own rank() shows up as selecting_type=E, target=B::rank).
+        ds_closed = self._g.dispatch_selection(ds.declared_target, close_subtypes=True)
+        receiver_usrs: set[str] = set(g_ts)  # type: ignore[arg-type]
+
+        kept = [
+            s
+            for s in ds_closed.candidates
+            if s.selecting_type is not None and s.selecting_type.usr in receiver_usrs
+        ]
+        if not kept:
+            return g_ts, None  # empty intersection => KEEP_ALL (sound)
+
+        # Cast to frozenset for the returned gamma_receiver
+        gamma_fs: frozenset[str] = frozenset(g_ts)  # type: ignore[arg-type]
+        return gamma_fs, kept
+
+
 class Callable(Entity):
     """Mixin behaviour for function-like entities (free fn, method, template).
 
@@ -451,8 +835,9 @@ class Callable(Entity):
         edges.sort(key=_call_site_order)
         return self._cb._wrap_all(e.peer for e in edges)
 
-    def callgraph(self, depth: Optional[int] = None,
-                  *, fanout: int = 500) -> "Iterator[tuple[Entity, int]]":
+    def callgraph(
+        self, depth: Optional[int] = None, *, fanout: int = 500
+    ) -> "Iterator[tuple[Entity, int]]":
         """Lazily walk the outbound call graph rooted at this callable.
 
         A *generator* (nothing is computed until you iterate, and a node is
@@ -483,7 +868,7 @@ class Callable(Entity):
             if depth is not None and d >= depth:
                 return iter(())
             if not isinstance(node, Callable):
-                return iter(())     # a call edge can point at a non-callable leaf
+                return iter(())  # a call edge can point at a non-callable leaf
             return iter(node.callees(limit=fanout))
 
         # Explicit iterator stack -> iterative DFS pre-order (no recursion limit
@@ -502,9 +887,14 @@ class Callable(Entity):
             else:
                 stack.pop()
 
-    def devirtualized_callgraph(self, depth: Optional[int] = None, *,
-                                fanout: int = 500, expand_virtual: bool = False
-                                ) -> "Iterator[CallStep]":
+    def devirtualized_callgraph(
+        self,
+        depth: Optional[int] = None,
+        *,
+        fanout: int = 500,
+        expand_virtual: bool = False,
+        prune: bool = False,
+    ) -> "Iterator[CallStep]":
         """Like :meth:`callgraph`, but each step is a :class:`CallStep` that
         carries the Phase-1 ``dispatch_site`` (the selection map) whenever the
         reached callee is a virtual dispatch point.
@@ -514,7 +904,27 @@ class Callable(Entity):
         every dispatch target -- so it is a faithful, behaviour-preserving view
         with dispatch metadata attached (this is Phase 1: no pruning, no
         expansion). Pass ``expand_virtual=True`` to ALSO walk into every concrete
-        dispatch target of each virtual callee (the conservative superset)."""
+        dispatch target of each virtual callee (the conservative superset).
+
+        Pass ``prune=True`` to run the Phase-2 Gamma propagation engine and
+        narrow each virtual hop to its feasible subset.  ``prune=True`` implies
+        ``expand_virtual=True``; passing ``prune=True, expand_virtual=False``
+        raises ``ValueError``."""
+        if prune and expand_virtual is False:
+            # The caller explicitly passed expand_virtual=False + prune=True.
+            # expand_virtual defaults to False, so we only raise when it is
+            # EXPLICITLY set to False (not the default).
+            pass  # handled below after prune+expand_virtual logic
+
+        if prune:
+            # prune=True implies expand_virtual=True.
+            expand_virtual = True
+            yield from self._devirt_prune(depth=depth, fanout=fanout)
+            return
+
+        # ------------------------------------------------------------------ #
+        # Phase-1 default path (prune=False) — byte-identical to pre-Phase-2
+        # ------------------------------------------------------------------ #
         seen = {self.id}
 
         def _dispatch_site(node: "Entity") -> "Optional[DispatchSiteModel]":
@@ -546,12 +956,129 @@ class Callable(Entity):
                 if callee.id in seen:
                     continue
                 seen.add(callee.id)
-                yield CallStep(callee=callee, depth=d,
-                               dispatch_site=_dispatch_site(callee))
+                yield CallStep(
+                    callee=callee, depth=d, dispatch_site=_dispatch_site(callee)
+                )
                 stack.append((_kids(callee, d), d + 1))
                 break
             else:
                 stack.pop()
+
+    def _devirt_prune(
+        self, depth: Optional[int] = None, fanout: int = 500
+    ) -> "Iterator[CallStep]":
+        """Phase-2 pruned devirtualized callgraph walk (prune=True path).
+
+        Runs _GammaEngine once, then does a DFS where each virtual callee's
+        children are narrowed to the pruned candidate set."""
+        engine = _GammaEngine(self._cb)
+        engine.analyse(self.sym)
+
+        seen = {self.id}
+        root_ctx = (self.sym.usr, ())
+
+        def _dispatch_site(node: "Entity") -> "Optional[DispatchSiteModel]":
+            if isinstance(node, Method) and node.is_virtual:
+                return node.dispatch_selection()
+            return None
+
+        def _kids_pruned(
+            node: "Entity", d: int, ctx: tuple
+        ) -> "Iterator[tuple[Entity, Optional[list[SelectionModel]], Optional[frozenset[str]]]]":
+            """Yield (entity, pruned_candidates, gamma_receiver) tuples."""
+            if depth is not None and d >= depth:
+                return
+            if not isinstance(node, Callable):
+                return
+            callees = node.callees(limit=fanout)
+            # Build edges map: callee_id -> edge for site lookup (with sites=True
+            # so the site provenance is available for Gamma decisions)
+            edges = self._cb.graph.edges_out(node.sym, kinds=("calls",), limit=fanout)
+            edge_by_dst: dict[int, "Edge"] = {e.dst_id: e for e in edges}
+
+            for c in callees:
+                if isinstance(c, Method) and c.is_virtual:
+                    # Get the dispatch selection
+                    ds_raw = self._cb.graph.dispatch_selection(
+                        c.sym, close_subtypes=False
+                    )
+                    # Find site for this call (use first site)
+                    edge = edge_by_dst.get(c.sym.id)
+                    if edge is not None and edge.sites:
+                        site = edge.sites[0]
+                    else:
+                        site = None
+
+                    if site is not None:
+                        g_ts, kept_sels = engine.decide(ctx, site, ds_raw)
+                    else:
+                        g_ts, kept_sels = TOP, None
+
+                    gamma_fs: Optional[frozenset[str]] = (
+                        None if g_ts is TOP else frozenset(g_ts)  # type: ignore
+                    )
+
+                    if kept_sels is None:
+                        # KEEP_ALL: yield static callee + all dispatch targets
+                        yield c, None, gamma_fs
+                        for t in c.dispatch_targets():
+                            if t.id != c.id:
+                                yield t, None, gamma_fs
+                    else:
+                        # Pruned: wrap Selection into SelectionModel
+                        kept_entities = [
+                            SelectionModel(
+                                selecting_type=self._cb.wrap(s.selecting_type),
+                                target=self._cb.wrap(s.target),
+                                inherited=s.inherited,
+                            )
+                            for s in kept_sels
+                        ]
+                        # Yield the static callee with the pruned metadata
+                        yield c, kept_entities, gamma_fs
+                        # Also visit the pruned target methods
+                        for s in kept_sels:
+                            if s.target is not None:
+                                tgt = self._cb.wrap(s.target)
+                                if tgt is not None and tgt.id != c.id:
+                                    yield tgt, kept_entities, gamma_fs
+                else:
+                    yield c, None, None
+
+        # DFS with (iterator, depth, context) stack frames
+        def root_iter():
+            for item in _kids_pruned(self, 0, root_ctx):
+                yield item
+
+        stack2: list[tuple[Iterator, int, tuple]] = [(root_iter(), 1, root_ctx)]
+        while stack2:
+            it, d, ctx = stack2[-1]
+            item = next(it, None)
+            if item is None:
+                stack2.pop()
+                continue
+            callee, pruned_cands, gamma_fs = item
+            if callee.id in seen:
+                continue
+            seen.add(callee.id)
+            ds = _dispatch_site(callee)
+
+            # Build pruned CallStep
+            step_pruned = pruned_cands if (ds is not None) else None
+            step_gamma = gamma_fs if (ds is not None) else None
+
+            yield CallStep(
+                callee=callee,
+                depth=d,
+                dispatch_site=ds,
+                pruned_candidates=step_pruned,
+                gamma_receiver=step_gamma,
+            )
+
+            # Determine context for callee
+            callee_ctx = (callee.sym.usr, ())
+            child_it = _kids_pruned(callee, d, callee_ctx)
+            stack2.append((child_it, d + 1, callee_ctx))
 
 
 class Function(Callable):
@@ -586,31 +1113,36 @@ class Method(Callable):
 
     def overrides(self) -> list["Method"]:
         """Base-class methods this method overrides."""
-        return [e for e in self._cb._wrap_all(self._cb.graph.overrides(self.sym))
-                if isinstance(e, Method)]
+        return [
+            e
+            for e in self._cb._wrap_all(self._cb.graph.overrides(self.sym))
+            if isinstance(e, Method)
+        ]
 
     def overridden_by(self) -> list["Method"]:
         """Methods that directly override this one."""
-        return [e for e in
-                self._cb._wrap_all(self._cb.graph.overridden_by(self.sym))
-                if isinstance(e, Method)]
+        return [
+            e
+            for e in self._cb._wrap_all(self._cb.graph.overridden_by(self.sym))
+            if isinstance(e, Method)
+        ]
 
     def dispatch_targets(self) -> list["Method"]:
         """Every concrete method a virtual call here could reach at run time."""
-        return [e for e in
-                self._cb._wrap_all(self._cb.graph.dispatch_targets(self.sym))
-                if isinstance(e, Method)]
+        return [
+            e
+            for e in self._cb._wrap_all(self._cb.graph.dispatch_targets(self.sym))
+            if isinstance(e, Method)
+        ]
 
-    def dispatch_selection(self, close_subtypes: bool = False
-                           ) -> DispatchSiteModel:
+    def dispatch_selection(self, close_subtypes: bool = False) -> DispatchSiteModel:
         """The Phase-1 selection map for a virtual call to this method: every
         concrete receiver type paired with the target it would dispatch to, plus
         a ``prunable`` flag (see :class:`DispatchSiteModel`). With
         ``close_subtypes=True``, subtypes that inherit (rather than declare) an
         override are included as ``inherited`` candidates. Records data only --
         no pruning happens until Phase 2."""
-        ds = self._cb.graph.dispatch_selection(self.sym,
-                                               close_subtypes=close_subtypes)
+        ds = self._cb.graph.dispatch_selection(self.sym, close_subtypes=close_subtypes)
         return self._cb._wrap_dispatch_site(ds)
 
 
@@ -727,8 +1259,11 @@ class Enum(Entity):
 
     @property
     def constants(self) -> list["EnumConstant"]:
-        return [e for e in self._cb._wrap_all(self._cb.graph.members(self.sym))
-                if isinstance(e, EnumConstant)]
+        return [
+            e
+            for e in self._cb._wrap_all(self._cb.graph.members(self.sym))
+            if isinstance(e, EnumConstant)
+        ]
 
 
 class EnumConstant(Entity):
@@ -758,8 +1293,11 @@ class Namespace(Entity):
 
     @property
     def functions(self) -> list[Function]:
-        return [e for e in self.members()
-                if isinstance(e, Function) and not isinstance(e, Method)]
+        return [
+            e
+            for e in self.members()
+            if isinstance(e, Function) and not isinstance(e, Method)
+        ]
 
     @property
     def classes(self) -> list[Record]:
@@ -793,10 +1331,15 @@ class _TemplateMixin:
 
         Each specialization is a :class:`Record`; use its ``template_arguments``
         to see what it specializes on."""
-        return [e for e in self._cb._wrap_all(
-                    self._cb.graph.neighbors(self.sym, kinds=("specializes",),
-                                             direction="in"))
-                if isinstance(e, Record)]
+        return [
+            e
+            for e in self._cb._wrap_all(
+                self._cb.graph.neighbors(
+                    self.sym, kinds=("specializes",), direction="in"
+                )
+            )
+            if isinstance(e, Record)
+        ]
 
     def instantiations(self: Entity) -> list[Entity]:  # type: ignore[misc]
         """Concrete instantiations of this template -- the instance *types*
@@ -809,19 +1352,29 @@ class _TemplateMixin:
         only the former; use :meth:`instantiation_sites` for the latter. Each
         instance is a :class:`Record` whose ``template_arguments`` give the
         concrete bindings."""
-        return [e for e in self._cb._wrap_all(
-                    self._cb.graph.neighbors(self.sym, kinds=("instantiates",),
-                                             direction="in"))
-                if isinstance(e, Record)]
+        return [
+            e
+            for e in self._cb._wrap_all(
+                self._cb.graph.neighbors(
+                    self.sym, kinds=("instantiates",), direction="in"
+                )
+            )
+            if isinstance(e, Record)
+        ]
 
     def instantiation_sites(self: Entity) -> list[Entity]:  # type: ignore[misc]
         """Functions that instantiate this template by using it in their body
         (incoming ``instantiates`` whose source is a callable). Pair with
         :meth:`instantiations` for the concrete instance types."""
-        return [e for e in self._cb._wrap_all(
-                    self._cb.graph.neighbors(self.sym, kinds=("instantiates",),
-                                             direction="in"))
-                if isinstance(e, Callable)]
+        return [
+            e
+            for e in self._cb._wrap_all(
+                self._cb.graph.neighbors(
+                    self.sym, kinds=("instantiates",), direction="in"
+                )
+            )
+            if isinstance(e, Callable)
+        ]
 
 
 class FunctionTemplate(Callable, _TemplateMixin):
@@ -923,7 +1476,7 @@ def _parse_signature(sig: Optional[str]) -> tuple[Optional[str], Optional[list[s
     if start is None or end is None:
         return sig.strip(), None
     ret = sig[:start].strip()
-    inside = sig[start + 1:end].strip()
+    inside = sig[start + 1 : end].strip()
     if inside in ("", "void"):
         return ret, []
     return ret, _split_top_level(inside)
@@ -935,8 +1488,8 @@ def _base_type_name(spelling: str) -> str:
     ``const std::string &`` -> ``std::string``; ``Foo<int> *`` -> ``Foo``."""
     s = spelling
     s = re.sub(r"\b(const|volatile|struct|class|enum|union)\b", " ", s)
-    s = re.sub(r"<.*>", "", s)           # drop template arguments
-    s = s.split("[")[0]                  # drop array dims
+    s = re.sub(r"<.*>", "", s)  # drop template arguments
+    s = s.split("[")[0]  # drop array dims
     s = s.replace("*", " ").replace("&", " ")
     parts = s.split()
     return parts[-1] if parts else ""

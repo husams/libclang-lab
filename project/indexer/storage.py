@@ -29,29 +29,31 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
-SYMBOL_KINDS = frozenset({
-    "class",
-    "struct",
-    "union",
-    "function",
-    "method",
-    "member",            # data member / field
-    "constructor",
-    "destructor",
-    "enum",
-    "enum-constant",
-    "typedef",
-    "type-alias",
-    "class-template",
-    "function-template",
-    "variable",
-    "namespace",
-    "macro",
-})
+SYMBOL_KINDS = frozenset(
+    {
+        "class",
+        "struct",
+        "union",
+        "function",
+        "method",
+        "member",  # data member / field
+        "constructor",
+        "destructor",
+        "enum",
+        "enum-constant",
+        "typedef",
+        "type-alias",
+        "class-template",
+        "function-template",
+        "variable",
+        "namespace",
+        "macro",
+    }
+)
 
 _SCHEMA = f"""
 PRAGMA foreign_keys = ON;
@@ -156,12 +158,16 @@ CREATE INDEX IF NOT EXISTS idx_edge_src ON edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
 
 CREATE TABLE IF NOT EXISTS edge_site (
-    edge_id     INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
-    file_id     INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    line        INTEGER,
-    col         INTEGER,
-    conditional INTEGER NOT NULL DEFAULT 0,
-    args_sig    TEXT,
+    edge_id      INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+    file_id      INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    line         INTEGER,
+    col          INTEGER,
+    conditional  INTEGER NOT NULL DEFAULT 0,
+    args_sig     TEXT,
+    recv_src_kind TEXT,
+    recv_type_usr TEXT,
+    recv_decl_usr TEXT,
+    recv_param_pos INTEGER,
     PRIMARY KEY (edge_id, file_id, line, col)
 ) WITHOUT ROWID;
 
@@ -182,6 +188,20 @@ CREATE TABLE IF NOT EXISTS template_arg (
     literal   TEXT,
     PRIMARY KEY (owner_id, position)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS call_arg (
+    edge_id    INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+    file_id    INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    line       INTEGER NOT NULL,
+    col        INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    src_kind   TEXT NOT NULL,
+    type_usr   TEXT,
+    decl_usr   TEXT,
+    callee_usr TEXT,
+    PRIMARY KEY (edge_id, file_id, line, col, position)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -230,8 +250,8 @@ class Symbol:
     decl_file_id: Optional[int] = None
     decl_line: Optional[int] = None
     decl_col: Optional[int] = None
-    decl_path: Optional[str] = None       # raw decl path for an unregistered
-                                          # (system/stdlib) target -- see schema
+    decl_path: Optional[str] = None  # raw decl path for an unregistered
+    # (system/stdlib) target -- see schema
     is_definition: bool = False
     is_pure: bool = False
     linkage: Optional[str] = None
@@ -270,7 +290,7 @@ class Storage:
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
-        self._migrate()             # before _SCHEMA: its indexes need new columns
+        self._migrate()  # before _SCHEMA: its indexes need new columns
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._in_txn = False
@@ -289,10 +309,14 @@ class Storage:
         flags were hand-edited via `cidx file` so re-import does not clobber
         them. Defaults to 0; no backfill needed.
         """
-        tables = {r[0] for r in self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        tables = {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
         if "symbol" not in tables:
-            return                  # fresh database: _SCHEMA creates everything
+            return  # fresh database: _SCHEMA creates everything
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(symbol)")}
         changed = False
         if "qual_name" not in cols:
@@ -315,17 +339,20 @@ class Storage:
         if "decl_file_id" not in cols:
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN decl_file_id INTEGER "
-                "REFERENCES file(id) ON DELETE SET NULL")
+                "REFERENCES file(id) ON DELETE SET NULL"
+            )
             self._conn.execute("ALTER TABLE symbol ADD COLUMN decl_line INTEGER")
             self._conn.execute("ALTER TABLE symbol ADD COLUMN decl_col INTEGER")
             self._conn.execute(
                 "UPDATE symbol SET decl_file_id = file_id, decl_line = line, "
-                "decl_col = col WHERE is_definition = 0")
+                "decl_col = col WHERE is_definition = 0"
+            )
             changed = True
         if "is_pure" not in cols:
             # No backfill possible from stored data -- reindex to populate.
             self._conn.execute(
-                "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0")
+                "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0"
+            )
             changed = True
         if "decl_path" not in cols:
             # v8 -> v9: raw decl path for stubs whose target lives in an
@@ -342,8 +369,31 @@ class Storage:
             # v7 -> v8: per-file flag override marker (`cidx file`). Existing
             # rows default to 0 (not overridden), so re-import behaves as before.
             self._conn.execute(
-                "ALTER TABLE file ADD COLUMN args_overridden INTEGER "
-                "NOT NULL DEFAULT 0")
+                "ALTER TABLE file ADD COLUMN args_overridden INTEGER NOT NULL DEFAULT 0"
+            )
+            changed = True
+        # v9 -> v10: receiver provenance + per-argument provenance for virtual
+        # dispatch.  No backfill -- reindex repopulates from the AST.
+        escols = (
+            {r[1] for r in self._conn.execute("PRAGMA table_info(edge_site)")}
+            if "edge_site" in tables
+            else set()
+        )
+        if "edge_site" in tables and "recv_src_kind" not in escols:
+            self._conn.execute("ALTER TABLE edge_site ADD COLUMN recv_src_kind TEXT")
+            self._conn.execute("ALTER TABLE edge_site ADD COLUMN recv_type_usr TEXT")
+            self._conn.execute("ALTER TABLE edge_site ADD COLUMN recv_decl_usr TEXT")
+            changed = True
+        if "edge_site" in tables and "recv_param_pos" not in escols:
+            self._conn.execute(
+                "ALTER TABLE edge_site ADD COLUMN recv_param_pos INTEGER"
+            )
+            changed = True
+        if "edge_site" in tables and "call_arg" not in tables:
+            # The call_arg table itself is created by _SCHEMA (CREATE TABLE IF
+            # NOT EXISTS), run after _migrate(), so the migration only needs to
+            # flip changed to bump the version -- identical to the v6->v7 graph
+            # tables pattern.
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -437,16 +487,16 @@ class Storage:
         files with ON DELETE SET NULL, so symbols indexed from this component's
         files are deleted explicitly first -- otherwise they would linger as
         file-less orphans. Used by `import --force` to rebuild from scratch."""
-        sub = ("SELECT f.id FROM file f "
-               "JOIN directory d ON f.directory_id = d.id "
-               "WHERE d.component_id = ?")
-        self._conn.execute(
-            f"DELETE FROM symbol WHERE file_id IN ({sub}) "
-            f"OR decl_file_id IN ({sub})",
-            (component_id, component_id),
+        sub = (
+            "SELECT f.id FROM file f "
+            "JOIN directory d ON f.directory_id = d.id "
+            "WHERE d.component_id = ?"
         )
         self._conn.execute(
-            "DELETE FROM component WHERE id = ?", (component_id,))
+            f"DELETE FROM symbol WHERE file_id IN ({sub}) OR decl_file_id IN ({sub})",
+            (component_id, component_id),
+        )
+        self._conn.execute("DELETE FROM component WHERE id = ?", (component_id,))
         self._commit()
 
     def delete_directory(self, directory_id: int) -> None:
@@ -455,12 +505,10 @@ class Storage:
         so they are deleted explicitly to avoid file-less orphans)."""
         sub = "SELECT id FROM file WHERE directory_id = ?"
         self._conn.execute(
-            f"DELETE FROM symbol WHERE file_id IN ({sub}) "
-            f"OR decl_file_id IN ({sub})",
+            f"DELETE FROM symbol WHERE file_id IN ({sub}) OR decl_file_id IN ({sub})",
             (directory_id, directory_id),
         )
-        self._conn.execute(
-            "DELETE FROM directory WHERE id = ?", (directory_id,))
+        self._conn.execute("DELETE FROM directory WHERE id = ?", (directory_id,))
         self._commit()
 
     def delete_file(self, file_id: int) -> None:
@@ -486,12 +534,16 @@ class Storage:
         Every non-space character of `text` must appear in the column, in
         order: 'shp' matches 'shapes.c'. LIKE is case-insensitive for ASCII.
         """
-        chars = [c.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-                 for c in text if not c.isspace()]
+        chars = [
+            c.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+            for c in text
+            if not c.isspace()
+        ]
         return "%" + "%".join(chars) + "%"
 
-    def list_components(self, name: Optional[str] = None,
-                        kind: Optional[str] = None) -> list[Component]:
+    def list_components(
+        self, name: Optional[str] = None, kind: Optional[str] = None
+    ) -> list[Component]:
         """All components, optionally fuzzy-filtered by name and/or kind."""
         sql = "SELECT * FROM component"
         where, args = [], []
@@ -530,13 +582,15 @@ class Storage:
         ).fetchone()
         return _row_to(Directory, row)
 
-    def list_directories(self, component_id: Optional[int] = None,
-                         name: Optional[str] = None
-                         ) -> list[tuple[Directory, str]]:
+    def list_directories(
+        self, component_id: Optional[int] = None, name: Optional[str] = None
+    ) -> list[tuple[Directory, str]]:
         """(Directory, component name) pairs, optionally scoped to one
         component and/or fuzzy-filtered on the relative directory path."""
-        sql = ("SELECT d.*, c.name AS comp_name "
-               "FROM directory d JOIN component c ON c.id = d.component_id")
+        sql = (
+            "SELECT d.*, c.name AS comp_name "
+            "FROM directory d JOIN component c ON c.id = d.component_id"
+        )
         where, args = [], []
         if component_id is not None:
             where.append("d.component_id = ?")
@@ -547,8 +601,10 @@ class Storage:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY c.name, d.path"
-        return [(_row_to(Directory, r), r["comp_name"])
-                for r in self._conn.execute(sql, args)]
+        return [
+            (_row_to(Directory, r), r["comp_name"])
+            for r in self._conn.execute(sql, args)
+        ]
 
     def get_directory_by_id(self, directory_id: int) -> Optional[Directory]:
         row = self._conn.execute(
@@ -569,11 +625,15 @@ class Storage:
 
     # -- files ----------------------------------------------------------------
 
-    def add_file(self, directory_id: int, name: str,
-                 mtime: Optional[float] = None,
-                 md5: Optional[str] = None,
-                 compile_options: Optional[list[str]] = None,
-                 driver: Optional[str] = None) -> int:
+    def add_file(
+        self,
+        directory_id: int,
+        name: str,
+        mtime: Optional[float] = None,
+        md5: Optional[str] = None,
+        compile_options: Optional[list[str]] = None,
+        driver: Optional[str] = None,
+    ) -> int:
         """Insert a file row; idempotent on (directory, name). Returns file id.
 
         Re-adding with a *different* md5 resets the indexed flag (the content
@@ -604,18 +664,28 @@ class Storage:
         self._commit()
         return fid
 
-    def add_file_path(self, abs_path: str, mtime: Optional[float] = None,
-                      md5: Optional[str] = None,
-                      compile_options: Optional[list[str]] = None,
-                      driver: Optional[str] = None) -> int:
+    def add_file_path(
+        self,
+        abs_path: str,
+        mtime: Optional[float] = None,
+        md5: Optional[str] = None,
+        compile_options: Optional[list[str]] = None,
+        driver: Optional[str] = None,
+    ) -> int:
         """Convenience: register an absolute path, creating the directory row.
 
         The owning component must already exist (add_component first).
         """
         comp_id, rel_dir, name = self._split_path(abs_path)
         dir_id = self.add_directory(comp_id, rel_dir)
-        return self.add_file(dir_id, name, mtime=mtime, md5=md5,
-                             compile_options=compile_options, driver=driver)
+        return self.add_file(
+            dir_id,
+            name,
+            mtime=mtime,
+            md5=md5,
+            compile_options=compile_options,
+            driver=driver,
+        )
 
     def get_file(self, abs_path: str) -> Optional[File]:
         """File row for an absolute path, or None."""
@@ -646,20 +716,28 @@ class Storage:
         ).fetchall()
         out = []
         for row in rows:
-            abs_path = os.path.join(row["root"], row["rel"], row["name"]) \
-                if row["rel"] else os.path.join(row["root"], row["name"])
+            abs_path = (
+                os.path.join(row["root"], row["rel"], row["name"])
+                if row["rel"]
+                else os.path.join(row["root"], row["name"])
+            )
             out.append((_row_to(File, row), abs_path))
         return out
 
-    def list_files(self, component_id: Optional[int] = None,
-                   dir_path: Optional[str] = None,
-                   name: Optional[str] = None,
-                   indexed: Optional[bool] = None) -> list[tuple[File, str]]:
+    def list_files(
+        self,
+        component_id: Optional[int] = None,
+        dir_path: Optional[str] = None,
+        name: Optional[str] = None,
+        indexed: Optional[bool] = None,
+    ) -> list[tuple[File, str]]:
         """Like files(), with optional filters: component, directory subtree,
         fuzzy file name, and indexed state."""
-        sql = ("SELECT f.*, c.path AS root, d.path AS rel "
-               "FROM file f JOIN directory d ON d.id = f.directory_id "
-               "JOIN component c ON c.id = d.component_id")
+        sql = (
+            "SELECT f.*, c.path AS root, d.path AS rel "
+            "FROM file f JOIN directory d ON d.id = f.directory_id "
+            "JOIN component c ON c.id = d.component_id"
+        )
         where, args = [], []
         if component_id is not None:
             where.append("d.component_id = ?")
@@ -677,8 +755,11 @@ class Storage:
         sql += " ORDER BY c.path, d.path, f.name"
         out = []
         for row in self._conn.execute(sql, args):
-            abs_path = os.path.join(row["root"], row["rel"], row["name"]) \
-                if row["rel"] else os.path.join(row["root"], row["name"])
+            abs_path = (
+                os.path.join(row["root"], row["rel"], row["name"])
+                if row["rel"]
+                else os.path.join(row["root"], row["name"])
+            )
             out.append((_row_to(File, row), abs_path))
         return out
 
@@ -701,9 +782,13 @@ class Storage:
         )
         self._commit()
 
-    def set_file_compile_options(self, file_id: int, options: list[str],
-                                 driver: Optional[str] = None,
-                                 update_driver: bool = False) -> None:
+    def set_file_compile_options(
+        self,
+        file_id: int,
+        options: list[str],
+        driver: Optional[str] = None,
+        update_driver: bool = False,
+    ) -> None:
         """Replace a file's stored compile flags (and optionally its driver) and
         mark it args_overridden=1 so a later `import` (without --force) keeps the
         edit. Used by `cidx file -set-flag/-unset-flag/-import-args`."""
@@ -716,14 +801,14 @@ class Storage:
             )
         else:
             self._conn.execute(
-                "UPDATE file SET compile_options = ?, args_overridden = 1 "
-                "WHERE id = ?",
+                "UPDATE file SET compile_options = ?, args_overridden = 1 WHERE id = ?",
                 (opts, file_id),
             )
         self._commit()
 
-    def is_file_indexed(self, abs_path: str, mtime: Optional[float] = None,
-                        md5: Optional[str] = None) -> bool:
+    def is_file_indexed(
+        self, abs_path: str, mtime: Optional[float] = None, md5: Optional[str] = None
+    ) -> bool:
         """True if the file has been indexed (and is not stale, if mtime/md5 given).
 
         `mtime`/`md5` describe the file's *current* state: pass either to also
@@ -748,8 +833,11 @@ class Storage:
         ).fetchone()
         if row is None:
             return None
-        return os.path.join(row["root"], row["rel"], row["name"]) if row["rel"] \
+        return (
+            os.path.join(row["root"], row["rel"], row["name"])
+            if row["rel"]
             else os.path.join(row["root"], row["name"])
+        )
 
     def directory_abs_path(self, directory_id: int) -> Optional[str]:
         """component.path / directory.path for a directory id."""
@@ -776,11 +864,27 @@ class Storage:
 
     # -- symbols ---------------------------------------------------------------
 
-    _SYMBOL_COLS = ("usr", "spelling", "qual_name", "display_name", "kind",
-                    "type_info", "file_id", "line", "col",
-                    "decl_file_id", "decl_line", "decl_col", "decl_path",
-                    "is_definition", "is_pure", "linkage", "access",
-                    "parent_usr", "resolved")
+    _SYMBOL_COLS = (
+        "usr",
+        "spelling",
+        "qual_name",
+        "display_name",
+        "kind",
+        "type_info",
+        "file_id",
+        "line",
+        "col",
+        "decl_file_id",
+        "decl_line",
+        "decl_col",
+        "decl_path",
+        "is_definition",
+        "is_pure",
+        "linkage",
+        "access",
+        "parent_usr",
+        "resolved",
+    )
 
     def add_symbol(self, sym: Symbol) -> int:
         """Insert or upsert a symbol keyed by USR. Returns the symbol id.
@@ -850,8 +954,9 @@ class Storage:
         ).fetchone()
         return _row_to(Symbol, row)
 
-    def lookup_symbols_by_name(self, spelling: str,
-                               kind: Optional[str] = None) -> list[Symbol]:
+    def lookup_symbols_by_name(
+        self, spelling: str, kind: Optional[str] = None
+    ) -> list[Symbol]:
         """All symbols with this spelling (overloads / statics give several rows)."""
         sql = "SELECT * FROM symbol WHERE spelling = ?"
         args: list[Any] = [spelling]
@@ -861,17 +966,21 @@ class Storage:
         sql += " ORDER BY usr"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
-    def search_symbols(self, pattern: str,
-                       kind: Optional[str] = None) -> list[Symbol]:
+    def search_symbols(self, pattern: str, kind: Optional[str] = None) -> list[Symbol]:
         """Fuzzy match against the qualified name (case-insensitive).
 
         Each '::'-separated segment of `pattern` must appear, in order, as a
         substring of qual_name: 'conf::set' matches 'RdKafka::ConfImpl::set'.
         """
-        like = "%" + "%".join(
-            seg.replace("%", r"\%").replace("_", r"\_")
-            for seg in pattern.split("::") if seg
-        ) + "%"
+        like = (
+            "%"
+            + "%".join(
+                seg.replace("%", r"\%").replace("_", r"\_")
+                for seg in pattern.split("::")
+                if seg
+            )
+            + "%"
+        )
         sql = r"SELECT * FROM symbol WHERE qual_name LIKE ? ESCAPE '\'"
         args: list[Any] = [like]
         if kind is not None:
@@ -880,11 +989,14 @@ class Storage:
         sql += " ORDER BY LENGTH(qual_name), qual_name"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
-    def list_symbols(self, component_id: Optional[int] = None,
-                     dir_path: Optional[str] = None,
-                     file_id: Optional[int] = None,
-                     name: Optional[str] = None,
-                     kind: Optional[str] = None) -> list[Symbol]:
+    def list_symbols(
+        self,
+        component_id: Optional[int] = None,
+        dir_path: Optional[str] = None,
+        file_id: Optional[int] = None,
+        name: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> list[Symbol]:
         """Symbols filtered by location and/or name.
 
         Location scoping (component / directory subtree / file) matches a
@@ -897,7 +1009,7 @@ class Storage:
         where, args = [], []
         if component_id is not None or dir_path is not None:
             scope, scope_args = ["d.component_id = ?"], [component_id]
-            if component_id is None:        # dir filter across all components
+            if component_id is None:  # dir filter across all components
                 scope, scope_args = [], []
             if dir_path is not None:
                 scope.append(self._dir_scope_sql(dir_path, scope_args))
@@ -905,44 +1017,57 @@ class Storage:
                 "EXISTS (SELECT 1 FROM file f "
                 "JOIN directory d ON d.id = f.directory_id "
                 "WHERE f.id IN (s.file_id, s.decl_file_id) AND "
-                + " AND ".join(scope) + ")")
+                + " AND ".join(scope)
+                + ")"
+            )
             args.extend(scope_args)
         if file_id is not None:
             where.append("(s.file_id = ? OR s.decl_file_id = ?)")
             args.extend([file_id, file_id])
         if name:
-            where.append(
-                r"COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'")
+            where.append(r"COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'")
             args.append(self._fuzzy_like(name))
         if kind is not None:
             where.append("s.kind = ?")
             args.append(kind)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += (" ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)),"
-                " COALESCE(s.qual_name, s.spelling)")
+        sql += (
+            " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)),"
+            " COALESCE(s.qual_name, s.spelling)"
+        )
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
     def symbols_in_file(self, file_id: int) -> list[Symbol]:
-        return [_row_to(Symbol, r) for r in self._conn.execute(
-            "SELECT * FROM symbol WHERE file_id = ? ORDER BY line, col", (file_id,)
-        )]
+        return [
+            _row_to(Symbol, r)
+            for r in self._conn.execute(
+                "SELECT * FROM symbol WHERE file_id = ? ORDER BY line, col", (file_id,)
+            )
+        ]
 
     def unresolved_symbols(self) -> list[Symbol]:
-        return [_row_to(Symbol, r) for r in self._conn.execute(
-            "SELECT * FROM symbol WHERE resolved = 0 ORDER BY usr"
-        )]
+        return [
+            _row_to(Symbol, r)
+            for r in self._conn.execute(
+                "SELECT * FROM symbol WHERE resolved = 0 ORDER BY usr"
+            )
+        ]
 
     # -- graph (v7) ------------------------------------------------------------
 
-    def mint_symbol_id(self, usr: str, spelling: str = "",
-                       qual_name: Optional[str] = None,
-                       display_name: Optional[str] = None,
-                       kind: str = "function",
-                       decl_file_id: Optional[int] = None,
-                       decl_line: Optional[int] = None,
-                       decl_col: Optional[int] = None,
-                       decl_path: Optional[str] = None) -> int:
+    def mint_symbol_id(
+        self,
+        usr: str,
+        spelling: str = "",
+        qual_name: Optional[str] = None,
+        display_name: Optional[str] = None,
+        kind: str = "function",
+        decl_file_id: Optional[int] = None,
+        decl_line: Optional[int] = None,
+        decl_col: Optional[int] = None,
+        decl_path: Optional[str] = None,
+    ) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
         The callee/base/override/primary reference cursor is always in hand at
@@ -985,20 +1110,37 @@ class Storage:
             "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
             "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col), "
             "  decl_path    = COALESCE(symbol.decl_path, excluded.decl_path)",
-            (usr, spelling, qual_name or None, display_name or None, kind,
-             decl_file_id, decl_line, decl_col, decl_path or None),
+            (
+                usr,
+                spelling,
+                qual_name or None,
+                display_name or None,
+                kind,
+                decl_file_id,
+                decl_line,
+                decl_col,
+                decl_path or None,
+            ),
         )
         row = self._conn.execute(
             "SELECT id FROM symbol WHERE usr = ?", (usr,)
         ).fetchone()
         if row is None:
-            raise RuntimeError(f"mint_symbol_id: SELECT returned no row for usr={usr!r}")
+            raise RuntimeError(
+                f"mint_symbol_id: SELECT returned no row for usr={usr!r}"
+            )
         return row["id"]
 
-    def add_edge(self, src_id: int, dst_id: int, kind: int, count: int = 1,
-                 base_access: Optional[int] = None,
-                 is_virtual: Optional[int] = None,
-                 vtable_slot: Optional[int] = None) -> int:
+    def add_edge(
+        self,
+        src_id: int,
+        dst_id: int,
+        kind: int,
+        count: int = 1,
+        base_access: Optional[int] = None,
+        is_virtual: Optional[int] = None,
+        vtable_slot: Optional[int] = None,
+    ) -> int:
         """Upsert an edge; returns the edge id."""
         cur = self._conn.execute(
             "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
@@ -1017,21 +1159,78 @@ class Storage:
             raise RuntimeError("add_edge: upsert returned no id")
         return row["id"]
 
-    def add_edge_site(self, edge_id: int, file_id: Optional[int],
-                      line: Optional[int], col: Optional[int],
-                      conditional: int = 0,
-                      args_sig: Optional[str] = None) -> None:
+    def add_edge_site(
+        self,
+        edge_id: int,
+        file_id: Optional[int],
+        line: Optional[int],
+        col: Optional[int],
+        conditional: int = 0,
+        args_sig: Optional[str] = None,
+        recv_src_kind: Optional[str] = None,
+        recv_type_usr: Optional[str] = None,
+        recv_decl_usr: Optional[str] = None,
+        recv_param_pos: Optional[int] = None,
+    ) -> None:
         """INSERT OR IGNORE an edge_site (PK collision = same site, harmless)."""
         self._conn.execute(
             "INSERT OR IGNORE INTO edge_site "
-            "(edge_id, file_id, line, col, conditional, args_sig) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (edge_id, file_id, line, col, conditional, args_sig),
+            "(edge_id, file_id, line, col, conditional, args_sig, "
+            " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                edge_id,
+                file_id,
+                line,
+                col,
+                conditional,
+                args_sig,
+                recv_src_kind,
+                recv_type_usr,
+                recv_decl_usr,
+                recv_param_pos,
+            ),
         )
 
-    def add_template_param(self, owner_id: int, position: int, param_kind: int,
-                           name: Optional[str] = None,
-                           default_txt: Optional[str] = None) -> None:
+    def add_call_arg(
+        self,
+        edge_id: int,
+        file_id: int,
+        line: int,
+        col: int,
+        position: int,
+        src_kind: str,
+        type_usr: Optional[str] = None,
+        decl_usr: Optional[str] = None,
+        callee_usr: Optional[str] = None,
+    ) -> None:
+        """INSERT OR IGNORE a call_arg row (PK collision = same arg, harmless)."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO call_arg "
+            "(edge_id, file_id, line, col, position, src_kind, "
+            " type_usr, decl_usr, callee_usr) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                edge_id,
+                file_id,
+                line,
+                col,
+                position,
+                src_kind,
+                type_usr,
+                decl_usr,
+                callee_usr,
+            ),
+        )
+
+    def add_template_param(
+        self,
+        owner_id: int,
+        position: int,
+        param_kind: int,
+        name: Optional[str] = None,
+        default_txt: Optional[str] = None,
+    ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO template_param "
             "(owner_id, position, param_kind, name, default_txt) "
@@ -1039,9 +1238,14 @@ class Storage:
             (owner_id, position, param_kind, name, default_txt),
         )
 
-    def add_template_arg(self, owner_id: int, position: int, arg_kind: int,
-                         ref_id: Optional[int] = None,
-                         literal: Optional[str] = None) -> None:
+    def add_template_arg(
+        self,
+        owner_id: int,
+        position: int,
+        arg_kind: int,
+        ref_id: Optional[int] = None,
+        literal: Optional[str] = None,
+    ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO template_arg "
             "(owner_id, position, arg_kind, ref_id, literal) "
@@ -1092,9 +1296,10 @@ class Storage:
         return [(r[0], r[1], r[2]) for r in rows]
 
     def clear_edges(self) -> None:
-        """Delete all edge, edge_site, template_param, template_arg rows."""
+        """Delete all edge, edge_site, call_arg, template_param, template_arg rows."""
         self._conn.execute("DELETE FROM template_arg")
         self._conn.execute("DELETE FROM template_param")
+        self._conn.execute("DELETE FROM call_arg")
         self._conn.execute("DELETE FROM edge_site")
         self._conn.execute("DELETE FROM edge")
         self._commit()
@@ -1114,6 +1319,7 @@ class Storage:
         Returns (still_stub_count, cross_repo_edge_count).
         """
         from datetime import datetime, timezone
+
         self.rollup_edge_counts()
         # A still-stub is a minted placeholder never backfilled by a real
         # symbol: resolved=0 with NO location (neither a definition nor a decl
@@ -1133,9 +1339,12 @@ class Storage:
 
     def stats(self) -> dict[str, Any]:
         one = lambda sql: self._conn.execute(sql).fetchone()[0]  # noqa: E731
-        by_kind = {r["kind"]: r["n"] for r in self._conn.execute(
-            "SELECT kind, COUNT(*) AS n FROM symbol GROUP BY kind ORDER BY kind"
-        )}
+        by_kind = {
+            r["kind"]: r["n"]
+            for r in self._conn.execute(
+                "SELECT kind, COUNT(*) AS n FROM symbol GROUP BY kind ORDER BY kind"
+            )
+        }
         return {
             "components": one("SELECT COUNT(*) FROM component"),
             "directories": one("SELECT COUNT(*) FROM directory"),

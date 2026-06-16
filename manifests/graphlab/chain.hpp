@@ -30,6 +30,9 @@ struct D : C {                  // D inherits C (-> B -> A transitively)
 // concrete rank() the run-time type provides.
 int top_rank(const A& a);
 
+// Calls top_rank with a concrete B — used by Phase 2 Gamma pruning tests.
+void f();
+
 } // namespace chain
 
 #endif
