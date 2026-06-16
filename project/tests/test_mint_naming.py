@@ -23,17 +23,27 @@ def _db() -> Storage:
     return db
 
 
-def test_mint_stores_name() -> None:
+def test_mint_stores_name_and_kind() -> None:
     db = _db()
     usr = "c:@N@std@S@vector@F@push_back#"
     sid = db.mint_symbol_id(usr, "push_back", "std::vector::push_back",
-                            "push_back(const value_type &)")
+                            "push_back(const value_type &)", "method")
     s = db.lookup_symbol(usr)
     assert s is not None and s.id == sid
     assert s.spelling == "push_back"
     assert s.qual_name == "std::vector::push_back"
     assert s.display_name == "push_back(const value_type &)"
+    assert s.kind == "method"       # NOT the bare 'function' sentinel
     assert s.resolved == 0          # still an unresolved stub
+
+
+def test_defaulted_ctor_stub_is_constructor() -> None:
+    # Regression: chain::D::D (a defaulted ctor, never indexed) must mint as
+    # 'constructor', not 'function'.
+    db = _db()
+    usr = "c:@N@chain@S@D@F@D#"
+    db.mint_symbol_id(usr, "D", "chain::D::D", "D()", "constructor")
+    assert db.lookup_symbol(usr).kind == "constructor"
 
 
 def test_bare_mint_stays_nameless() -> None:
@@ -46,12 +56,15 @@ def test_bare_mint_stays_nameless() -> None:
 
 def test_repeat_mint_upgrades_empty_but_never_clobbers() -> None:
     db = _db()
-    db.mint_symbol_id("c:@F@f")                         # nameless first
-    db.mint_symbol_id("c:@F@f", "f", "ns::f")           # upgrade the empty name
+    db.mint_symbol_id("c:@F@f")                                 # nameless stub
+    assert db.lookup_symbol("c:@F@f").kind == "function"        # sentinel
+    db.mint_symbol_id("c:@F@f", "f", "ns::f", None, "method")   # upgrade name+kind
     assert db.lookup_symbol("c:@F@f").spelling == "f"
-    db.mint_symbol_id("c:@F@f", "WRONG", "x::WRONG")    # must NOT clobber
+    assert db.lookup_symbol("c:@F@f").kind == "method"
+    db.mint_symbol_id("c:@F@f", "WRONG", "x::WRONG", None, "class")  # must NOT clobber
     assert db.lookup_symbol("c:@F@f").spelling == "f"
     assert db.lookup_symbol("c:@F@f").qual_name == "ns::f"
+    assert db.lookup_symbol("c:@F@f").kind == "method"
 
 
 def test_real_definition_overwrites_named_stub() -> None:

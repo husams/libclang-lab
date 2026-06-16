@@ -484,7 +484,8 @@ def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                     else:
                         dst_id = db.mint_symbol_id(
                             callee_usr, ref.spelling,
-                            _qualified_name(ref), ref.displayname)
+                            _qualified_name(ref), ref.displayname,
+                            _KIND_MAP.get(ref.kind, "function"))
                     if dst_id is not None:
                         edge_id = db.add_edge(src_id, dst_id, 1)  # calls
                         loc = child.location
@@ -699,7 +700,8 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             if src_sym is None:
                 continue
             dst_id = db.mint_symbol_id(
-                base_usr, ref.spelling, _qualified_name(ref), ref.displayname)
+                base_usr, ref.spelling, _qualified_name(ref), ref.displayname,
+                _KIND_MAP.get(ref.kind, "function"))
             acc_map = {
                 cx.AccessSpecifier.PUBLIC: 1,
                 cx.AccessSpecifier.PROTECTED: 2,
@@ -756,7 +758,8 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                     if not ov_usr:
                         continue
                     dst_ov = db.mint_symbol_id(
-                        ov_usr, ov.spelling, _qualified_name(ov), ov.displayname)
+                        ov_usr, ov.spelling, _qualified_name(ov), ov.displayname,
+                        _KIND_MAP.get(ov.kind, "function"))
                     db.add_edge(src_sym.id, dst_ov, 6)  # overrides
             continue
 
@@ -803,7 +806,7 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                 continue
             prim_id = db.mint_symbol_id(
                 prim_usr, primary.spelling, _qualified_name(primary),
-                primary.displayname)
+                primary.displayname, _KIND_MAP.get(primary.kind, "function"))
             db.add_edge(spec_sym.id, prim_id, 4)  # specializes
 
             # template_arg rows
