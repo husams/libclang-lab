@@ -627,6 +627,46 @@ bool is_cond_cursor(CXCursorKind kind) {
          kind == CXCursor_ConditionalOperator;
 }
 
+// True when a STRUCT/CLASS_DECL whose clang_getSpecializedCursorTemplate is
+// non-null is an explicit INSTANTIATION (`template class Foo<int>;`) rather
+// than an explicit SPECIALIZATION (`template <> class Foo<bool> { ... };`).
+// Both report is_definition()==true and a non-null specialized template, so the
+// stable libclang C API cannot tell them apart directly -- the written syntax
+// can. We tokenize the cursor's extent: the token immediately after the
+// `template` keyword is `class`/`struct` for an instantiation (optionally after
+// `extern`) and `<` for a specialization.
+bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
+  CXTranslationUnit tu = lib.clang_Cursor_getTranslationUnit(cursor);
+  if (tu == nullptr) {
+    return false;
+  }
+  const CXSourceRange extent = lib.clang_getCursorExtent(cursor);
+  CXToken *tokens = nullptr;
+  unsigned n = 0;
+  lib.clang_tokenize(tu, extent, &tokens, &n);
+  if (tokens == nullptr) {
+    return false;
+  }
+  bool result = false;
+  for (unsigned i = 0; i < n; ++i) {
+    const std::string s =
+        CxString(lib, lib.clang_getTokenSpelling(tu, tokens[i])).str();
+    if (s == "template") {
+      if (i + 1 < n) {
+        const std::string nxt =
+            CxString(lib, lib.clang_getTokenSpelling(tu, tokens[i + 1])).str();
+        result = (nxt == "class" || nxt == "struct");
+      }
+      break;
+    }
+    if (s == "class" || s == "struct") {
+      break;
+    }
+  }
+  lib.clang_disposeTokens(tu, tokens, n);
+  return result;
+}
+
 // Context for the recursive body descent (calls + uses).
 struct BodyDescentCtx {
   LibClang *lib = nullptr;
@@ -869,6 +909,13 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
                   ta.owner_id = ctx->src_id;
                   ta.position = static_cast<int64_t>(ai);
                   ta.arg_kind = 1; // TYPE
+                  // Always store the type spelling so the binding is
+                  // distinguishable even for builtins with no declaration.
+                  const std::string spelling =
+                      CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+                  if (!spelling.empty()) {
+                    ta.literal = spelling;
+                  }
                   // Try to resolve the arg type to an indexed symbol.
                   const CXCursor arg_decl =
                       lib.clang_getTypeDeclaration(arg_type);
@@ -1255,14 +1302,23 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                 CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
                 stub_kind(lib, primary), prim_dl.file_id, prim_dl.line,
                 prim_dl.col, prim_dl.path);
+            // An explicit instantiation (`template class Foo<int>;`) is a
+            // concrete INSTANCE of the template, not a specialization of it:
+            // record it as `instantiates` (kind=5, instance -> primary) so it
+            // surfaces under ClassTemplate.instantiations(). A true explicit
+            // specialization (`template <> class Foo<bool> {...}`) stays
+            // `specializes` (kind=4).
             Edge e;
             e.src_id = spec_sym->id;
             e.dst_id = prim_id;
-            e.kind = 4; // specializes
+            e.kind = is_explicit_instantiation(lib, cursor) ? 5 : 4;
             e.count = 1;
             db_.add_edge(e);
 
-            // template_arg rows for the specialization's arguments.
+            // template_arg rows for the specialization's arguments. For TYPE
+            // args we always store the type spelling in `literal` (e.g. 'bool',
+            // 'int') so the binding is distinguishable even when the arg is a
+            // builtin with no declaration to resolve a ref_id from.
             const int nargs = lib.clang_Cursor_getNumTemplateArguments(cursor);
             for (int ai = 0; ai < nargs; ++ai) {
               const enum CXTemplateArgumentKind tak =
@@ -1276,6 +1332,11 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                 const CXType arg_type =
                     lib.clang_Cursor_getTemplateArgumentType(
                         cursor, static_cast<unsigned>(ai));
+                const std::string spelling =
+                    CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+                if (!spelling.empty()) {
+                  ta.literal = spelling;
+                }
                 const CXCursor arg_decl =
                     lib.clang_getTypeDeclaration(arg_type);
                 if (!lib.clang_Cursor_isNull(arg_decl) &&

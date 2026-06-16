@@ -538,6 +538,88 @@ TEST_SUITE("clang") {
     CHECK(method->qual_name == "the_ns::the_class::the_method");
   }
 
+  TEST_CASE("templates: explicit instantiation -> instantiates (kind 5), "
+            "explicit specialization -> specializes (kind 4); TYPE template_arg "
+            "rows record the type spelling so Box<bool> != Box<int>") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/tmpl.cpp";
+    write_file(path,
+               "namespace nn {\n"
+               "template <class T>\n"
+               "class Box { T v_; public: explicit Box(T v): v_(v) {}\n"
+               "           T get() const { return v_; } };\n"
+               "template <>\n"
+               "class Box<bool> { bool b_; public: explicit Box(bool b): "
+               "b_(b) {}\n"
+               "                  bool get() const { return b_; } };\n"
+               "template class Box<int>;\n"
+               "char use() { Box<char> bc('x'); return bc.get(); }\n"
+               "} // namespace nn\n");
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    auto &raw = f.db.raw_db();
+
+    // The class template Box has exactly one formal type parameter.
+    {
+      const auto box_tmpl =
+          f.db.lookup_symbols_by_name("Box", std::string("class-template"));
+      REQUIRE_FALSE(box_tmpl.empty());
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM template_param WHERE owner_id = ?");
+      st.bind(1, box_tmpl.front().id);
+      st.step();
+      CHECK(st.col_int64(0) == 1);
+    }
+
+    // The explicit instantiation `template class Box<int>;` is recorded as
+    // `instantiates` (kind 5), NOT `specializes` (kind 4).
+    {
+      auto st = raw.prepare(
+          "SELECT e.kind FROM edge e "
+          "JOIN template_arg ta ON ta.owner_id = e.src_id "
+          "WHERE ta.literal = 'int' AND e.kind IN (4,5)");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 5);
+    }
+
+    // The explicit specialization `template <> class Box<bool>` stays
+    // `specializes` (kind 4).
+    {
+      auto st = raw.prepare(
+          "SELECT e.kind FROM edge e "
+          "JOIN template_arg ta ON ta.owner_id = e.src_id "
+          "WHERE ta.literal = 'bool' AND e.kind IN (4,5)");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 4);
+    }
+
+    // Every TYPE argument (arg_kind=1) now records its spelling in `literal`:
+    // builtins (bool/int/char) used to land as NULL, making instances
+    // indistinguishable.
+    {
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM template_arg WHERE arg_kind = 1 "
+          "AND literal IS NULL");
+      st.step();
+      CHECK(st.col_int64(0) == 0);
+    }
+
+    // The using function nn::use instantiates Box<char> by value: its
+    // template_arg literal is recorded.
+    {
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM template_arg WHERE literal = 'char'");
+      st.step();
+      CHECK(st.col_int64(0) >= 1);
+    }
+  }
+
   TEST_CASE("project flow: header decls first, definition wins file/line/col "
             "with decl_* preserved; counters across two TUs (G15, G20, G24)") {
     if (require_libclang() == nullptr) {

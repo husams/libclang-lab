@@ -233,6 +233,65 @@ class Site:
         return f"Site({self.loc}{c})"
 
 
+#: template_param.param_kind / template_arg.arg_kind code -> readable name.
+TEMPLATE_PARAM_KINDS = {1: "type", 2: "non-type", 3: "template-template",
+                        4: "pack"}
+
+
+@dataclass(frozen=True)
+class TemplateParam:
+    """A formal template parameter declared by a template entity.
+
+    `position` is 0-based, in declaration order. `param_kind` is 1=type,
+    2=non-type, 3=template-template, 4=pack (see `TEMPLATE_PARAM_KINDS`).
+    `name` is the parameter spelling (``T``), `default` the default argument
+    text when one was recorded."""
+    position: int
+    param_kind: int
+    name: Optional[str]
+    default: Optional[str] = None
+
+    @property
+    def kind_name(self) -> str:
+        return TEMPLATE_PARAM_KINDS.get(self.param_kind, str(self.param_kind))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"position": self.position, "param_kind": self.param_kind,
+                "kind_name": self.kind_name, "name": self.name,
+                "default": self.default}
+
+    def __repr__(self) -> str:
+        return f"TemplateParam(#{self.position} {self.kind_name} {self.name})"
+
+
+@dataclass(frozen=True)
+class TemplateArg:
+    """A concrete template argument bound by a specialization or instantiation.
+
+    `arg_kind` is 1=type, 2=non-type value, 3=template-template, 4=pack. For a
+    TYPE arg, `literal` holds the type spelling (``int``, ``std::string``) and
+    `ref_id` the indexed symbol id when the argument type is itself indexed
+    (None for builtins/unindexed types). For a non-type (INTEGRAL) arg,
+    `literal` holds the value text."""
+    position: int
+    arg_kind: int
+    ref_id: Optional[int] = None
+    literal: Optional[str] = None
+
+    @property
+    def kind_name(self) -> str:
+        return TEMPLATE_PARAM_KINDS.get(self.arg_kind, str(self.arg_kind))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"position": self.position, "arg_kind": self.arg_kind,
+                "kind_name": self.kind_name, "ref_id": self.ref_id,
+                "literal": self.literal}
+
+    def __repr__(self) -> str:
+        what = self.literal if self.literal is not None else f"#{self.ref_id}"
+        return f"TemplateArg(#{self.position} {self.kind_name} {what})"
+
+
 # --------------------------------------------------------------------------- #
 # The query handle.
 # --------------------------------------------------------------------------- #
@@ -743,6 +802,31 @@ class GraphQuery:
         if access not in (None, "all"):
             merged = [s for s in merged if s.access == access]
         return merged
+
+    # ===================================================================== #
+    # 3b. TEMPLATE PARAMETERS / ARGUMENTS
+    # ===================================================================== #
+
+    def template_params(self, sym) -> list[TemplateParam]:
+        """The formal template parameters declared by `sym` (a class/function
+        template), in declaration order. Empty for non-templates."""
+        sid = self._resolve_id(sym)
+        rows = self._c.execute(
+            "SELECT position, param_kind, name, default_txt FROM template_param "
+            "WHERE owner_id = ? ORDER BY position", (sid,)).fetchall()
+        return [TemplateParam(r["position"], r["param_kind"], r["name"],
+                              r["default_txt"]) for r in rows]
+
+    def template_args(self, sym) -> list[TemplateArg]:
+        """The concrete template arguments bound by `sym` (a specialization, an
+        explicit instantiation, or a function that instantiates a template), in
+        position order. Empty when `sym` binds no template arguments."""
+        sid = self._resolve_id(sym)
+        rows = self._c.execute(
+            "SELECT position, arg_kind, ref_id, literal FROM template_arg "
+            "WHERE owner_id = ? ORDER BY position", (sid,)).fetchall()
+        return [TemplateArg(r["position"], r["arg_kind"], r["ref_id"],
+                            r["literal"]) for r in rows]
 
     # ===================================================================== #
     # 4. DYNAMIC DISPATCH

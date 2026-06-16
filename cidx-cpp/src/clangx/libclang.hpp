@@ -284,6 +284,25 @@ public:
     return ::clang_getCanonicalCursor(c);
   }
 
+  // -- tokenization (distinguish explicit instantiation vs specialization) ---
+  CXTranslationUnit clang_Cursor_getTranslationUnit(CXCursor c) const {
+    return ::clang_Cursor_getTranslationUnit(c);
+  }
+  CXSourceRange clang_getCursorExtent(CXCursor c) const {
+    return ::clang_getCursorExtent(c);
+  }
+  void clang_tokenize(CXTranslationUnit tu, CXSourceRange range,
+                      CXToken **tokens, unsigned *num_tokens) const {
+    ::clang_tokenize(tu, range, tokens, num_tokens);
+  }
+  CXString clang_getTokenSpelling(CXTranslationUnit tu, CXToken t) const {
+    return ::clang_getTokenSpelling(tu, t);
+  }
+  void clang_disposeTokens(CXTranslationUnit tu, CXToken *tokens,
+                           unsigned num_tokens) const {
+    ::clang_disposeTokens(tu, tokens, num_tokens);
+  }
+
   // -- type navigation (signature/field/variable `uses` extraction) ---------
 
   // Pointee of a pointer/reference type (Conf * -> Conf).
