@@ -63,6 +63,14 @@ const char *kind_name(CXCursorKind kind) {
   }
 }
 
+// Symbol kind for a minted stub, taken from its reference cursor so a defaulted
+// ctor stub is 'constructor', not the bare 'function' fallback (used when the
+// cursor maps to no storage kind). Mirrors ast.py's _KIND_MAP.get(k,"function").
+std::string stub_kind(LibClang &lib, CXCursor c) {
+  const char *k = kind_name(lib.clang_getCursorKind(c));
+  return k != nullptr ? std::string(k) : std::string("function");
+}
+
 // _FUNCTION_KINDS (ast.py:53-59): indexed themselves, but their bodies are
 // NOT walked (locals, body-scoped types, and statements are not file-scope
 // symbols).
@@ -716,7 +724,8 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
                 callee_usr,
                 CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
                 qualified_name(lib, ref),
-                CxString(lib, lib.clang_getCursorDisplayName(ref)).str());
+                CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
+                stub_kind(lib, ref));
           }
           if (dst_id >= 0) {
             emit_body_edge(ctx, lib, cursor, dst_id, 1 /* calls */);
@@ -1014,7 +1023,8 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
           base_usr,
           CxString(lib, lib.clang_getCursorSpelling(base_ref)).str(),
           qualified_name(lib, base_ref),
-          CxString(lib, lib.clang_getCursorDisplayName(base_ref)).str());
+          CxString(lib, lib.clang_getCursorDisplayName(base_ref)).str(),
+          stub_kind(lib, base_ref));
       Edge e;
       e.src_id = src_sym->id;
       e.dst_id = dst_id;
@@ -1107,7 +1117,8 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
               ov_usr,
               CxString(lib, lib.clang_getCursorSpelling(overridden[oi])).str(),
               qualified_name(lib, overridden[oi]),
-              CxString(lib, lib.clang_getCursorDisplayName(overridden[oi])).str());
+              CxString(lib, lib.clang_getCursorDisplayName(overridden[oi])).str(),
+              stub_kind(lib, overridden[oi]));
           Edge oe;
           oe.src_id = src_sym->id;
           oe.dst_id = dst_ov;
@@ -1193,7 +1204,8 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                 prim_usr,
                 CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
                 qualified_name(lib, primary),
-                CxString(lib, lib.clang_getCursorDisplayName(primary)).str());
+                CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
+                stub_kind(lib, primary));
             Edge e;
             e.src_id = spec_sym->id;
             e.dst_id = prim_id;

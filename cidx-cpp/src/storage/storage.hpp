@@ -173,7 +173,8 @@ public:
   int64_t mint_symbol_id(const std::string &usr,
                          const std::string &spelling = "",
                          const std::string &qual_name = "",
-                         const std::string &display_name = "");
+                         const std::string &display_name = "",
+                         const std::string &kind = "function");
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.

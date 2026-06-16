@@ -443,35 +443,42 @@ class TemplateArg:
 All keyed on integer `symbol.id` (never USR strings on the edge — PLAN §2). The
 extractor resolves USR→id through the stub-mint helper before calling `add_edge`.
 
-### 5.1 `mint_symbol_id(usr, spelling, qual_name, display_name)` — stub-mint (PLAN §4)
+### 5.1 `mint_symbol_id(usr, spelling, qual_name, display_name, kind)` — stub-mint (PLAN §4)
 
 ```cpp
 // Returns the id of the symbol with this USR, minting a stub (resolved=0) if
 // absent. The reference cursor is always in hand at the call site, so its name
-// travels with the USR: the stub is born NAMED. The name is essential for
-// targets whose definition is never indexed (stdlib calls, implicit template
-// instantiations, defaulted ctors) -- no add_symbol ever backfills those, so
-// the minted name is all the graph will have. A repeat mint UPGRADES an empty
-// name but never clobbers a real one; the follow-up SELECT returns the stable
-// id either way.
+// AND kind travel with the USR: the stub is born NAMED and correctly typed (a
+// defaulted-ctor stub is 'constructor', not the bare 'function' fallback). This
+// is essential for targets whose definition is never indexed (stdlib calls,
+// implicit template instantiations, defaulted ctors) -- no add_symbol ever
+// backfills those, so the minted name/kind are all the graph will have. A
+// repeat mint UPGRADES an unnamed stub (name+kind together) but never clobbers
+// a real one; the follow-up SELECT returns the stable id either way.
 int64_t Storage::mint_symbol_id(const std::string &usr,
                                 const std::string &spelling = "",
                                 const std::string &qual_name = "",
-                                const std::string &display_name = "");
+                                const std::string &display_name = "",
+                                const std::string &kind = "function");
 ```
 
 Body: `INSERT INTO symbol(usr, spelling, qual_name, display_name, kind,
-resolved) VALUES(?,?,?,?,'function',0) ON CONFLICT(usr) DO UPDATE SET spelling
-= CASE WHEN symbol.spelling='' THEN excluded.spelling ELSE symbol.spelling END,
-qual_name = COALESCE(symbol.qual_name, excluded.qual_name), display_name =
+resolved) VALUES(?,?,?,?,?,0) ON CONFLICT(usr) DO UPDATE SET kind = CASE WHEN
+symbol.spelling='' THEN excluded.kind ELSE symbol.kind END, spelling = CASE WHEN
+symbol.spelling='' THEN excluded.spelling ELSE symbol.spelling END, qual_name =
+COALESCE(symbol.qual_name, excluded.qual_name), display_name =
 COALESCE(symbol.display_name, excluded.display_name)` then `SELECT id FROM
-symbol WHERE usr=?`. Empty `qual_name`/`display_name` bind as SQL NULL.
+symbol WHERE usr=?`. Empty `qual_name`/`display_name` bind as SQL NULL. `kind`
+upgrades in lockstep with `spelling` (an empty spelling marks a not-yet-named
+stub), so a real symbol's kind is never overwritten.
 
 The four call sites (`calls`, `inherits`, `overrides`, `specializes`) each hold
 a libclang cursor (`ref`/`base_ref`/`overridden[i]`/`primary`) and pass its
-spelling + `qualified_name(cursor)` + display name. In Python, cursors from the
-C-array `clang_getOverriddenCursors` lack the binding's `_tu` backref, so the
-helper attaches it and `_qualified_name` swallows `AttributeError` defensively.
+spelling + `qualified_name(cursor)` + display name + `stub_kind(cursor)`
+(`kind_name(kind)` with a `"function"` fallback; mirrors Python's
+`_KIND_MAP.get(k, "function")`). In Python, cursors from the C-array
+`clang_getOverriddenCursors` lack the binding's `_tu` backref, so the helper
+attaches it and `_qualified_name` swallows `AttributeError` defensively.
 
 > **Schema CHECK hazard (must resolve before coding):** `symbol.spelling` is
 > `NOT NULL` and `symbol.kind` has a CHECK constraint over the 17 kinds. A stub

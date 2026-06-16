@@ -1282,15 +1282,19 @@ std::vector<Symbol> Storage::unresolved_symbols() {
 int64_t Storage::mint_symbol_id(const std::string &usr,
                                 const std::string &spelling,
                                 const std::string &qual_name,
-                                const std::string &display_name) {
+                                const std::string &display_name,
+                                const std::string &kind) {
   // The follow-up SELECT returns the stable id whether the row was minted or
-  // already present. kind='function' is the sentinel for stubs (the real def's
-  // add_symbol upsert overwrites kind/location/resolved). On a repeat mint we
-  // only UPGRADE an empty name -- never clobber a real symbol's name.
+  // already present. 'function' is the fallback kind when the cursor kind is
+  // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
+  // later. On a repeat mint we only UPGRADE an unnamed stub (empty spelling) --
+  // name and kind together -- never clobber a real symbol's.
   auto ins = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, resolved) "
-      "VALUES (?, ?, ?, ?, 'function', 0) "
+      "VALUES (?, ?, ?, ?, ?, 0) "
       "ON CONFLICT(usr) DO UPDATE SET "
+      "  kind         = CASE WHEN symbol.spelling = '' "
+      "                      THEN excluded.kind ELSE symbol.kind END, "
       "  spelling     = CASE WHEN symbol.spelling = '' "
       "                      THEN excluded.spelling ELSE symbol.spelling END, "
       "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
@@ -1307,6 +1311,7 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   } else {
     ins.bind(4, std::string_view(display_name));
   }
+  ins.bind(5, std::string_view(kind));
   ins.step_done();
   auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
   sel.bind(1, std::string_view(usr));
