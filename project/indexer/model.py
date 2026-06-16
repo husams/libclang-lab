@@ -45,11 +45,10 @@ Fidelity notes (thin layer, no schema change):
 from __future__ import annotations
 
 import re
-from collections import deque
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Sequence
 
-from .query import GraphQuery, Site, Sym, open_query
+from .query import Edge, GraphQuery, Site, Sym, open_query
 
 __all__ = [
     "CodeBase", "open_codebase", "Location", "Type", "Reference",
@@ -370,8 +369,15 @@ class Callable(Entity):
         return self._cb._wrap_all(self._cb.graph.callers(self.sym, limit=limit))
 
     def callees(self, limit: int = 500) -> list["Entity"]:
-        """Entities this one calls."""
-        return self._cb._wrap_all(self._cb.graph.callees(self.sym, limit=limit))
+        """Entities this one calls, **in source order** -- ordered by the first
+        call site (line, col) of each call, so the list reflects the sequence in
+        which the calls appear in this callable's body rather than by call count.
+
+        Callees whose call sites carry no location (e.g. some resolved edges)
+        sort last, keeping a stable relative order."""
+        edges = self._cb.graph.edges_out(self.sym, kinds=("calls",), limit=limit)
+        edges.sort(key=_call_site_order)
+        return self._cb._wrap_all(e.peer for e in edges)
 
     def callgraph(self, depth: Optional[int] = None,
                   *, fanout: int = 500) -> "Iterator[tuple[Entity, int]]":
@@ -379,10 +385,12 @@ class Callable(Entity):
 
         A *generator* (nothing is computed until you iterate, and a node is
         expanded only once you consume past it). It yields ``(callee, depth)``
-        pairs in breadth-first order: every callable transitively reached from
-        this one, each surfaced once -- the first, shallowest time it is seen --
-        paired with its distance in call edges from the root (direct callees are
-        depth 1)::
+        pairs in **call sequence**: a depth-first pre-order walk where each
+        node's callees are visited in source order (the order the calls appear
+        in its body). So the stream follows execution flow -- the caller's first
+        call, then everything that call reaches, then the caller's second call,
+        and so on. ``depth`` is the distance in call edges from the root (direct
+        callees are depth 1)::
 
             for callee, depth in fn.callgraph():          # unbounded
                 ...
@@ -390,27 +398,37 @@ class Callable(Entity):
                 ...
 
         By default the walk is **unbounded**: it runs until every remaining
-        frontier symbol is a leaf -- an external/unresolved (stub) symbol, or
-        any callable that calls nothing further. Each entity is visited at most
-        once, so cycles and recursion terminate naturally. Pass ``depth=N`` to
-        stop expanding after N levels.
+        symbol is a leaf -- an external/unresolved (stub) symbol, or any callable
+        that calls nothing further. Each entity is surfaced once, the first time
+        the sequence reaches it, so cycles and recursion terminate naturally.
+        Pass ``depth=N`` to stop expanding after N levels.
 
         ``fanout`` caps the callees expanded per node (a guard against
         pathological nodes; default 500)."""
         seen = {self.id}
-        frontier: deque[tuple[Entity, int]] = deque([(self, 0)])
-        while frontier:
-            node, d = frontier.popleft()
+
+        def _kids(node: "Entity", d: int) -> "Iterator[Entity]":
             if depth is not None and d >= depth:
-                continue
+                return iter(())
             if not isinstance(node, Callable):
-                continue          # a leaf the call edge points at is not callable
-            for callee in node.callees(limit=fanout):
+                return iter(())     # a call edge can point at a non-callable leaf
+            return iter(node.callees(limit=fanout))
+
+        # Explicit iterator stack -> iterative DFS pre-order (no recursion limit
+        # on deep/recursive call chains). Each frame is (callee-iterator, depth
+        # of the callees it yields).
+        stack: list[tuple[Iterator[Entity], int]] = [(_kids(self, 0), 1)]
+        while stack:
+            it, d = stack[-1]
+            for callee in it:
                 if callee.id in seen:
                     continue
                 seen.add(callee.id)
-                yield callee, d + 1
-                frontier.append((callee, d + 1))
+                yield callee, d
+                stack.append((_kids(callee, d), d + 1))
+                break
+            else:
+                stack.pop()
 
 
 class Function(Callable):
@@ -670,6 +688,25 @@ _KIND_TO_CLASS: dict[str, type] = {
 # --------------------------------------------------------------------------- #
 # signature / type-name parsing (thin, best-effort)
 # --------------------------------------------------------------------------- #
+
+_INF = float("inf")
+
+
+def _call_site_order(edge: Edge) -> tuple[int, float, float]:
+    """Sort key placing a call edge by its earliest call site (line, col).
+
+    Edges whose sites carry a location sort before those that do not (bucket 0
+    vs 1); within a bucket, by line then col. Python's stable sort preserves the
+    incoming order for ties (and for the no-location bucket)."""
+    best_line, best_col = _INF, _INF
+    for s in edge.sites:
+        line = s.line if s.line is not None else _INF
+        col = s.col if s.col is not None else _INF
+        if (line, col) < (best_line, best_col):
+            best_line, best_col = line, col
+    bucket = 1 if best_line == _INF else 0
+    return (bucket, best_line, best_col)
+
 
 def _split_top_level(text: str, sep: str = ",") -> list[str]:
     """Split on `sep`, but only at bracket depth 0 (respects <>, (), [])."""

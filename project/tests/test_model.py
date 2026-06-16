@@ -12,11 +12,35 @@ import os
 import pytest
 
 from indexer.storage import Storage, Symbol
-from indexer.query import GraphQuery
+from indexer.query import GraphQuery, EDGE_KINDS
 from indexer.model import (
     CodeBase, Function, Method, Class, Field, Variable, Type, Location,
     Reference, _parse_signature, _base_type_name, _split_top_level,
 )
+
+
+def _build_callgraph_db(db_path: str, repo: str, edges):
+    """Tiny single-file DB of `function` symbols wired with `calls` edges.
+
+    `edges` is a list of (caller, callee, [(line, col), ...]) -- each call site
+    is recorded so callees() / callgraph() can order by source position."""
+    os.makedirs(repo, exist_ok=True)
+    names = sorted({n for c, e, _ in edges for n in (c, e)})
+    with Storage(db_path) as db:
+        comp = db.add_component("lab", repo)
+        root = db.add_directory(comp, "")
+        f = db.add_file(root, "m.c")
+        ids = {n: db.add_symbol(Symbol(
+            usr=f"c:@F@{n}", spelling=n, kind="function", qual_name=n,
+            file_id=f, line=1, col=1, is_definition=True, resolved=True))
+            for n in names}
+        with db.transaction():
+            for caller, callee, sites in edges:
+                e = db.add_edge(ids[caller], ids[callee], EDGE_KINDS["calls"],
+                                count=len(sites))
+                for line, col in sites:
+                    db.add_edge_site(e, f, line, col)
+    return ids
 
 
 @pytest.fixture
@@ -116,6 +140,47 @@ def test_callgraph_available_on_all_callable_kinds(cb, ids):
     assert isinstance(draw, Method)
     assert hasattr(draw, "callgraph")
     assert list(draw.callgraph()) == []
+
+
+def test_callees_ordered_by_source_not_count(tmp_path):
+    # A is called ONCE at line 10; B is called TWICE at line 20. Count order
+    # would put B first; source order must put A (earlier line) first.
+    db_path = str(tmp_path / "i.db")
+    ids = _build_callgraph_db(db_path, str(tmp_path / "r"), [
+        ("f", "A", [(10, 5)]),
+        ("f", "B", [(20, 5), (25, 5)]),
+    ])
+    with CodeBase(GraphQuery(db_path)) as cb:
+        names = [e.name for e in cb.get(ids["f"]).callees()]
+        assert names == ["A", "B"]
+
+
+def test_callgraph_is_dfs_preorder_call_sequence(tmp_path):
+    # f calls B (line 30) then A (line 10); A calls C (line 5).
+    #   source order of f's calls: A (10) before B (30)
+    #   execution/DFS pre-order: A, C (A's callee), B
+    db_path = str(tmp_path / "i.db")
+    ids = _build_callgraph_db(db_path, str(tmp_path / "r"), [
+        ("f", "B", [(30, 5)]),
+        ("f", "A", [(10, 5)]),
+        ("A", "C", [(5, 5)]),
+    ])
+    with CodeBase(GraphQuery(db_path)) as cb:
+        seq = [(e.name, d) for e, d in cb.get(ids["f"]).callgraph()]
+        assert seq == [("A", 1), ("C", 2), ("B", 1)]
+
+
+def test_callgraph_dfs_depth_bound(tmp_path):
+    # same shape; depth=1 stops before descending into A's callee C
+    db_path = str(tmp_path / "i.db")
+    ids = _build_callgraph_db(db_path, str(tmp_path / "r"), [
+        ("f", "A", [(10, 5)]),
+        ("f", "B", [(30, 5)]),
+        ("A", "C", [(5, 5)]),
+    ])
+    with CodeBase(GraphQuery(db_path)) as cb:
+        seq = [(e.name, d) for e, d in cb.get(ids["f"]).callgraph(depth=1)]
+        assert seq == [("A", 1), ("B", 1)]
 
 
 # --------------------------------------------------------------------------- #
