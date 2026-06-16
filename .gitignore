@@ -12,6 +12,11 @@ wheels/
 # Editor / vault config
 .obsidian/
 
+# Vim swap files
+*.swp
+*.swo
+*.swn
+
 # Cloned example repos for cidx / lab testing
 test-repo/
 
