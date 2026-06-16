@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-from indexer.storage import Storage, Symbol  # noqa: E402
+from indexer.storage import SCHEMA_VERSION, Storage, Symbol  # noqa: E402
 from indexer.query import GraphQuery  # noqa: E402
 
 
@@ -193,7 +193,7 @@ def test_migration_v8_to_v9_adds_decl_path() -> None:
     assert db.lookup_symbol("c:@F@x") is not None     # old row preserved
     ver = db._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
-    assert int(ver) == 9
+    assert int(ver) == SCHEMA_VERSION    # migrates all the way to the current schema
 
 
 def test_repeat_mint_fills_location_but_never_clobbers() -> None:

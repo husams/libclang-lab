@@ -50,8 +50,15 @@ from typing import Any, Iterable, Literal, Optional, Sequence, overload
 # edge_kind.id <-> name -- seeded identically by the indexer (storage.py). We
 # hardcode to avoid a query and to validate any DB that disagrees.
 EDGE_KINDS = {
-    "calls": 1, "inherits": 2, "contains": 3, "specializes": 4,
-    "instantiates": 5, "overrides": 6, "uses": 7, "field_of": 8, "method_of": 9,
+    "calls": 1,
+    "inherits": 2,
+    "contains": 3,
+    "specializes": 4,
+    "instantiates": 5,
+    "overrides": 6,
+    "uses": 7,
+    "field_of": 8,
+    "method_of": 9,
 }
 EDGE_NAMES = {v: k for k, v in EDGE_KINDS.items()}
 
@@ -85,8 +92,9 @@ def default_db_path() -> str:
     return os.path.join(os.path.expanduser(cache), _INDEX_NAME)
 
 
-def open_query(db_path: Optional[str] = None,
-               require_edges: bool = False) -> "GraphQuery":
+def open_query(
+    db_path: Optional[str] = None, require_edges: bool = False
+) -> "GraphQuery":
     """Open the standard cidx index read-only. `db_path` overrides discovery."""
     return GraphQuery(db_path or default_db_path(), require_edges=require_edges)
 
@@ -96,27 +104,29 @@ def open_query(db_path: Optional[str] = None,
 # Each carries the resolved file path + line so a caller can ground its claims.
 # --------------------------------------------------------------------------- #
 
+
 @dataclass(frozen=True)
 class Sym:
     """A symbol (declaration/definition). `name` is the qualified name."""
+
     id: int
     usr: str
     spelling: str
-    name: str                 # qual_name, else spelling
+    name: str  # qual_name, else spelling
     kind: str
     type_info: Optional[str]
     is_definition: bool
-    is_pure: bool             # C++ pure-virtual (= 0): no own body exists
-    access: Optional[str]     # public/protected/private (C++)
+    is_pure: bool  # C++ pure-virtual (= 0): no own body exists
+    access: Optional[str]  # public/protected/private (C++)
     parent_usr: Optional[str]
     resolved: bool
     component: Optional[str]
-    file: Optional[str]       # abs path of best-known location, or None (stub)
+    file: Optional[str]  # abs path of best-known location, or None (stub)
     line: Optional[int]
     col: Optional[int]
-    external: bool = False    # `file` is a raw path in an UNREGISTERED file
-                              # (system/stdlib header no component owns), not a
-                              # location in any indexed file -- see is_stub
+    external: bool = False  # `file` is a raw path in an UNREGISTERED file
+    # (system/stdlib header no component owns), not a
+    # location in any indexed file -- see is_stub
 
     @property
     def loc(self) -> str:
@@ -164,17 +174,18 @@ class Sym:
 @dataclass(frozen=True)
 class Edge:
     """A typed relationship. `peer` is the symbol at the other end."""
+
     edge_id: int
-    kind: str                 # edge_kind name
+    kind: str  # edge_kind name
     src_id: int
     dst_id: int
-    peer: Sym                 # the neighbor reached by following this edge
-    count: int                # call/use multiplicity
+    peer: Sym  # the neighbor reached by following this edge
+    count: int  # call/use multiplicity
     base_access: Optional[int]
     is_virtual: Optional[int]
-    sites: Sequence["Site"] = ()   # WHERE the edge occurs (use/call locations);
-                                   # eager-loaded by _edges so to_dict() always
-                                   # surfaces the reference site, not just the peer
+    sites: Sequence["Site"] = ()  # WHERE the edge occurs (use/call locations);
+    # eager-loaded by _edges so to_dict() always
+    # surfaces the reference site, not just the peer
 
     def to_dict(self, sites: Optional[Sequence["Site"]] = None) -> dict[str, Any]:
         """Stable JSON view: the peer symbol's fields, plus edge metadata.
@@ -206,11 +217,17 @@ class Edge:
 @dataclass(frozen=True)
 class Site:
     """A concrete source location where an edge occurs -- the grounding."""
+
     file: Optional[str]
     line: Optional[int]
     col: Optional[int]
-    conditional: bool         # inside an #if / template that may not compile
+    conditional: bool  # inside an #if / template that may not compile
     args_sig: Optional[str]
+    # Phase 2: receiver provenance for virtual dispatch (NULL for non-member calls)
+    recv_src_kind: Optional[str] = None
+    recv_type_usr: Optional[str] = None
+    recv_decl_usr: Optional[str] = None
+    recv_param_pos: Optional[int] = None  # 0-based index of receiver in callee params
 
     @property
     def loc(self) -> str:
@@ -233,9 +250,30 @@ class Site:
         return f"Site({self.loc}{c})"
 
 
+@dataclass(frozen=True)
+class CallArg:
+    """Provenance of one positional argument at a call site (Phase 2).
+
+    Keyed by (edge_id, file_id, line, col, position); one row per
+    non-literal positional arg of a ``calls`` edge_site."""
+
+    position: int
+    src_kind: str  # local|construct|member|global|call_result|unknown
+    type_usr: Optional[str] = None  # USR of the arg's static record type
+    decl_usr: Optional[str] = None  # USR of the named local/param/field
+    callee_usr: Optional[str] = None  # USR of callee for call_result
+
+    def __repr__(self) -> str:
+        return (
+            f"CallArg(#{self.position} {self.src_kind}"
+            f"{f' decl={self.decl_usr!r}' if self.decl_usr else ''}"
+            f"{f' type={self.type_usr!r}' if self.type_usr else ''}"
+            f"{f' callee={self.callee_usr!r}' if self.callee_usr else ''})"
+        )
+
+
 #: template_param.param_kind / template_arg.arg_kind code -> readable name.
-TEMPLATE_PARAM_KINDS = {1: "type", 2: "non-type", 3: "template-template",
-                        4: "pack"}
+TEMPLATE_PARAM_KINDS = {1: "type", 2: "non-type", 3: "template-template", 4: "pack"}
 
 
 @dataclass(frozen=True)
@@ -246,6 +284,7 @@ class TemplateParam:
     2=non-type, 3=template-template, 4=pack (see `TEMPLATE_PARAM_KINDS`).
     `name` is the parameter spelling (``T``), `default` the default argument
     text when one was recorded."""
+
     position: int
     param_kind: int
     name: Optional[str]
@@ -256,9 +295,13 @@ class TemplateParam:
         return TEMPLATE_PARAM_KINDS.get(self.param_kind, str(self.param_kind))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"position": self.position, "param_kind": self.param_kind,
-                "kind_name": self.kind_name, "name": self.name,
-                "default": self.default}
+        return {
+            "position": self.position,
+            "param_kind": self.param_kind,
+            "kind_name": self.kind_name,
+            "name": self.name,
+            "default": self.default,
+        }
 
     def __repr__(self) -> str:
         return f"TemplateParam(#{self.position} {self.kind_name} {self.name})"
@@ -273,6 +316,7 @@ class TemplateArg:
     `ref_id` the indexed symbol id when the argument type is itself indexed
     (None for builtins/unindexed types). For a non-type (INTEGRAL) arg,
     `literal` holds the value text."""
+
     position: int
     arg_kind: int
     ref_id: Optional[int] = None
@@ -283,9 +327,13 @@ class TemplateArg:
         return TEMPLATE_PARAM_KINDS.get(self.arg_kind, str(self.arg_kind))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"position": self.position, "arg_kind": self.arg_kind,
-                "kind_name": self.kind_name, "ref_id": self.ref_id,
-                "literal": self.literal}
+        return {
+            "position": self.position,
+            "arg_kind": self.arg_kind,
+            "kind_name": self.kind_name,
+            "ref_id": self.ref_id,
+            "literal": self.literal,
+        }
 
     def __repr__(self) -> str:
         what = self.literal if self.literal is not None else f"#{self.ref_id}"
@@ -300,14 +348,18 @@ class Selection:
     ``inherited`` is False for a type that declares its own override, True for a
     subtype that inherits an ancestor's override (only produced when
     ``dispatch_selection(close_subtypes=True)``)."""
+
     selecting_type: Optional[Sym]
     target: Sym
     inherited: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "selecting_type": (self.selecting_type.to_dict()
-                               if self.selecting_type is not None else None),
+            "selecting_type": (
+                self.selecting_type.to_dict()
+                if self.selecting_type is not None
+                else None
+            ),
             "target": self.target.to_dict() if self.target is not None else None,
             "inherited": self.inherited,
         }
@@ -331,6 +383,7 @@ class DispatchSite:
     stay fully expanded ('not-virtual' | 'no-receiver-type' | 'target-stub' |
     'pure-no-targets' | 'unknown-symbol'). Phase 1 performs NO pruning -- it only
     records this data so Phase 2 can act on it later."""
+
     receiver_static_type: Optional[Sym]
     declared_target: Optional[Sym]
     candidates: tuple[Selection, ...] = ()
@@ -344,10 +397,14 @@ class DispatchSite:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "receiver_static_type": (self.receiver_static_type.to_dict()
-                                     if self.receiver_static_type else None),
-            "declared_target": (self.declared_target.to_dict()
-                                 if self.declared_target else None),
+            "receiver_static_type": (
+                self.receiver_static_type.to_dict()
+                if self.receiver_static_type
+                else None
+            ),
+            "declared_target": (
+                self.declared_target.to_dict() if self.declared_target else None
+            ),
             "candidates": [c.to_dict() for c in self.candidates],
             "prunable": self.prunable,
             "unprunable_reasons": list(self.unprunable_reasons),
@@ -355,8 +412,11 @@ class DispatchSite:
 
     def __repr__(self) -> str:
         tg = self.declared_target.name if self.declared_target else "?"
-        state = "prunable" if self.prunable else \
-            f"unprunable({','.join(self.unprunable_reasons)})"
+        state = (
+            "prunable"
+            if self.prunable
+            else f"unprunable({','.join(self.unprunable_reasons)})"
+        )
         return f"DispatchSite({tg}: {len(self.candidates)} candidate(s), {state})"
 
 
@@ -403,8 +463,9 @@ class GraphQuery:
             self.require_edges()
 
     @classmethod
-    def from_connection(cls, conn: sqlite3.Connection,
-                        db_path: str = "<connection>") -> "GraphQuery":
+    def from_connection(
+        cls, conn: sqlite3.Connection, db_path: str = "<connection>"
+    ) -> "GraphQuery":
         """Wrap an already-open sqlite3 connection (does not take ownership)."""
         self = cls.__new__(cls)
         conn.row_factory = sqlite3.Row
@@ -470,8 +531,11 @@ class GraphQuery:
                 "FROM file f JOIN directory d ON d.id = f.directory_id "
                 "JOIN component c ON c.id = d.component_id"
             ):
-                path = (os.path.join(r["root"], r["rel"], r["name"])
-                        if r["rel"] else os.path.join(r["root"], r["name"]))
+                path = (
+                    os.path.join(r["root"], r["rel"], r["name"])
+                    if r["rel"]
+                    else os.path.join(r["root"], r["name"])
+                )
                 cache[r["fid"]] = (path, r["cname"])
             self._file_cache = cache
         return self._file_cache
@@ -479,7 +543,7 @@ class GraphQuery:
     def _sym(self, r: sqlite3.Row) -> Sym:
         files = self._files()
         fid, line, col = r["file_id"], r["line"], r["col"]
-        if fid is None:                       # decl-only: fall back to decl site
+        if fid is None:  # decl-only: fall back to decl site
             fid, line, col = r["decl_file_id"], r["decl_line"], r["decl_col"]
         if fid is not None:
             path, comp = files.get(fid, (None, None))
@@ -491,12 +555,22 @@ class GraphQuery:
             line, col = r["decl_line"], r["decl_col"]
             external = path is not None
         return Sym(
-            id=r["id"], usr=r["usr"], spelling=r["spelling"],
-            name=r["qual_name"] or r["spelling"], kind=r["kind"],
-            type_info=r["type_info"], is_definition=bool(r["is_definition"]),
-            is_pure=bool(r["is_pure"]), access=r["access"],
-            parent_usr=r["parent_usr"], resolved=bool(r["resolved"]),
-            component=comp, file=path, line=line, col=col, external=external,
+            id=r["id"],
+            usr=r["usr"],
+            spelling=r["spelling"],
+            name=r["qual_name"] or r["spelling"],
+            kind=r["kind"],
+            type_info=r["type_info"],
+            is_definition=bool(r["is_definition"]),
+            is_pure=bool(r["is_pure"]),
+            access=r["access"],
+            parent_usr=r["parent_usr"],
+            resolved=bool(r["resolved"]),
+            component=comp,
+            file=path,
+            line=line,
+            col=col,
+            external=external,
         )
 
     @staticmethod
@@ -510,7 +584,8 @@ class GraphQuery:
         for k in kinds:
             if k not in EDGE_KINDS:
                 raise ValueError(
-                    f"unknown edge kind {k!r}; valid: {sorted(EDGE_KINDS)}")
+                    f"unknown edge kind {k!r}; valid: {sorted(EDGE_KINDS)}"
+                )
             out.append(EDGE_KINDS[k])
         return out
 
@@ -545,7 +620,8 @@ class GraphQuery:
         sid = self._resolve_id(sym)
         r = self._c.execute(
             "SELECT file_id, line, col, decl_file_id, decl_line, decl_col, "
-            "decl_path FROM symbol s WHERE s.id = ?", (sid,)
+            "decl_path FROM symbol s WHERE s.id = ?",
+            (sid,),
         ).fetchone()
         if r is None:
             return None, None
@@ -563,26 +639,36 @@ class GraphQuery:
             decl = (r["decl_path"], r["decl_line"], r["decl_col"])
         return (_loc(r["file_id"], r["line"], r["col"]), decl)
 
-    def find(self, pattern: str, kind: Optional[str] = None,
-             limit: int = 50) -> list[Sym]:
+    def find(
+        self, pattern: str, kind: Optional[str] = None, limit: int = 50
+    ) -> list[Sym]:
         """Fuzzy lookup by qualified name. '::'-separated segments must appear in
         order: find('conf::set') matches 'RdKafka::ConfImpl::set'. Shortest names
         first (the closest matches). `kind` filters by symbol.kind.
 
         Mirrors storage.search_symbols, but over COALESCE(qual_name, spelling) so
         C symbols (no qual_name) are still found."""
-        like = "%" + "%".join(
-            seg.replace("%", r"\%").replace("_", r"\_")
-            for seg in pattern.split("::") if seg
-        ) + "%"
-        sql = (f"SELECT {_SYM_COLS} FROM symbol s "
-               r"WHERE COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'")
+        like = (
+            "%"
+            + "%".join(
+                seg.replace("%", r"\%").replace("_", r"\_")
+                for seg in pattern.split("::")
+                if seg
+            )
+            + "%"
+        )
+        sql = (
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            r"WHERE COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'"
+        )
         args: list = [like]
         if kind:
             sql += " AND s.kind = ?"
             args.append(kind)
-        sql += (" ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-                "COALESCE(s.qual_name, s.spelling) LIMIT ?")
+        sql += (
+            " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
+            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        )
         args.append(limit)
         return [self._sym(r) for r in self._c.execute(sql, args)]
 
@@ -603,26 +689,34 @@ class GraphQuery:
         if not ids:
             return []
         q = ",".join("?" * len(ids))
-        return [self._sym(r) for r in self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.file_id IN ({q}) "
-            f"ORDER BY s.line, s.col LIMIT ?", (*ids, limit))]
+        return [
+            self._sym(r)
+            for r in self._c.execute(
+                f"SELECT {_SYM_COLS} FROM symbol s WHERE s.file_id IN ({q}) "
+                f"ORDER BY s.line, s.col LIMIT ?",
+                (*ids, limit),
+            )
+        ]
 
     # ===================================================================== #
     # 2. LOOKUP REFERENCES
     # ===================================================================== #
 
-    def edges_in(self, sym, kinds: Optional[Sequence[str]] = None,
-                 limit: int = 500) -> list[Edge]:
+    def edges_in(
+        self, sym, kinds: Optional[Sequence[str]] = None, limit: int = 500
+    ) -> list[Edge]:
         """Incoming edges: who points AT this symbol (peer = the source)."""
         return self._edges(sym, "in", kinds, limit)
 
-    def edges_out(self, sym, kinds: Optional[Sequence[str]] = None,
-                  limit: int = 500) -> list[Edge]:
+    def edges_out(
+        self, sym, kinds: Optional[Sequence[str]] = None, limit: int = 500
+    ) -> list[Edge]:
         """Outgoing edges: what this symbol points to (peer = the destination)."""
         return self._edges(sym, "out", kinds, limit)
 
-    def _edges(self, sym, direction: str, kinds, limit: int,
-               with_sites: bool = True) -> list[Edge]:
+    def _edges(
+        self, sym, direction: str, kinds, limit: int, with_sites: bool = True
+    ) -> list[Edge]:
         sid = self._resolve_id(sym)
         kids = self._kind_ids(kinds)
         if direction == "in":
@@ -636,15 +730,16 @@ class GraphQuery:
         if self._is_resolved():
             count_expr = "e.count"
         else:
-            count_expr = ("(SELECT COUNT(*) FROM edge_site es "
-                          "WHERE es.edge_id = e.id)")
+            count_expr = "(SELECT COUNT(*) FROM edge_site es WHERE es.edge_id = e.id)"
         # alias e.kind -> ekind so it does not collide with symbol.kind (sqlite3.Row
         # returns the FIRST column on a name clash, which would mislabel the peer).
-        sql = (f"SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, "
-               f"{count_expr} AS ecount, e.count AS rawcount, "
-               f"e.base_access, e.is_virtual, {_SYM_COLS} "
-               f"FROM edge e JOIN symbol s ON s.id = e.{peer} "
-               f"WHERE e.{mine} = ?")
+        sql = (
+            f"SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, "
+            f"{count_expr} AS ecount, e.count AS rawcount, "
+            f"e.base_access, e.is_virtual, {_SYM_COLS} "
+            f"FROM edge e JOIN symbol s ON s.id = e.{peer} "
+            f"WHERE e.{mine} = ?"
+        )
         args: list = [sid]
         if kids:
             sql += f" AND e.kind IN ({','.join('?' * len(kids))})"
@@ -654,14 +749,20 @@ class GraphQuery:
         out = []
         for r in self._c.execute(sql, args):
             cnt = r["ecount"]
-            if not cnt:                       # no sites recorded -> at least 1
+            if not cnt:  # no sites recorded -> at least 1
                 cnt = r["rawcount"] or 1
-            out.append(Edge(
-                edge_id=r["eid"], kind=EDGE_NAMES[r["ekind"]],
-                src_id=r["src_id"], dst_id=r["dst_id"], peer=self._sym(r),
-                count=cnt, base_access=r["base_access"],
-                is_virtual=r["is_virtual"],
-            ))
+            out.append(
+                Edge(
+                    edge_id=r["eid"],
+                    kind=EDGE_NAMES[r["ekind"]],
+                    src_id=r["src_id"],
+                    dst_id=r["dst_id"],
+                    peer=self._sym(r),
+                    count=cnt,
+                    base_access=r["base_access"],
+                    is_virtual=r["is_virtual"],
+                )
+            )
         # Eager-load the reference sites (WHERE each edge occurs) so a serialized
         # edge always carries the use/call location, not just the peer's decl
         # line. Internal traversals that discard sites pass with_sites=False.
@@ -679,15 +780,26 @@ class GraphQuery:
         q = ",".join("?" * len(edge_ids))
         out: dict[int, list[Site]] = {}
         for r in self._c.execute(
-            "SELECT edge_id, file_id, line, col, conditional, args_sig "
+            "SELECT edge_id, file_id, line, col, conditional, args_sig, "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
             f"FROM edge_site WHERE edge_id IN ({q}) "
             "ORDER BY edge_id, file_id, line, col",
             list(edge_ids),
         ):
             p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
             out.setdefault(r["edge_id"], []).append(
-                Site(file=p, line=r["line"], col=r["col"],
-                     conditional=bool(r["conditional"]), args_sig=r["args_sig"]))
+                Site(
+                    file=p,
+                    line=r["line"],
+                    col=r["col"],
+                    conditional=bool(r["conditional"]),
+                    args_sig=r["args_sig"],
+                    recv_src_kind=r["recv_src_kind"],
+                    recv_type_usr=r["recv_type_usr"],
+                    recv_decl_usr=r["recv_decl_usr"],
+                    recv_param_pos=r["recv_param_pos"],
+                )
+            )
         return out
 
     def references(self, sym, limit: int = 500) -> list[Edge]:
@@ -711,14 +823,25 @@ class GraphQuery:
         files = self._files()
         out = []
         for r in self._c.execute(
-            "SELECT file_id, line, col, conditional, args_sig "
+            "SELECT file_id, line, col, conditional, args_sig, "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
             "FROM edge_site WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
             (eid, limit),
         ):
             p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
-            out.append(Site(file=p, line=r["line"], col=r["col"],
-                            conditional=bool(r["conditional"]),
-                            args_sig=r["args_sig"]))
+            out.append(
+                Site(
+                    file=p,
+                    line=r["line"],
+                    col=r["col"],
+                    conditional=bool(r["conditional"]),
+                    args_sig=r["args_sig"],
+                    recv_src_kind=r["recv_src_kind"],
+                    recv_type_usr=r["recv_type_usr"],
+                    recv_decl_usr=r["recv_decl_usr"],
+                    recv_param_pos=r["recv_param_pos"],
+                )
+            )
         return out
 
     # ===================================================================== #
@@ -726,18 +849,33 @@ class GraphQuery:
     # ===================================================================== #
 
     @overload
-    def neighbors(self, sym, kinds: Optional[Sequence[str]] = ...,
-                  direction: str = ..., limit: int = ...,
-                  with_kind: Literal[False] = ...) -> list[Sym]: ...
+    def neighbors(
+        self,
+        sym,
+        kinds: Optional[Sequence[str]] = ...,
+        direction: str = ...,
+        limit: int = ...,
+        with_kind: Literal[False] = ...,
+    ) -> list[Sym]: ...
     @overload
-    def neighbors(self, sym, kinds: Optional[Sequence[str]] = ...,
-                  direction: str = ..., limit: int = ...,
-                  *, with_kind: Literal[True]) -> list[tuple[Sym, str]]: ...
+    def neighbors(
+        self,
+        sym,
+        kinds: Optional[Sequence[str]] = ...,
+        direction: str = ...,
+        limit: int = ...,
+        *,
+        with_kind: Literal[True],
+    ) -> list[tuple[Sym, str]]: ...
 
-    def neighbors(self, sym, kinds: Optional[Sequence[str]] = None,
-                  direction: str = "out", limit: int = 500,
-                  with_kind: bool = False
-                  ) -> "list[Sym] | list[tuple[Sym, str]]":
+    def neighbors(
+        self,
+        sym,
+        kinds: Optional[Sequence[str]] = None,
+        direction: str = "out",
+        limit: int = 500,
+        with_kind: bool = False,
+    ) -> "list[Sym] | list[tuple[Sym, str]]":
         """One hop. direction='out'|'in'. Returns the peer symbols.
 
         with_kind=False (default) returns a plain list[Sym] -- the peers.
@@ -752,15 +890,27 @@ class GraphQuery:
             return [(e.peer, e.kind) for e in edges]
         return [e.peer for e in edges]
 
-    def _peers(self, sym, kinds: Optional[Sequence[str]],
-               direction: str = "out", limit: int = 500) -> list[Sym]:
+    def _peers(
+        self,
+        sym,
+        kinds: Optional[Sequence[str]],
+        direction: str = "out",
+        limit: int = 500,
+    ) -> list[Sym]:
         """Internal one-hop peers (no edge kind). Typed plain list[Sym] so the
         graph-internal callers don't inherit neighbors()'s with_kind union."""
-        return [e.peer for e in
-                self._edges(sym, direction, kinds, limit, with_sites=False)]
+        return [
+            e.peer for e in self._edges(sym, direction, kinds, limit, with_sites=False)
+        ]
 
-    def walk(self, start, kinds: Sequence[str], direction: str = "out",
-             depth: int = 3, max_nodes: int = 500) -> "Traversal":
+    def walk(
+        self,
+        start,
+        kinds: Sequence[str],
+        direction: str = "out",
+        depth: int = 3,
+        max_nodes: int = 500,
+    ) -> "Traversal":
         """Bounded BFS from `start` over edges of `kinds` in one `direction`.
 
         Returns a Traversal recording each reached symbol with its minimum depth
@@ -776,8 +926,9 @@ class GraphQuery:
         for d in range(1, depth + 1):
             nxt = []
             for nid in frontier:
-                for e in self._edges(nid, direction, kinds, limit=max_nodes,
-                                     with_sites=False):
+                for e in self._edges(
+                    nid, direction, kinds, limit=max_nodes, with_sites=False
+                ):
                     if e.peer.id not in seen:
                         seen[e.peer.id] = e.peer
                         level[e.peer.id] = d
@@ -790,8 +941,14 @@ class GraphQuery:
             frontier = nxt
         return Traversal(seen, level, parent)
 
-    def reaches(self, src, dst, kinds: Sequence[str] = ("calls",),
-                direction: str = "out", max_depth: int = 8) -> Optional[list[Sym]]:
+    def reaches(
+        self,
+        src,
+        dst,
+        kinds: Sequence[str] = ("calls",),
+        direction: str = "out",
+        max_depth: int = 8,
+    ) -> Optional[list[Sym]]:
         """Shortest path of `kinds` edges from `src` to `dst`, or None.
 
         Answers "can A reach B?" (e.g. does this entrypoint ever call that sink)
@@ -816,8 +973,11 @@ class GraphQuery:
                         chain = [t.id]
                         while chain[-1] in parent:
                             chain.append(parent[chain[-1]])
-                        return [x for x in (self.get(i) for i in reversed(chain))
-                                if x is not None]
+                        return [
+                            x
+                            for x in (self.get(i) for i in reversed(chain))
+                            if x is not None
+                        ]
                     nxt.append(peer.id)
             if not nxt:
                 break
@@ -831,16 +991,22 @@ class GraphQuery:
         whole hierarchy."""
         if direct:
             return self._peers(sym, ("inherits",), "out")
-        return [s for s in self.walk(sym, ("inherits",), "out", depth=16).nodes
-                if s.id != self._resolve_id(sym)]
+        return [
+            s
+            for s in self.walk(sym, ("inherits",), "out", depth=16).nodes
+            if s.id != self._resolve_id(sym)
+        ]
 
     def subclasses(self, sym, direct: bool = True) -> list[Sym]:
         """Derived classes of `sym` (incoming `inherits`). direct=False walks the
         whole subtree."""
         if direct:
             return self._peers(sym, ("inherits",), "in")
-        return [s for s in self.walk(sym, ("inherits",), "in", depth=16).nodes
-                if s.id != self._resolve_id(sym)]
+        return [
+            s
+            for s in self.walk(sym, ("inherits",), "in", depth=16).nodes
+            if s.id != self._resolve_id(sym)
+        ]
 
     def members(self, sym, access: Optional[str] = None) -> list[Sym]:
         """Members of a record/namespace.
@@ -856,12 +1022,18 @@ class GraphQuery:
         """
         if access is not None and access != "all" and access not in _ACCESS:
             raise ValueError(
-                f"unknown access {access!r}; valid: {', '.join(_ACCESS)}, all")
-        out = [e.peer for e in
-               self._edges(sym, "out", ("contains",), 500, with_sites=False)]
-        inn = [e.peer for e in
-               self._edges(sym, "in", ("field_of", "method_of"), 500,
-                           with_sites=False)]
+                f"unknown access {access!r}; valid: {', '.join(_ACCESS)}, all"
+            )
+        out = [
+            e.peer
+            for e in self._edges(sym, "out", ("contains",), 500, with_sites=False)
+        ]
+        inn = [
+            e.peer
+            for e in self._edges(
+                sym, "in", ("field_of", "method_of"), 500, with_sites=False
+            )
+        ]
         seen, merged = set(), []
         for s in out + inn:
             if s.id not in seen:
@@ -881,9 +1053,13 @@ class GraphQuery:
         sid = self._resolve_id(sym)
         rows = self._c.execute(
             "SELECT position, param_kind, name, default_txt FROM template_param "
-            "WHERE owner_id = ? ORDER BY position", (sid,)).fetchall()
-        return [TemplateParam(r["position"], r["param_kind"], r["name"],
-                              r["default_txt"]) for r in rows]
+            "WHERE owner_id = ? ORDER BY position",
+            (sid,),
+        ).fetchall()
+        return [
+            TemplateParam(r["position"], r["param_kind"], r["name"], r["default_txt"])
+            for r in rows
+        ]
 
     def template_args(self, sym) -> list[TemplateArg]:
         """The concrete template arguments bound by `sym` (a specialization, an
@@ -892,9 +1068,13 @@ class GraphQuery:
         sid = self._resolve_id(sym)
         rows = self._c.execute(
             "SELECT position, arg_kind, ref_id, literal FROM template_arg "
-            "WHERE owner_id = ? ORDER BY position", (sid,)).fetchall()
-        return [TemplateArg(r["position"], r["arg_kind"], r["ref_id"],
-                            r["literal"]) for r in rows]
+            "WHERE owner_id = ? ORDER BY position",
+            (sid,),
+        ).fetchall()
+        return [
+            TemplateArg(r["position"], r["arg_kind"], r["ref_id"], r["literal"])
+            for r in rows
+        ]
 
     # ===================================================================== #
     # 4. DYNAMIC DISPATCH
@@ -956,8 +1136,9 @@ class GraphQuery:
     # 4b. DEVIRTUALIZATION — PHASE 1 (selection maps, NO pruning)
     # ===================================================================== #
 
-    def dispatch_selection(self, method, *,
-                           close_subtypes: bool = False) -> DispatchSite:
+    def dispatch_selection(
+        self, method, *, close_subtypes: bool = False
+    ) -> DispatchSite:
         """The Phase-1 over-approximation for a virtual call whose static callee
         is `method`: the full selection map (concrete-type -> target) plus a
         prunable flag for Phase 2.
@@ -991,7 +1172,7 @@ class GraphQuery:
 
         targets = self.dispatch_targets(sym)
         candidates: list[Selection] = []
-        owner_target: dict[int, Sym] = {}   # selecting-class id -> its target
+        owner_target: dict[int, Sym] = {}  # selecting-class id -> its target
         for t in targets:
             owner = self.get(t.parent_usr) if t.parent_usr else None
             candidates.append(Selection(selecting_type=owner, target=t))
@@ -1006,18 +1187,20 @@ class GraphQuery:
         if close_subtypes and receiver is not None:
             for sub in self.subclasses(receiver, direct=False):
                 if sub.id in owner_target:
-                    continue                # declares its own override already
+                    continue  # declares its own override already
                 inherited = self._nearest_owned_target(sub.id, owner_target)
                 if inherited is not None:
-                    candidates.append(Selection(selecting_type=sub,
-                                                 target=inherited,
-                                                 inherited=True))
+                    candidates.append(
+                        Selection(selecting_type=sub, target=inherited, inherited=True)
+                    )
 
-        return DispatchSite(receiver, sym, tuple(candidates),
-                            not reasons, tuple(reasons))
+        return DispatchSite(
+            receiver, sym, tuple(candidates), not reasons, tuple(reasons)
+        )
 
-    def _nearest_owned_target(self, subtype_id: int,
-                              owner_target: dict[int, Sym]) -> Optional[Sym]:
+    def _nearest_owned_target(
+        self, subtype_id: int, owner_target: dict[int, Sym]
+    ) -> Optional[Sym]:
         """Walk up `subtype_id`'s bases (nearest first) to the first class that
         owns a dispatch target, and return that target. None if none found."""
         seen = {subtype_id}
@@ -1041,31 +1224,153 @@ class GraphQuery:
         return [self.dispatch_selection(c) for c in self.virtual_callees(fn)]
 
     # ===================================================================== #
+    # 4c. PHASE 2 — argument / receiver provenance reads (Python-only)
+    # ===================================================================== #
+
+    def call_args(self, edge_id: int) -> list[CallArg]:
+        """All :class:`CallArg` rows for ``edge_id``, ordered by position.
+
+        Returns one row per non-literal positional argument at any call site
+        of this edge, ordered by (file_id, line, col, position)."""
+        rows = self._c.execute(
+            "SELECT position, src_kind, type_usr, decl_usr, callee_usr "
+            "FROM call_arg WHERE edge_id = ? "
+            "ORDER BY file_id, line, col, position",
+            (edge_id,),
+        ).fetchall()
+        return [
+            CallArg(
+                position=r["position"],
+                src_kind=r["src_kind"],
+                type_usr=r["type_usr"],
+                decl_usr=r["decl_usr"],
+                callee_usr=r["callee_usr"],
+            )
+            for r in rows
+        ]
+
+    def call_args_at(
+        self, edge_id: int, file_id: int, line: int, col: int
+    ) -> list[CallArg]:
+        """The :class:`CallArg` rows for a specific call site PK.
+
+        Returns args for the given (edge_id, file_id, line, col) site in
+        position order."""
+        rows = self._c.execute(
+            "SELECT position, src_kind, type_usr, decl_usr, callee_usr "
+            "FROM call_arg WHERE edge_id = ? AND file_id = ? "
+            "AND line = ? AND col = ? ORDER BY position",
+            (edge_id, file_id, line, col),
+        ).fetchall()
+        return [
+            CallArg(
+                position=r["position"],
+                src_kind=r["src_kind"],
+                type_usr=r["type_usr"],
+                decl_usr=r["decl_usr"],
+                callee_usr=r["callee_usr"],
+            )
+            for r in rows
+        ]
+
+    def receiver_provenance(
+        self, edge_id: int, file_id: int, line: int, col: int
+    ) -> Site | None:
+        """The :class:`Site` row for the given call-site PK, including
+        Phase-2 receiver provenance fields (recv_src_kind / recv_type_usr /
+        recv_decl_usr / recv_param_pos).  Returns None when no such site row exists."""
+        files = self._files()
+        r = self._c.execute(
+            "SELECT file_id, line, col, conditional, args_sig, "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
+            "FROM edge_site WHERE edge_id = ? AND file_id = ? "
+            "AND line = ? AND col = ?",
+            (edge_id, file_id, line, col),
+        ).fetchone()
+        if r is None:
+            return None
+        p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
+        return Site(
+            file=p,
+            line=r["line"],
+            col=r["col"],
+            conditional=bool(r["conditional"]),
+            args_sig=r["args_sig"],
+            recv_src_kind=r["recv_src_kind"],
+            recv_type_usr=r["recv_type_usr"],
+            recv_decl_usr=r["recv_decl_usr"],
+            recv_param_pos=r["recv_param_pos"],
+        )
+
+    def _recv_for(self, edge_ids: Sequence[int]) -> dict[int, list[Site]]:
+        """Batch-fetch edge_site rows including Phase-2 receiver provenance.
+
+        Returns {edge_id: [Site, ...]} for any site with a non-NULL
+        recv_src_kind. This feeds the Gamma engine's receiver lookup."""
+        if not edge_ids:
+            return {}
+        files = self._files()
+        q = ",".join("?" * len(edge_ids))
+        out: dict[int, list[Site]] = {}
+        for r in self._c.execute(
+            "SELECT edge_id, file_id, line, col, conditional, args_sig, "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
+            f"FROM edge_site WHERE edge_id IN ({q}) "
+            "ORDER BY edge_id, file_id, line, col",
+            list(edge_ids),
+        ):
+            p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
+            out.setdefault(r["edge_id"], []).append(
+                Site(
+                    file=p,
+                    line=r["line"],
+                    col=r["col"],
+                    conditional=bool(r["conditional"]),
+                    args_sig=r["args_sig"],
+                    recv_src_kind=r["recv_src_kind"],
+                    recv_type_usr=r["recv_type_usr"],
+                    recv_decl_usr=r["recv_decl_usr"],
+                    recv_param_pos=r["recv_param_pos"],
+                )
+            )
+        return out
+
+    # ===================================================================== #
     # Introspection
     # ===================================================================== #
 
     def stats(self) -> dict[str, Any]:
         """Counts that tell you how complete the index is before you trust it."""
         one = lambda s: self._c.execute(s).fetchone()[0]  # noqa: E731
-        by_edge = {EDGE_NAMES[r["kind"]]: r["n"] for r in self._c.execute(
-            "SELECT kind, COUNT(*) AS n FROM edge GROUP BY kind")}
+        by_edge = {
+            EDGE_NAMES[r["kind"]]: r["n"]
+            for r in self._c.execute(
+                "SELECT kind, COUNT(*) AS n FROM edge GROUP BY kind"
+            )
+        }
         return {
             "db": self.db_path,
             "components": one("SELECT COUNT(*) FROM component"),
             "files_indexed": one("SELECT COUNT(*) FROM file WHERE indexed = 1"),
             "symbols": one("SELECT COUNT(*) FROM symbol"),
-            "stubs": one("SELECT COUNT(*) FROM symbol WHERE resolved = 0 "
-                         "AND file_id IS NULL AND decl_file_id IS NULL"),
+            "stubs": one(
+                "SELECT COUNT(*) FROM symbol WHERE resolved = 0 "
+                "AND file_id IS NULL AND decl_file_id IS NULL"
+            ),
             "edges": one("SELECT COUNT(*) FROM edge"),
             "edges_by_kind": by_edge,
-            "resolved_at": (lambda r: r[0] if r else None)(self._c.execute(
-                "SELECT value FROM meta WHERE key = 'graph_resolved_at'").fetchone()),
+            "resolved_at": (lambda r: r[0] if r else None)(
+                self._c.execute(
+                    "SELECT value FROM meta WHERE key = 'graph_resolved_at'"
+                ).fetchone()
+            ),
         }
 
 
 @dataclass
 class Traversal:
     """Result of GraphQuery.walk(): reached symbols + how they were reached."""
+
     nodes_by_id: dict[int, Sym]
     depth_by_id: dict[int, int]
     parent_by_id: Optional[dict[int, Optional[int]]] = None
@@ -1073,8 +1378,10 @@ class Traversal:
     @property
     def nodes(self) -> list[Sym]:
         """All reached symbols, shallowest first."""
-        return sorted(self.nodes_by_id.values(),
-                      key=lambda s: (self.depth_by_id.get(s.id, 0), s.name))
+        return sorted(
+            self.nodes_by_id.values(),
+            key=lambda s: (self.depth_by_id.get(s.id, 0), s.name),
+        )
 
     def path_to(self, ident) -> list[Sym]:
         """Reconstruct the discovery path from start to a reached symbol."""
@@ -1095,5 +1402,7 @@ class Traversal:
         return len(self.nodes_by_id)
 
     def __repr__(self) -> str:
-        return (f"Traversal({len(self.nodes_by_id)} nodes, "
-                f"max_depth={max(self.depth_by_id.values(), default=0)})")
+        return (
+            f"Traversal({len(self.nodes_by_id)} nodes, "
+            f"max_depth={max(self.depth_by_id.values(), default=0)})"
+        )

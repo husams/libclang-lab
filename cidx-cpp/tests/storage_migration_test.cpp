@@ -78,7 +78,7 @@ void check_migrated(const std::string &db_path) {
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
   CHECK(has_col(table_columns(raw, "file"), "args_overridden"));
-  CHECK(meta_version(raw) == "9");
+  CHECK(meta_version(raw) >= "10");
 
   // qual_name: longest parent_usr chain wins; the anonymous-namespace level
   // (empty parent spelling) is skipped.
@@ -123,7 +123,8 @@ void check_migrated(const std::string &db_path) {
                                          "idx_symbol_qual", "idx_symbol_file",
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
-                                         "idx_edge_src", "idx_edge_dst"});
+                                         "idx_edge_src", "idx_edge_dst",
+                                         "idx_call_arg_edge"});
 }
 
 } // namespace

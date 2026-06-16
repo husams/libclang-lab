@@ -81,6 +81,23 @@ struct EdgeSite {
   std::optional<int64_t> col;
   int64_t conditional = 0;
   std::optional<std::string> args_sig;
+  // Phase 2: receiver provenance for virtual dispatch
+  std::optional<std::string> recv_src_kind;
+  std::optional<std::string> recv_type_usr;
+  std::optional<std::string> recv_decl_usr;
+  std::optional<int64_t> recv_param_pos;  // 0-based index of receiver in callee params
+};
+
+struct CallArg {
+  int64_t edge_id = -1;
+  int64_t file_id = -1;
+  int64_t line = 0;
+  int64_t col = 0;
+  int64_t position = 0;
+  std::string src_kind;             // local|construct|member|global|call_result|unknown
+  std::optional<std::string> type_usr;
+  std::optional<std::string> decl_usr;
+  std::optional<std::string> callee_usr;
 };
 
 struct TemplateParam {

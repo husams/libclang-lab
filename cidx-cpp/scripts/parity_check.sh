@@ -41,6 +41,7 @@ CPP_BIN="${CIDX_CPP_BIN:-$CIDX_CPP_ROOT/build/cidx}"
 FIXTURE_DB="$LAB_ROOT/manifests/project/compile_commands.json"
 PROJECT_DIR="$LAB_ROOT/manifests/project"
 GEOMETRY_DB="$LAB_ROOT/manifests/geometry"
+GRAPHLAB_DB="$LAB_ROOT/manifests/graphlab"
 
 fail() { echo "parity_check: FAIL: $*" >&2; exit 1; }
 
@@ -49,6 +50,7 @@ fail() { echo "parity_check: FAIL: $*" >&2; exit 1; }
 [ -x "$PY_CIDX" ] || fail "Python launcher not found: $PY_CIDX"
 [ -f "$FIXTURE_DB" ] || fail "fixture missing: $FIXTURE_DB"
 [ -f "$GEOMETRY_DB/compile_commands.json" ] || fail "geometry fixture missing: $GEOMETRY_DB/compile_commands.json"
+[ -f "$GRAPHLAB_DB/compile_commands.json" ] || fail "graphlab fixture missing: $GRAPHLAB_DB/compile_commands.json"
 command -v uv >/dev/null 2>&1 || fail "uv not on PATH (the Python launcher needs it)"
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 not on PATH"
 
@@ -213,6 +215,15 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve --rebuild
+
+  # M3: graphlab fixture — includes chain.cpp (value-typed local B passed as
+  # argument to top_rank) which exercises call_arg/edge_site provenance with
+  # UNEXPOSED_EXPR arguments.  Parity here golden-locks that Python and C++
+  # emit identical call_arg rows (src_kind='local', type_usr=chain::B) for
+  # the top_rank(b) call, catching any future _peel_expr / classify divergence.
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- import --db "$GRAPHLAB_DB" --name graphlabproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
 
   # `file` (per-file compile-flag editor) + dump-compile-commands (schema v8):
   # addressed COMPONENT://RELPATH, the relpath is relative to the component

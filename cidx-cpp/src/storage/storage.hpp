@@ -26,7 +26,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 9;
+constexpr int kSchemaVersion = 10;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
 // SQL CHECK and by an application-side StorageError (§3.2).
@@ -194,6 +194,9 @@ public:
 
   // INSERT OR IGNORE: same site visited twice (e.g. re-parse) = no-op.
   void add_edge_site(const EdgeSite &s);
+
+  // INSERT OR IGNORE a call_arg row (PK collision = same arg, harmless).
+  void add_call_arg(const CallArg &a);
 
   // INSERT OR REPLACE keyed on (owner_id, position).
   void add_template_param(const TemplateParam &p);

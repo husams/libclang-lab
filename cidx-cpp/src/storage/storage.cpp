@@ -122,12 +122,16 @@ CREATE INDEX IF NOT EXISTS idx_edge_src ON edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
 
 CREATE TABLE IF NOT EXISTS edge_site (
-    edge_id     INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
-    file_id     INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-    line        INTEGER,
-    col         INTEGER,
-    conditional INTEGER NOT NULL DEFAULT 0,
-    args_sig    TEXT,
+    edge_id      INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+    file_id      INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    line         INTEGER,
+    col          INTEGER,
+    conditional  INTEGER NOT NULL DEFAULT 0,
+    args_sig     TEXT,
+    recv_src_kind TEXT,
+    recv_type_usr TEXT,
+    recv_decl_usr TEXT,
+    recv_param_pos INTEGER,
     PRIMARY KEY (edge_id, file_id, line, col)
 ) WITHOUT ROWID;
 
@@ -149,7 +153,21 @@ CREATE TABLE IF NOT EXISTS template_arg (
     PRIMARY KEY (owner_id, position)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '9');
+CREATE TABLE IF NOT EXISTS call_arg (
+    edge_id    INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+    file_id    INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    line       INTEGER NOT NULL,
+    col        INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    src_kind   TEXT NOT NULL,
+    type_usr   TEXT,
+    decl_usr   TEXT,
+    callee_usr TEXT,
+    PRIMARY KEY (edge_id, file_id, line, col, position)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '10');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -496,6 +514,27 @@ void Storage::migrate() {
     if (!has_col(fcols, "args_overridden")) {
       db_.exec("ALTER TABLE file ADD COLUMN args_overridden INTEGER "
                "NOT NULL DEFAULT 0");
+      changed = true;
+    }
+  }
+  // v9 -> v10: receiver provenance + per-argument provenance for virtual
+  // dispatch. No backfill -- reindex repopulates from the AST.
+  if (has_table("edge_site")) {
+    const auto escols = table_columns("edge_site");
+    if (!has_col(escols, "recv_src_kind")) {
+      db_.exec("ALTER TABLE edge_site ADD COLUMN recv_src_kind TEXT");
+      db_.exec("ALTER TABLE edge_site ADD COLUMN recv_type_usr TEXT");
+      db_.exec("ALTER TABLE edge_site ADD COLUMN recv_decl_usr TEXT");
+      changed = true;
+    }
+    if (!has_col(escols, "recv_param_pos")) {
+      db_.exec("ALTER TABLE edge_site ADD COLUMN recv_param_pos INTEGER");
+      changed = true;
+    }
+    if (!has_table("call_arg")) {
+      // The call_arg table itself is created by the schema script (CREATE
+      // TABLE IF NOT EXISTS), run after migrate(), so we only flip changed
+      // to bump the version -- identical to the v6->v7 graph tables pattern.
       changed = true;
     }
   }
@@ -1384,14 +1423,37 @@ int64_t Storage::add_edge(const Edge &e) {
 void Storage::add_edge_site(const EdgeSite &s) {
   auto st = db_.prepare(
       "INSERT OR IGNORE INTO edge_site "
-      "(edge_id, file_id, line, col, conditional, args_sig) "
-      "VALUES (?, ?, ?, ?, ?, ?)");
+      "(edge_id, file_id, line, col, conditional, args_sig, "
+      " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, s.edge_id);
   bind_opt(st, 2, s.file_id);
   bind_opt(st, 3, s.line);
   bind_opt(st, 4, s.col);
   st.bind(5, s.conditional);
   bind_opt(st, 6, s.args_sig);
+  bind_opt(st, 7, s.recv_src_kind);
+  bind_opt(st, 8, s.recv_type_usr);
+  bind_opt(st, 9, s.recv_decl_usr);
+  bind_opt(st, 10, s.recv_param_pos);
+  st.step_done();
+}
+
+void Storage::add_call_arg(const CallArg &a) {
+  auto st = db_.prepare(
+      "INSERT OR IGNORE INTO call_arg "
+      "(edge_id, file_id, line, col, position, src_kind, "
+      " type_usr, decl_usr, callee_usr) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  st.bind(1, a.edge_id);
+  st.bind(2, a.file_id);
+  st.bind(3, a.line);
+  st.bind(4, a.col);
+  st.bind(5, a.position);
+  st.bind(6, std::string_view(a.src_kind));
+  bind_opt(st, 7, a.type_usr);
+  bind_opt(st, 8, a.decl_usr);
+  bind_opt(st, 9, a.callee_usr);
   st.step_done();
 }
 
