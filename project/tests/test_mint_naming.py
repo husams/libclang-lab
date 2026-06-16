@@ -67,6 +67,50 @@ def test_repeat_mint_upgrades_empty_but_never_clobbers() -> None:
     assert db.lookup_symbol("c:@F@f").kind == "method"
 
 
+def test_mint_stores_decl_location() -> None:
+    # Regression: chain::D::D (a defaulted ctor) is never separately indexed,
+    # but the reference cursor carries its decl location (chain.hpp:25). The
+    # mint must record it so the symbol resolves instead of `@<no-location>`.
+    db = _db()
+    root = db.add_directory(1, "")
+    fid = db.add_file(root, "chain.hpp")
+    usr = "c:@N@chain@S@D@F@D#"
+    db.mint_symbol_id(usr, "D", "chain::D::D", "D()", "constructor",
+                      decl_file_id=fid, decl_line=25, decl_col=8)
+    s = db.lookup_symbol(usr)
+    assert s is not None
+    assert s.decl_file_id == fid and s.decl_line == 25 and s.decl_col == 8
+    assert s.resolved == 0          # still a stub-origin row, but now LOCATED
+
+
+def test_mint_without_decl_location_stays_locationless() -> None:
+    # An external/stdlib target (file in no registered component) gets None and
+    # correctly stays location-less -- no stdlib special-casing required.
+    db = _db()
+    usr = "c:@N@std@S@vector@F@vector#"
+    db.mint_symbol_id(usr, "vector", "std::vector::vector", "vector()",
+                      "constructor")
+    s = db.lookup_symbol(usr)
+    assert s is not None
+    assert s.decl_file_id is None and s.file_id is None
+
+
+def test_repeat_mint_fills_location_but_never_clobbers() -> None:
+    db = _db()
+    root = db.add_directory(1, "")
+    fid = db.add_file(root, "a.hpp")
+    usr = "c:@F@k"
+    db.mint_symbol_id(usr, "k", "ns::k")                       # no location yet
+    assert db.lookup_symbol(usr).decl_file_id is None
+    db.mint_symbol_id(usr, "k", "ns::k", None, "function",     # fill location
+                      decl_file_id=fid, decl_line=7, decl_col=2)
+    assert db.lookup_symbol(usr).decl_line == 7
+    db.mint_symbol_id(usr, "k", "ns::k", None, "function",     # must NOT clobber
+                      decl_file_id=99, decl_line=999, decl_col=9)
+    s = db.lookup_symbol(usr)
+    assert s.decl_file_id == fid and s.decl_line == 7 and s.decl_col == 2
+
+
 def test_real_definition_overwrites_named_stub() -> None:
     db = _db()
     root = db.add_directory(1, "")

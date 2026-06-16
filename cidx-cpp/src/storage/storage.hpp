@@ -168,13 +168,23 @@ public:
   // travels with the USR: a stub is born NAMED -- essential for targets whose
   // definition is never indexed (stdlib calls, implicit template
   // instantiations, defaulted ctors), where no add_symbol ever backfills it.
+  // The reference cursor's declaration location travels too: when it sits in an
+  // indexed file the stub is born LOCATED (e.g. a defaulted ctor anchored to its
+  // `struct` line), so chain::D::D resolves to chain.hpp:25 instead of
+  // `@<no-location>`. decl_file_id is nullopt for targets in unregistered
+  // (system/stdlib) headers, which correctly stay location-less.
   // An existing real row is kept intact; a repeat mint only UPGRADES an empty
-  // name, never clobbers a real one. Returns the stable symbol.id either way.
+  // name, never clobbers a real one, and fills the location only when still
+  // absent. Returns the stable symbol.id either way.
   int64_t mint_symbol_id(const std::string &usr,
                          const std::string &spelling = "",
                          const std::string &qual_name = "",
                          const std::string &display_name = "",
-                         const std::string &kind = "function");
+                         const std::string &kind = "function",
+                         const std::optional<int64_t> &decl_file_id =
+                             std::nullopt,
+                         const std::optional<int64_t> &decl_line = std::nullopt,
+                         const std::optional<int64_t> &decl_col = std::nullopt);
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.

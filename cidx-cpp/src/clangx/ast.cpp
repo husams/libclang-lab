@@ -101,6 +101,40 @@ ExpansionLoc cursor_location(LibClang &lib, CXCursor cursor) {
   return loc;
 }
 
+// Declaration location (file_id, line, col) of a mint target's reference
+// cursor. The target of a mint (callee/base/override/primary) carries a real
+// source location even when its definition body is never separately indexed --
+// e.g. an implicit/defaulted ctor is anchored to its `struct` line. Recording
+// it here is what lets chain::D::D resolve to chain.hpp:25 instead of
+// `@<no-location>`. Lookup-only (db.get_file, never add_file_path): a target in
+// a file no registered component owns -- system/stdlib headers -- yields all
+// nullopt and correctly stays location-less. Mirrors ast.py:_ref_decl_loc.
+struct RefDeclLoc {
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+};
+
+RefDeclLoc ref_decl_loc(LibClang &lib, Storage &db, CXCursor ref) {
+  RefDeclLoc out;
+  const ExpansionLoc loc = cursor_location(lib, ref);
+  if (loc.file == nullptr) {
+    return out;
+  }
+  const std::string fname = CxString(lib, lib.clang_getFileName(loc.file)).str();
+  if (fname.empty()) {
+    return out;
+  }
+  const auto row = db.get_file(fname);
+  if (!row) {
+    return out;
+  }
+  out.file_id = row->id;
+  out.line = static_cast<int64_t>(loc.line);
+  out.col = static_cast<int64_t>(loc.col);
+  return out;
+}
+
 // Strip pointer/reference/array layers off `t` and return the declaration
 // cursor of the named type it spells, or the null cursor when the type has no
 // user declaration (builtins like int, function pointers, …). Single-level by
@@ -720,12 +754,13 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
               dst_id = dst->id;
             }
           } else {
+            const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);
             dst_id = ctx->db->mint_symbol_id(
                 callee_usr,
                 CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
                 qualified_name(lib, ref),
                 CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
-                stub_kind(lib, ref));
+                stub_kind(lib, ref), dl.file_id, dl.line, dl.col);
           }
           if (dst_id >= 0) {
             emit_body_edge(ctx, lib, cursor, dst_id, 1 /* calls */);
@@ -1019,12 +1054,13 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       if (!src_sym) {
         return;
       }
+      const RefDeclLoc base_dl = ref_decl_loc(lib, db_, base_ref);
       const int64_t dst_id = db_.mint_symbol_id(
           base_usr,
           CxString(lib, lib.clang_getCursorSpelling(base_ref)).str(),
           qualified_name(lib, base_ref),
           CxString(lib, lib.clang_getCursorDisplayName(base_ref)).str(),
-          stub_kind(lib, base_ref));
+          stub_kind(lib, base_ref), base_dl.file_id, base_dl.line, base_dl.col);
       Edge e;
       e.src_id = src_sym->id;
       e.dst_id = dst_id;
@@ -1113,12 +1149,14 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
           if (ov_usr.empty()) {
             continue;
           }
+          const RefDeclLoc ov_dl = ref_decl_loc(lib, db_, overridden[oi]);
           const int64_t dst_ov = db_.mint_symbol_id(
               ov_usr,
               CxString(lib, lib.clang_getCursorSpelling(overridden[oi])).str(),
               qualified_name(lib, overridden[oi]),
               CxString(lib, lib.clang_getCursorDisplayName(overridden[oi])).str(),
-              stub_kind(lib, overridden[oi]));
+              stub_kind(lib, overridden[oi]), ov_dl.file_id, ov_dl.line,
+              ov_dl.col);
           Edge oe;
           oe.src_id = src_sym->id;
           oe.dst_id = dst_ov;
@@ -1200,12 +1238,14 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
         if (!spec_usr.empty() && !prim_usr.empty() && spec_usr != prim_usr) {
           const auto spec_sym = db_.lookup_symbol(spec_usr);
           if (spec_sym) {
+            const RefDeclLoc prim_dl = ref_decl_loc(lib, db_, primary);
             const int64_t prim_id = db_.mint_symbol_id(
                 prim_usr,
                 CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
                 qualified_name(lib, primary),
                 CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
-                stub_kind(lib, primary));
+                stub_kind(lib, primary), prim_dl.file_id, prim_dl.line,
+                prim_dl.col);
             Edge e;
             e.src_id = spec_sym->id;
             e.dst_id = prim_id;

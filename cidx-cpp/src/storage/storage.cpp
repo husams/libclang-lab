@@ -1283,22 +1283,30 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
                                 const std::string &spelling,
                                 const std::string &qual_name,
                                 const std::string &display_name,
-                                const std::string &kind) {
+                                const std::string &kind,
+                                const std::optional<int64_t> &decl_file_id,
+                                const std::optional<int64_t> &decl_line,
+                                const std::optional<int64_t> &decl_col) {
   // The follow-up SELECT returns the stable id whether the row was minted or
   // already present. 'function' is the fallback kind when the cursor kind is
   // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
   // later. On a repeat mint we only UPGRADE an unnamed stub (empty spelling) --
-  // name and kind together -- never clobber a real symbol's.
+  // name and kind together -- never clobber a real symbol's; the decl location
+  // is filled in only when still absent (COALESCE).
   auto ins = db_.prepare(
-      "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, resolved) "
-      "VALUES (?, ?, ?, ?, ?, 0) "
+      "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
+      "                    decl_file_id, decl_line, decl_col, resolved) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  kind         = CASE WHEN symbol.spelling = '' "
       "                      THEN excluded.kind ELSE symbol.kind END, "
       "  spelling     = CASE WHEN symbol.spelling = '' "
       "                      THEN excluded.spelling ELSE symbol.spelling END, "
       "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
-      "  display_name = COALESCE(symbol.display_name, excluded.display_name)");
+      "  display_name = COALESCE(symbol.display_name, excluded.display_name), "
+      "  decl_file_id = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
+      "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
+      "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col)");
   ins.bind(1, std::string_view(usr));
   ins.bind(2, std::string_view(spelling));
   if (qual_name.empty()) {
@@ -1312,6 +1320,9 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
     ins.bind(4, std::string_view(display_name));
   }
   ins.bind(5, std::string_view(kind));
+  bind_opt(ins, 6, decl_file_id);
+  bind_opt(ins, 7, decl_line);
+  bind_opt(ins, 8, decl_col);
   ins.step_done();
   auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
   sel.bind(1, std::string_view(usr));

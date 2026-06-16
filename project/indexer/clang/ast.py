@@ -420,6 +420,32 @@ def _emit_type_use(db: Storage, src_id: int, ctype: cx.Type, file_id: int,
                          conditional=conditional)
 
 
+def _ref_decl_loc(
+    db: Storage, ref: cx.Cursor
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Resolve a reference cursor's declaration site to (file_id, line, col).
+
+    The target of a mint (callee/base/override/primary) carries a real source
+    location even when its definition body is never separately indexed -- e.g.
+    an implicit/defaulted ctor is anchored to its `struct` line. Recording it
+    here is what lets `chain::D::D` resolve to `chain.hpp:25` instead of
+    `@<no-location>`.
+
+    Lookup-only (db.get_file, never add_file_path): a target in a file no
+    registered component owns -- system/stdlib headers -- yields (None, None,
+    None) and correctly stays location-less. No stdlib special-casing needed;
+    membership falls out of whether the file is in the index.
+    """
+    loc = ref.location
+    f = loc.file
+    if f is None:
+        return None, None, None
+    row = db.get_file(f.name)
+    if row is None:
+        return None, None, None
+    return row.id, loc.line, loc.column
+
+
 def _recover_overloaded_callee(call_cursor: cx.Cursor) -> Optional[cx.Cursor]:
     """Recover the callee of a CALL_EXPR whose ``referenced`` is None.
 
@@ -482,10 +508,12 @@ def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                         _dst = db.lookup_symbol(callee_usr)
                         dst_id = _dst.id if _dst is not None else None
                     else:
+                        _dfid, _dln, _dcol = _ref_decl_loc(db, ref)
                         dst_id = db.mint_symbol_id(
                             callee_usr, ref.spelling,
                             _qualified_name(ref), ref.displayname,
-                            _KIND_MAP.get(ref.kind, "function"))
+                            _KIND_MAP.get(ref.kind, "function"),
+                            decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
                     if dst_id is not None:
                         edge_id = db.add_edge(src_id, dst_id, 1)  # calls
                         loc = child.location
@@ -699,9 +727,11 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             src_sym = db.lookup_symbol(derived_usr)
             if src_sym is None:
                 continue
+            _dfid, _dln, _dcol = _ref_decl_loc(db, ref)
             dst_id = db.mint_symbol_id(
                 base_usr, ref.spelling, _qualified_name(ref), ref.displayname,
-                _KIND_MAP.get(ref.kind, "function"))
+                _KIND_MAP.get(ref.kind, "function"),
+                decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
             acc_map = {
                 cx.AccessSpecifier.PUBLIC: 1,
                 cx.AccessSpecifier.PROTECTED: 2,
@@ -757,9 +787,11 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                     ov_usr = ov.get_usr()
                     if not ov_usr:
                         continue
+                    _dfid, _dln, _dcol = _ref_decl_loc(db, ov)
                     dst_ov = db.mint_symbol_id(
                         ov_usr, ov.spelling, _qualified_name(ov), ov.displayname,
-                        _KIND_MAP.get(ov.kind, "function"))
+                        _KIND_MAP.get(ov.kind, "function"),
+                        decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
                     db.add_edge(src_sym.id, dst_ov, 6)  # overrides
             continue
 
@@ -804,9 +836,11 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             spec_sym = db.lookup_symbol(spec_usr)
             if spec_sym is None:
                 continue
+            _dfid, _dln, _dcol = _ref_decl_loc(db, primary)
             prim_id = db.mint_symbol_id(
                 prim_usr, primary.spelling, _qualified_name(primary),
-                primary.displayname, _KIND_MAP.get(primary.kind, "function"))
+                primary.displayname, _KIND_MAP.get(primary.kind, "function"),
+                decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
             db.add_edge(spec_sym.id, prim_id, 4)  # specializes
 
             # template_arg rows
