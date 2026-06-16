@@ -292,6 +292,74 @@ class TemplateArg:
         return f"TemplateArg(#{self.position} {self.kind_name} {what})"
 
 
+@dataclass(frozen=True)
+class Selection:
+    """One entry of a virtual call's selection map: if the receiver's run-time
+    type is ``selecting_type``, the call dispatches to ``target``.
+
+    ``inherited`` is False for a type that declares its own override, True for a
+    subtype that inherits an ancestor's override (only produced when
+    ``dispatch_selection(close_subtypes=True)``)."""
+    selecting_type: Optional[Sym]
+    target: Sym
+    inherited: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selecting_type": (self.selecting_type.to_dict()
+                               if self.selecting_type is not None else None),
+            "target": self.target.to_dict() if self.target is not None else None,
+            "inherited": self.inherited,
+        }
+
+    def __repr__(self) -> str:
+        st = self.selecting_type.name if self.selecting_type else "?"
+        tg = self.target.name if self.target else "?"
+        tag = " inherited" if self.inherited else ""
+        return f"Selection({st} -> {tg}{tag})"
+
+
+@dataclass(frozen=True)
+class DispatchSite:
+    """The Phase-1 over-approximation of one virtual call.
+
+    ``declared_target`` is the statically-recorded callee (what the `calls` edge
+    points at); ``receiver_static_type`` is the class that declares it.
+    ``candidates`` is the full selection map -- every concrete type the call
+    could land on, paired with its target. ``prunable`` is True when Phase 2 may
+    safely narrow this site; when False, ``unprunable_reasons`` says why it must
+    stay fully expanded ('not-virtual' | 'no-receiver-type' | 'target-stub' |
+    'pure-no-targets' | 'unknown-symbol'). Phase 1 performs NO pruning -- it only
+    records this data so Phase 2 can act on it later."""
+    receiver_static_type: Optional[Sym]
+    declared_target: Optional[Sym]
+    candidates: tuple[Selection, ...] = ()
+    prunable: bool = False
+    unprunable_reasons: tuple[str, ...] = ()
+
+    @property
+    def targets(self) -> tuple[Sym, ...]:
+        """Every concrete target method this call could reach."""
+        return tuple(c.target for c in self.candidates)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "receiver_static_type": (self.receiver_static_type.to_dict()
+                                     if self.receiver_static_type else None),
+            "declared_target": (self.declared_target.to_dict()
+                                 if self.declared_target else None),
+            "candidates": [c.to_dict() for c in self.candidates],
+            "prunable": self.prunable,
+            "unprunable_reasons": list(self.unprunable_reasons),
+        }
+
+    def __repr__(self) -> str:
+        tg = self.declared_target.name if self.declared_target else "?"
+        state = "prunable" if self.prunable else \
+            f"unprunable({','.join(self.unprunable_reasons)})"
+        return f"DispatchSite({tg}: {len(self.candidates)} candidate(s), {state})"
+
+
 # --------------------------------------------------------------------------- #
 # The query handle.
 # --------------------------------------------------------------------------- #
@@ -883,6 +951,94 @@ class GraphQuery:
         """Callees of `fn` that are virtual -- the dispatch points inside it.
         Pair with dispatch_targets() to expand each into its real target set."""
         return [c for c in self.callees(fn) if self.is_virtual_method(c)]
+
+    # ===================================================================== #
+    # 4b. DEVIRTUALIZATION — PHASE 1 (selection maps, NO pruning)
+    # ===================================================================== #
+
+    def dispatch_selection(self, method, *,
+                           close_subtypes: bool = False) -> DispatchSite:
+        """The Phase-1 over-approximation for a virtual call whose static callee
+        is `method`: the full selection map (concrete-type -> target) plus a
+        prunable flag for Phase 2.
+
+        `method` is the statically-recorded callee (e.g. the `A::rank` a `calls`
+        edge points at). Returns a :class:`DispatchSite`. The result is purely
+        derived from existing edges (overrides/inherits + dispatch_targets) -- no
+        schema change. With `close_subtypes=True`, every subtype of the receiver
+        that does NOT declare its own override also gets a candidate
+        (inherited=True) mapping it to the ancestor override it would inherit.
+
+        A site is flagged UNPRUNABLE (prunable=False) -- meaning Phase 2 must keep
+        it fully expanded -- when its candidate set cannot be trusted as complete:
+        'not-virtual' (the callee isn't a dispatch point), 'no-receiver-type'
+        (the declared receiver class isn't resolvable), 'target-stub' (a target
+        is an unindexed stub, so the hierarchy is open), 'pure-no-targets' (a
+        pure base with no indexed override), or 'unknown-symbol'."""
+        sym = self.get(method)
+        if sym is None:
+            return DispatchSite(None, None, (), False, ("unknown-symbol",))
+
+        # A non-virtual callee is a fully static call: nothing to devirtualize.
+        if not self.is_virtual_method(sym):
+            owner = self.get(sym.parent_usr) if sym.parent_usr else None
+            return DispatchSite(owner, sym, (), False, ("not-virtual",))
+
+        reasons: list[str] = []
+        receiver = self.get(sym.parent_usr) if sym.parent_usr else None
+        if receiver is None:
+            reasons.append("no-receiver-type")
+
+        targets = self.dispatch_targets(sym)
+        candidates: list[Selection] = []
+        owner_target: dict[int, Sym] = {}   # selecting-class id -> its target
+        for t in targets:
+            owner = self.get(t.parent_usr) if t.parent_usr else None
+            candidates.append(Selection(selecting_type=owner, target=t))
+            if owner is not None:
+                owner_target[owner.id] = t
+
+        if any(t.is_stub for t in targets):
+            reasons.append("target-stub")
+        if not candidates:
+            reasons.append("pure-no-targets")
+
+        if close_subtypes and receiver is not None:
+            for sub in self.subclasses(receiver, direct=False):
+                if sub.id in owner_target:
+                    continue                # declares its own override already
+                inherited = self._nearest_owned_target(sub.id, owner_target)
+                if inherited is not None:
+                    candidates.append(Selection(selecting_type=sub,
+                                                 target=inherited,
+                                                 inherited=True))
+
+        return DispatchSite(receiver, sym, tuple(candidates),
+                            not reasons, tuple(reasons))
+
+    def _nearest_owned_target(self, subtype_id: int,
+                              owner_target: dict[int, Sym]) -> Optional[Sym]:
+        """Walk up `subtype_id`'s bases (nearest first) to the first class that
+        owns a dispatch target, and return that target. None if none found."""
+        seen = {subtype_id}
+        frontier = [subtype_id]
+        while frontier:
+            nxt = []
+            for cid in frontier:
+                for base in self.bases(cid, direct=True):
+                    if base.id in owner_target:
+                        return owner_target[base.id]
+                    if base.id not in seen:
+                        seen.add(base.id)
+                        nxt.append(base.id)
+            frontier = nxt
+        return None
+
+    def virtual_call_sites(self, fn) -> list[DispatchSite]:
+        """One :class:`DispatchSite` per VIRTUAL callee of `fn` (its dynamic
+        dispatch points), in callee order. Non-virtual (fully static) callees are
+        omitted; a function with no virtual callees returns []."""
+        return [self.dispatch_selection(c) for c in self.virtual_callees(fn)]
 
     # ===================================================================== #
     # Introspection
