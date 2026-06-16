@@ -50,6 +50,8 @@ struct Symbol {
   std::optional<int64_t> decl_file_id;
   std::optional<int64_t> decl_line;
   std::optional<int64_t> decl_col;
+  std::optional<std::string> decl_path; // raw decl path for an unregistered
+                                        // (system/stdlib) target -- see schema
   bool is_definition = false;
   bool is_pure = false;
   std::optional<std::string> linkage;

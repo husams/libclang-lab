@@ -422,8 +422,8 @@ def _emit_type_use(db: Storage, src_id: int, ctype: cx.Type, file_id: int,
 
 def _ref_decl_loc(
     db: Storage, ref: cx.Cursor
-) -> tuple[Optional[int], Optional[int], Optional[int]]:
-    """Resolve a reference cursor's declaration site to (file_id, line, col).
+) -> tuple[Optional[int], Optional[int], Optional[int], Optional[str]]:
+    """Resolve a reference cursor's decl site to (file_id, line, col, raw_path).
 
     The target of a mint (callee/base/override/primary) carries a real source
     location even when its definition body is never separately indexed -- e.g.
@@ -431,19 +431,22 @@ def _ref_decl_loc(
     here is what lets `chain::D::D` resolve to `chain.hpp:25` instead of
     `@<no-location>`.
 
-    Lookup-only (db.get_file, never add_file_path): a target in a file no
-    registered component owns -- system/stdlib headers -- yields (None, None,
-    None) and correctly stays location-less. No stdlib special-casing needed;
-    membership falls out of whether the file is in the index.
+    Lookup-only for the registered file id (db.get_file, never add_file_path).
+    A target in a file no registered component owns -- system/stdlib headers --
+    has no `file` row, so `file_id` is None; but the AST still knows where it is,
+    so we return the raw path as the 4th element (with line/col). The stub then
+    keeps that location instead of going `@<no-location>` (e.g. a libstdc++
+    `__normal_iterator::operator*` shows `stl_iterator.h:NNNN`). Only a cursor
+    with no source location at all (implicit/builtin) returns all-None.
     """
     loc = ref.location
     f = loc.file
     if f is None:
-        return None, None, None
+        return None, None, None, None
     row = db.get_file(f.name)
-    if row is None:
-        return None, None, None
-    return row.id, loc.line, loc.column
+    if row is None:                       # unregistered (system/stdlib) header
+        return None, loc.line, loc.column, f.name
+    return row.id, loc.line, loc.column, None
 
 
 def _recover_overloaded_callee(call_cursor: cx.Cursor) -> Optional[cx.Cursor]:
@@ -508,12 +511,13 @@ def _body_descent(db: Storage, fn_cursor: cx.Cursor,
                         _dst = db.lookup_symbol(callee_usr)
                         dst_id = _dst.id if _dst is not None else None
                     else:
-                        _dfid, _dln, _dcol = _ref_decl_loc(db, ref)
+                        _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
                         dst_id = db.mint_symbol_id(
                             callee_usr, ref.spelling,
                             _qualified_name(ref), ref.displayname,
                             _KIND_MAP.get(ref.kind, "function"),
-                            decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
+                            decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol,
+                            decl_path=_dpath)
                     if dst_id is not None:
                         edge_id = db.add_edge(src_id, dst_id, 1)  # calls
                         loc = child.location
@@ -727,11 +731,12 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             src_sym = db.lookup_symbol(derived_usr)
             if src_sym is None:
                 continue
-            _dfid, _dln, _dcol = _ref_decl_loc(db, ref)
+            _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
             dst_id = db.mint_symbol_id(
                 base_usr, ref.spelling, _qualified_name(ref), ref.displayname,
                 _KIND_MAP.get(ref.kind, "function"),
-                decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
+                decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol,
+                decl_path=_dpath)
             acc_map = {
                 cx.AccessSpecifier.PUBLIC: 1,
                 cx.AccessSpecifier.PROTECTED: 2,
@@ -787,11 +792,12 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                     ov_usr = ov.get_usr()
                     if not ov_usr:
                         continue
-                    _dfid, _dln, _dcol = _ref_decl_loc(db, ov)
+                    _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ov)
                     dst_ov = db.mint_symbol_id(
                         ov_usr, ov.spelling, _qualified_name(ov), ov.displayname,
                         _KIND_MAP.get(ov.kind, "function"),
-                        decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
+                        decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol,
+                        decl_path=_dpath)
                     db.add_edge(src_sym.id, dst_ov, 6)  # overrides
             continue
 
@@ -836,11 +842,12 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
             spec_sym = db.lookup_symbol(spec_usr)
             if spec_sym is None:
                 continue
-            _dfid, _dln, _dcol = _ref_decl_loc(db, primary)
+            _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, primary)
             prim_id = db.mint_symbol_id(
                 prim_usr, primary.spelling, _qualified_name(primary),
                 primary.displayname, _KIND_MAP.get(primary.kind, "function"),
-                decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol)
+                decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol,
+                decl_path=_dpath)
             db.add_edge(spec_sym.id, prim_id, 4)  # specializes
 
             # template_arg rows

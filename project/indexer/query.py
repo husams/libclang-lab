@@ -114,6 +114,9 @@ class Sym:
     file: Optional[str]       # abs path of best-known location, or None (stub)
     line: Optional[int]
     col: Optional[int]
+    external: bool = False    # `file` is a raw path in an UNREGISTERED file
+                              # (system/stdlib header no component owns), not a
+                              # location in any indexed file -- see is_stub
 
     @property
     def loc(self) -> str:
@@ -126,11 +129,14 @@ class Sym:
     def is_stub(self) -> bool:
         """A minted placeholder for a target that was never indexed: a call/base
         /override/primary USR anchored by an edge but with no definition or
-        declaration in any indexed file. Such a row has NO location at all
-        (mint sets none; add_symbol always sets at least a decl site), so the
-        absence of a location is the robust signal. NOT keyed on spelling --
-        stubs are minted NAMED from the reference cursor."""
-        return self.file is None and not self.resolved
+        declaration in any *indexed* file. Keyed on the absence of a registered
+        location plus resolved=0: a row is a stub when it is unresolved AND it
+        has no location in an indexed file -- either none at all, or only an
+        `external` raw path (a system/stdlib target whose file no component
+        owns). The external path lets the stub PRINT a location (e.g.
+        `stl_iterator.h:NNNN`) without making it a real indexed symbol. NOT keyed
+        on spelling -- stubs are minted NAMED from the reference cursor."""
+        return not self.resolved and (self.file is None or self.external)
 
     def to_dict(self) -> dict[str, Any]:
         """Stable JSON-serializable view. Identical-by-spec to the C++ port."""
@@ -234,7 +240,7 @@ class Site:
 _SYM_COLS = (
     "s.id, s.usr, s.spelling, s.qual_name, s.kind, s.type_info, "
     "s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, s.decl_col, "
-    "s.is_definition, s.is_pure, s.access, s.parent_usr, s.resolved"
+    "s.decl_path, s.is_definition, s.is_pure, s.access, s.parent_usr, s.resolved"
 )
 
 
@@ -348,14 +354,22 @@ class GraphQuery:
         fid, line, col = r["file_id"], r["line"], r["col"]
         if fid is None:                       # decl-only: fall back to decl site
             fid, line, col = r["decl_file_id"], r["decl_line"], r["decl_col"]
-        path, comp = files.get(fid, (None, None)) if fid is not None else (None, None)
+        if fid is not None:
+            path, comp = files.get(fid, (None, None))
+            external = False
+        else:
+            # No registered location. A stub for a target in an unregistered
+            # (system/stdlib) file still carries the raw decl path + line/col.
+            path, comp = r["decl_path"], None
+            line, col = r["decl_line"], r["decl_col"]
+            external = path is not None
         return Sym(
             id=r["id"], usr=r["usr"], spelling=r["spelling"],
             name=r["qual_name"] or r["spelling"], kind=r["kind"],
             type_info=r["type_info"], is_definition=bool(r["is_definition"]),
             is_pure=bool(r["is_pure"]), access=r["access"],
             parent_usr=r["parent_usr"], resolved=bool(r["resolved"]),
-            component=comp, file=path, line=line, col=col,
+            component=comp, file=path, line=line, col=col, external=external,
         )
 
     @staticmethod
@@ -403,8 +417,8 @@ class GraphQuery:
         """
         sid = self._resolve_id(sym)
         r = self._c.execute(
-            "SELECT file_id, line, col, decl_file_id, decl_line, decl_col "
-            "FROM symbol s WHERE s.id = ?", (sid,)
+            "SELECT file_id, line, col, decl_file_id, decl_line, decl_col, "
+            "decl_path FROM symbol s WHERE s.id = ?", (sid,)
         ).fetchone()
         if r is None:
             return None, None
@@ -416,8 +430,11 @@ class GraphQuery:
             path = files.get(fid, (None, None))[0]
             return (path, line, col)
 
-        return (_loc(r["file_id"], r["line"], r["col"]),
-                _loc(r["decl_file_id"], r["decl_line"], r["decl_col"]))
+        decl = _loc(r["decl_file_id"], r["decl_line"], r["decl_col"])
+        if decl is None and r["decl_path"] is not None:
+            # external/unregistered (system/stdlib) decl: raw path, no file row
+            decl = (r["decl_path"], r["decl_line"], r["decl_col"])
+        return (_loc(r["file_id"], r["line"], r["col"]), decl)
 
     def find(self, pattern: str, kind: Optional[str] = None,
              limit: int = 50) -> list[Sym]:

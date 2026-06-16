@@ -297,6 +297,52 @@ TEST_CASE("T3 boundary: stub minted with kind=function passes CHECK constraint")
   }
 }
 
+TEST_CASE("T3 decl_path: stub for an unregistered (system/stdlib) target is "
+          "LOCATED but still a stub") {
+  Storage db(":memory:");
+  auto &raw = db.raw_db();
+
+  // A libstdc++ operator* lives in a header no component owns -> no file row,
+  // but the AST knows the path. The mint records it as decl_path.
+  const std::string usr = "c:@N@__gnu_cxx@S@__normal_iterator@F@operator*#1";
+  const int64_t id = db.mint_symbol_id(
+      usr, "operator*", "__gnu_cxx::__normal_iterator::operator*",
+      "operator*()", "method", std::nullopt, 1234, 7,
+      "/usr/include/c++/13/bits/stl_iterator.h");
+  REQUIRE(id > 0);
+
+  auto st = raw.prepare("SELECT decl_file_id, file_id, decl_path, decl_line, "
+                        "decl_col, resolved FROM symbol WHERE id=?");
+  st.bind(1, id);
+  REQUIRE(st.step());
+  CHECK(st.col_is_null(0));                                    // no file row
+  CHECK(st.col_is_null(1));
+  CHECK(st.col_text(2) == "/usr/include/c++/13/bits/stl_iterator.h");
+  CHECK(st.col_int64(3) == 1234);
+  CHECK(st.col_int64(4) == 7);
+  CHECK(st.col_int64(5) == 0);                                // still a stub
+
+  // It still counts as a still-stub in resolve_pass (decl_path is not a
+  // registered location): file_id IS NULL AND decl_file_id IS NULL.
+  CHECK(db.resolve_pass() == 1);
+}
+
+TEST_CASE("T3 decl_path COALESCE: a repeat mint never clobbers a recorded "
+          "external path") {
+  Storage db(":memory:");
+  auto &raw = db.raw_db();
+  const std::string usr = "c:@F@ext";
+  db.mint_symbol_id(usr, "ext", "ext", "", "function", std::nullopt, 5, 1,
+                    "/usr/include/x.h");
+  db.mint_symbol_id(usr, "ext", "ext", "", "function", std::nullopt, 99, 9,
+                    "/wrong/path.h"); // must NOT clobber
+  auto st = raw.prepare("SELECT decl_path, decl_line FROM symbol WHERE usr=?");
+  st.bind(1, std::string_view(usr));
+  REQUIRE(st.step());
+  CHECK(st.col_text(0) == "/usr/include/x.h");
+  CHECK(st.col_int64(1) == 5);
+}
+
 // ---------------------------------------------------------------------------
 // T4 — template_arg ref_id joins back to a real symbol
 // ---------------------------------------------------------------------------
