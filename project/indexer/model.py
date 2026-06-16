@@ -45,8 +45,9 @@ Fidelity notes (thin layer, no schema change):
 from __future__ import annotations
 
 import re
+from collections import deque
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Iterator, Optional, Sequence
 
 from .query import GraphQuery, Site, Sym, open_query
 
@@ -371,6 +372,45 @@ class Callable(Entity):
     def callees(self, limit: int = 500) -> list["Entity"]:
         """Entities this one calls."""
         return self._cb._wrap_all(self._cb.graph.callees(self.sym, limit=limit))
+
+    def callgraph(self, depth: Optional[int] = None,
+                  *, fanout: int = 500) -> "Iterator[tuple[Entity, int]]":
+        """Lazily walk the outbound call graph rooted at this callable.
+
+        A *generator* (nothing is computed until you iterate, and a node is
+        expanded only once you consume past it). It yields ``(callee, depth)``
+        pairs in breadth-first order: every callable transitively reached from
+        this one, each surfaced once -- the first, shallowest time it is seen --
+        paired with its distance in call edges from the root (direct callees are
+        depth 1)::
+
+            for callee, depth in fn.callgraph():          # unbounded
+                ...
+            for callee, depth in fn.callgraph(depth=10):  # at most 10 levels
+                ...
+
+        By default the walk is **unbounded**: it runs until every remaining
+        frontier symbol is a leaf -- an external/unresolved (stub) symbol, or
+        any callable that calls nothing further. Each entity is visited at most
+        once, so cycles and recursion terminate naturally. Pass ``depth=N`` to
+        stop expanding after N levels.
+
+        ``fanout`` caps the callees expanded per node (a guard against
+        pathological nodes; default 500)."""
+        seen = {self.id}
+        frontier: deque[tuple[Entity, int]] = deque([(self, 0)])
+        while frontier:
+            node, d = frontier.popleft()
+            if depth is not None and d >= depth:
+                continue
+            if not isinstance(node, Callable):
+                continue          # a leaf the call edge points at is not callable
+            for callee in node.callees(limit=fanout):
+                if callee.id in seen:
+                    continue
+                seen.add(callee.id)
+                yield callee, d + 1
+                frontier.append((callee, d + 1))
 
 
 class Function(Callable):
