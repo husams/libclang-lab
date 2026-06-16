@@ -48,10 +48,12 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Sequence
 
-from .query import Edge, GraphQuery, Site, Sym, open_query
+from .query import (Edge, GraphQuery, Site, Sym, TemplateArg, TemplateParam,
+                    open_query)
 
 __all__ = [
     "CodeBase", "open_codebase", "Location", "Type", "Reference",
+    "TemplateParam", "TemplateArg",
     "Entity", "Callable", "Function", "Method", "Constructor", "Destructor",
     "Record", "Class", "Field", "Enum", "EnumConstant", "Typedef",
     "Namespace", "Variable", "Macro", "FunctionTemplate", "ClassTemplate",
@@ -498,6 +500,14 @@ class Record(Entity):
         return self.sym.access
 
     @property
+    def template_arguments(self) -> list[TemplateArg]:
+        """The concrete template arguments this record binds, when it is a
+        specialization or an instantiation of a class template (e.g.
+        ``[TemplateArg(#0 type bool)]`` for ``Wrapper<bool>``). Empty for a
+        plain, non-templated record."""
+        return self._cb.graph.template_args(self.sym)
+
+    @property
     def fields(self) -> list[Field]:
         """Data members (fields)."""
         return [e for e in self._members() if isinstance(e, Field)]
@@ -638,18 +648,47 @@ class Macro(Entity):
 class _TemplateMixin:
     """Shared specialization/instantiation traversal for templated entities."""
 
+    @property
+    def parameters(self: Entity) -> list[TemplateParam]:  # type: ignore[misc]
+        """The formal template parameters of this template, in declaration order
+        (e.g. ``[TemplateParam(#0 type T)]`` for ``template <class T>``)."""
+        return self._cb.graph.template_params(self.sym)
+
     def specializations(self: Entity) -> list[Entity]:  # type: ignore[misc]
         """Explicit/partial specializations of this template (incoming
-        ``specializes``)."""
-        return self._cb._wrap_all(
-            self._cb.graph.neighbors(self.sym, kinds=("specializes",),
-                                     direction="in"))
+        ``specializes``) -- e.g. ``template <> class Wrapper<bool> {...}``.
+
+        Each specialization is a :class:`Record`; use its ``template_arguments``
+        to see what it specializes on."""
+        return [e for e in self._cb._wrap_all(
+                    self._cb.graph.neighbors(self.sym, kinds=("specializes",),
+                                             direction="in"))
+                if isinstance(e, Record)]
 
     def instantiations(self: Entity) -> list[Entity]:  # type: ignore[misc]
-        """Concrete instantiations of this template (incoming ``instantiates``)."""
-        return self._cb._wrap_all(
-            self._cb.graph.neighbors(self.sym, kinds=("instantiates",),
-                                     direction="in"))
+        """Concrete instantiations of this template -- the instance *types*
+        (e.g. ``template class Wrapper<int>;`` yields the ``Wrapper<int>``
+        record), NOT the functions that trigger an instantiation.
+
+        Incoming ``instantiates`` edges have two kinds of source: an explicit
+        instantiation's instance record, and a function that instantiates the
+        template by using it (``Wrapper<int> w;`` inside a body). This returns
+        only the former; use :meth:`instantiation_sites` for the latter. Each
+        instance is a :class:`Record` whose ``template_arguments`` give the
+        concrete bindings."""
+        return [e for e in self._cb._wrap_all(
+                    self._cb.graph.neighbors(self.sym, kinds=("instantiates",),
+                                             direction="in"))
+                if isinstance(e, Record)]
+
+    def instantiation_sites(self: Entity) -> list[Entity]:  # type: ignore[misc]
+        """Functions that instantiate this template by using it in their body
+        (incoming ``instantiates`` whose source is a callable). Pair with
+        :meth:`instantiations` for the concrete instance types."""
+        return [e for e in self._cb._wrap_all(
+                    self._cb.graph.neighbors(self.sym, kinds=("instantiates",),
+                                             direction="in"))
+                if isinstance(e, Callable)]
 
 
 class FunctionTemplate(Callable, _TemplateMixin):

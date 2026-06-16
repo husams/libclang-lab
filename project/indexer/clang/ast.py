@@ -188,6 +188,33 @@ def _qualified_name(cursor: cx.Cursor) -> str:
     return "::".join(reversed(parts))
 
 
+def _is_explicit_instantiation(cursor: cx.Cursor) -> bool:
+    """True when a STRUCT/CLASS_DECL cursor that has a specialized template is an
+    *explicit instantiation* (``template class Foo<int>;``) rather than an
+    *explicit specialization* (``template <> class Foo<bool> { ... };``).
+
+    Both surface as a CLASS_DECL whose ``clang_getSpecializedCursorTemplate``
+    returns the primary, and both report ``is_definition() == True``, so the
+    stable libclang C API cannot tell them apart directly. The written syntax
+    can: an explicit specialization begins ``template <>`` (empty angle
+    brackets), an explicit instantiation begins ``template class`` /
+    ``template struct`` (optionally after ``extern``). We inspect the leading
+    tokens of the cursor's extent: the token immediately after the ``template``
+    keyword is ``class``/``struct`` for an instantiation and ``<`` for a
+    specialization."""
+    try:
+        toks = [t.spelling for t in cursor.get_tokens()]
+    except Exception:  # pragma: no cover - tokenization failure is non-fatal
+        return False
+    for i, t in enumerate(toks):
+        if t == "template":
+            nxt = toks[i + 1] if i + 1 < len(toks) else ""
+            return nxt in ("class", "struct")
+        if t in ("class", "struct"):
+            break
+    return False
+
+
 def _to_symbol(cursor: cx.Cursor, file_id: int) -> Symbol | None:
     """Storage Symbol for a cursor, or None if the cursor is not indexable."""
     kind = _KIND_MAP.get(cursor.kind)
@@ -848,9 +875,19 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                 primary.displayname, _KIND_MAP.get(primary.kind, "function"),
                 decl_file_id=_dfid, decl_line=_dln, decl_col=_dcol,
                 decl_path=_dpath)
-            db.add_edge(spec_sym.id, prim_id, 4)  # specializes
+            # An explicit instantiation (`template class Foo<int>;`) is a concrete
+            # INSTANCE of the template, not a specialization of it: record it as
+            # `instantiates` (kind=5, instance -> primary) so it surfaces under
+            # ClassTemplate.instantiations(). A true explicit specialization
+            # (`template <> class Foo<bool> {...}`) stays `specializes` (kind=4).
+            edge_kind = 5 if _is_explicit_instantiation(cursor) else 4
+            db.add_edge(spec_sym.id, prim_id, edge_kind)
 
-            # template_arg rows
+            # template_arg rows. For TYPE args we always store the type spelling
+            # in `literal` (e.g. 'bool', 'int') so the binding is distinguishable
+            # even when the arg is a builtin with no declaration to resolve a
+            # ref_id from -- the previous code left such rows with neither ref_id
+            # nor literal, making Foo<bool> and Foo<int> indistinguishable.
             nargs = cursor.get_num_template_arguments()
             for ai in range(nargs if nargs >= 0 else 0):
                 tak = cursor.get_template_argument_kind(ai)
@@ -865,7 +902,8 @@ def _index_edges_notxn(db: Storage, tu: cx.TranslationUnit, filename: str,
                             rsym = db.lookup_symbol(ref_usr)
                             if rsym is not None:
                                 ref_id = rsym.id
-                    db.add_template_arg(spec_sym.id, ai, 1, ref_id=ref_id)
+                    db.add_template_arg(spec_sym.id, ai, 1, ref_id=ref_id,
+                                        literal=arg_type.spelling or None)
                 elif tak == cx.TemplateArgumentKind.INTEGRAL:
                     literal = str(cursor.get_template_argument_value(ai))
                     db.add_template_arg(spec_sym.id, ai, 2, literal=literal)
