@@ -774,9 +774,19 @@ def test_p3_16_no_caller_is_top(tmp_path):
 # ---- P3-17 transitive cross-TU ----
 
 
-def test_p3_17_transitive_chain(tmp_path):
-    """wrapper → dispatch_param → a.rank(); wrapper's caller passes B.
-    Closed-world narrows dispatch_param's param through the chain."""
+def test_p3_17_transitive_forwarding_is_conservative_top(tmp_path):
+    """Transitive param forwarding (wrapper forwards ITS OWN param to a callee)
+    is conservatively ⊤ / KEEP_ALL — SOUND, not narrowed.
+
+    A caller that forwards one of its own parameters cannot be soundly chased
+    into its callers: param ordinals are not persisted (parameters are not
+    indexed as symbols, and only receiver-params carry recv_param_pos), so the
+    forwarded param cannot be mapped to its ordinal in the caller's signature.
+    The earlier outgoing-arg-position proxy was UNSOUND under reordered
+    forwarding (it dropped the actually-called target), so transitive forwarding
+    now stops at ⊤.  (The DIRECT cross-TU case — a caller passing a value
+    local / construct — still narrows; see P3-12.)
+    """
     db, db_path = _make_db(tmp_path)
     comp = db.add_component("chain", str(tmp_path / "repo"))
     root = db.add_directory(comp, "")
@@ -801,13 +811,14 @@ def test_p3_17_transitive_chain(tmp_path):
             recv_param_pos=0,
         )
 
-    # wrapper(A& a) calls dispatch_param(a) passing a as arg[0] local
+    # wrapper(A& a) forwards its own param a (a ref param -> is_value unset) to
+    # dispatch_param(a). a is wrapper's PARAM, not a value local/construct.
     wrapper_id = _add_sym(db, "c:@F@wrapper17", "wrapper17", "function", cpp, 30)
     with db.transaction():
         e_w = db.add_edge(wrapper_id, dp_id, C["calls"], count=1)
         db.add_edge_site(e_w, cpp, 31, 5)
         db.add_call_arg(
-            e_w, cpp, 31, 5, 0, "local", type_usr="c:@S@A", decl_usr="a_parm17"
+            e_w, cpp, 31, 5, 0, "local", type_usr="c:@S@A", decl_usr="wrapper17_a"
         )
 
     # leaf caller passes construct B to wrapper
@@ -818,13 +829,76 @@ def test_p3_17_transitive_chain(tmp_path):
         db.add_call_arg(e_l, cpp, 41, 5, 0, "construct", type_usr="c:@S@B")
     db.close()
 
-    # dispatch_param17 narrows via the chain
     steps = _prune_steps(db_path, "c:@F@dispatch_param17", assume_cw=True)
-    # The transitive path: dispatch_param's arg[0] is local from wrapper,
-    # wrapper's arg[0] is local from leaf (construct B). Should narrow to B.
-    pruned_usrs = _pruned_target_usrs(steps)
-    assert "c:@S@B@F@rank#" in pruned_usrs, (
-        f"Expected B::rank in pruned targets, got {pruned_usrs}"
+    # SOUND: no narrowing through the forwarded param; the full {A,B,C,D}::rank
+    # set is kept and gamma_receiver stays None.
+    assert all(s.gamma_receiver is None for s in steps), (
+        f"transitive forwarding must not narrow, got "
+        f"{[s.gamma_receiver for s in steps]}"
+    )
+    rank_usrs = {s.callee.sym.usr for s in steps}
+    for t in ("A", "B", "C", "D"):
+        assert f"c:@S@{t}@F@rank#" in rank_usrs, f"{t}::rank must be kept (KEEP_ALL)"
+
+
+def test_p3_17b_reordered_forwarding_is_sound(tmp_path):
+    """Regression for the reordered-forwarding unsoundness (review finding F1).
+
+    callee(x, y){ x.rank(); }            # dispatch on x = callee param 0
+    wrapper(p, q){ callee(q, p); }        # REORDER: q -> callee arg0, p -> arg1
+    top(){ B b; D d; wrapper(b, d); }     # wrapper p=b(B) param0, q=d(D) param1
+
+    callee's x binds to q = d = D.  The buggy outgoing-arg-position proxy used to
+    return {B} (dropping the real target D::rank).  Sound behaviour: never narrow
+    to {B}; KEEP_ALL (⊤).  We assert D::rank (the truly-callable target) is NOT
+    dropped, and the result is the full set.
+    """
+    db, db_path = _make_db(tmp_path)
+    comp = db.add_component("chain", str(tmp_path / "repo"))
+    root = db.add_directory(comp, "")
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
+    C = EDGE_KINDS
+
+    # callee(x, y) dispatches on x (param 0)
+    callee_id = _add_sym(db, "c:@F@callee17b", "callee17b", "function", cpp, 50)
+    with db.transaction():
+        e_c = db.add_edge(callee_id, ids["A::rank"], C["calls"], count=1)
+        db.add_edge_site(
+            e_c, cpp, 51, 14,
+            recv_src_kind="local", recv_type_usr="c:@S@A",
+            recv_decl_usr="callee17b_x", recv_param_pos=0,
+        )
+
+    # wrapper(p, q) calls callee(q, p) — q (wrapper param 1) goes to callee arg 0
+    wrapper_id = _add_sym(db, "c:@F@wrapper17b", "wrapper17b", "function", cpp, 60)
+    with db.transaction():
+        e_w = db.add_edge(wrapper_id, callee_id, C["calls"], count=1)
+        db.add_edge_site(e_w, cpp, 61, 5)
+        # callee arg0 = q (wrapper's 2nd param), arg1 = p (wrapper's 1st param)
+        db.add_call_arg(e_w, cpp, 61, 5, 0, "local", type_usr="c:@S@A",
+                        decl_usr="wrapper17b_q")
+        db.add_call_arg(e_w, cpp, 61, 5, 1, "local", type_usr="c:@S@A",
+                        decl_usr="wrapper17b_p")
+
+    # top() passes B at wrapper arg0 (p) and D at wrapper arg1 (q)
+    top_id = _add_sym(db, "c:@F@top17b", "top17b", "function", cpp, 70)
+    with db.transaction():
+        e_t = db.add_edge(top_id, wrapper_id, C["calls"], count=1)
+        db.add_edge_site(e_t, cpp, 71, 5)
+        db.add_call_arg(e_t, cpp, 71, 5, 0, "construct", type_usr="c:@S@B")
+        db.add_call_arg(e_t, cpp, 71, 5, 1, "construct", type_usr="c:@S@D")
+    db.close()
+
+    steps = _prune_steps(db_path, "c:@F@callee17b", assume_cw=True)
+    rank_usrs = {s.callee.sym.usr for s in steps}
+    # MUST NOT have unsoundly narrowed to {B} (which would drop D::rank).
+    assert "c:@S@D@F@rank#" in rank_usrs, (
+        "UNSOUND: D::rank dropped — reordered forwarding mis-mapped the param"
+    )
+    assert all(s.gamma_receiver is None for s in steps), (
+        f"reordered forwarding must stay ⊤, got {[s.gamma_receiver for s in steps]}"
     )
 
 

@@ -822,12 +822,18 @@ class _GammaEngine:
                 arg.callee_usr,
                 arg.type_is_value,
             )
-            # transitive: a caller's arg is itself an unbound param -> recurse
-            if ts is TOP and arg.src_kind == "local" and arg.decl_usr:
-                t2 = self._closed_world_param_for_decl(
-                    cc.caller, arg.decl_usr, visited | {callee_usr}
-                )
-                ts = t2 if t2 is not None else TOP
+            # A directly-knowable caller arg narrows here: a value local/construct
+            # (`B b; f(b)`) resolves via _resolve_source's value shortcut. A
+            # caller that forwards one of ITS OWN parameters (a non-value ref/ptr
+            # param) resolves to TOP -- and we KEEP it TOP. We deliberately do
+            # NOT chase the forwarded param into the caller's callers: param
+            # ordinals are not stored (parameters are not indexed as symbols, and
+            # only receiver-params carry recv_param_pos), so a forwarded param
+            # cannot be soundly mapped to its ordinal in the caller's signature.
+            # The previous outgoing-arg-position proxy was UNSOUND under reordered
+            # forwarding (`wrapper(p,q){ callee(q,p); }` dropped the real target).
+            # Conservative TOP here is sound + monotone; full transitive precision
+            # is deferred until param ordinals are persisted (see design doc).
             if ts is TOP:
                 union = TOP
                 break
@@ -837,51 +843,6 @@ class _GammaEngine:
         )
         self._cw_memo[memo_key] = result
         return result
-
-    def _closed_world_param_for_decl(
-        self, caller: "Sym", decl_usr: str, visited: "frozenset[str]"
-    ) -> "_Top | frozenset[str] | None":
-        """Resolve a param's Γ by finding its position in ``caller`` and recursing.
-
-        ``decl_usr`` is the USR of a PARM_DECL or local VAR_DECL inside ``caller``
-        that was passed (as a ``local`` call_arg) to some callee we are analysing.
-        We need to know which position this param occupies in ``caller``'s parameter
-        list so that we can ask "what do *caller*'s callers pass at that position?"
-
-        Strategy: scan ``caller``'s OUTGOING call_arg rows for any arg whose
-        ``decl_usr`` equals the target.  The position of that arg in the outgoing
-        call is used as a proxy for the param's position inside ``caller``.  This is
-        exact for simple forwarding (``wrapper(A& a) { callee(a); }``) and
-        conservative (sounds) for reordered forwarding."""
-        callee_sym = self._g.get(caller.usr)
-        if callee_sym is None:
-            return TOP
-        memo_key = (caller.usr, decl_usr)
-        if memo_key in self._cw_memo:
-            return self._cw_memo[memo_key]
-        self._cw_memo[memo_key] = TOP  # in-flight sentinel
-
-        # Find the param position: look at caller's OUTGOING call_args for the
-        # arg that uses this decl_usr.  The arg.position in the outgoing call is
-        # used as a proxy for the param's position in caller's signature.
-        param_pos: Optional[int] = None
-        for edge in self._g._edges(
-            callee_sym, "out", ("calls",), 500, with_sites=False
-        ):
-            for arg_out in self._g.call_args(edge.edge_id):
-                if arg_out.decl_usr == decl_usr:
-                    param_pos = arg_out.position
-                    break
-            if param_pos is not None:
-                break
-
-        if param_pos is None:
-            self._cw_memo[memo_key] = TOP
-            return TOP
-
-        result = self._closed_world_param(caller.usr, param_pos, visited)
-        self._cw_memo[memo_key] = result if result is not None else TOP
-        return self._cw_memo[memo_key]
 
     # ------------------------------------------------------------------ #
     # Prune decision
