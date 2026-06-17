@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS edge_site (
     recv_type_usr TEXT,
     recv_decl_usr TEXT,
     recv_param_pos INTEGER,
+    recv_type_is_value INTEGER,          -- v11: receiver held by value (1) else 0/NULL
     PRIMARY KEY (edge_id, file_id, line, col)
 ) WITHOUT ROWID;
 
@@ -199,6 +200,7 @@ CREATE TABLE IF NOT EXISTS call_arg (
     type_usr   TEXT,
     decl_usr   TEXT,
     callee_usr TEXT,
+    type_is_value INTEGER,               -- v11: arg held by value (1) else 0/NULL
     PRIMARY KEY (edge_id, file_id, line, col, position)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
@@ -394,6 +396,21 @@ class Storage:
             # NOT EXISTS), run after _migrate(), so the migration only needs to
             # flip changed to bump the version -- identical to the v6->v7 graph
             # tables pattern.
+            changed = True
+        # v10 -> v11: value-ness booleans for exact-singleton Gamma narrowing.
+        # No backfill -- reindex repopulates; old rows read as NULL == not-value == TOP.
+        if "edge_site" in tables and "recv_type_is_value" not in escols:
+            self._conn.execute(
+                "ALTER TABLE edge_site ADD COLUMN recv_type_is_value INTEGER"
+            )
+            changed = True
+        cacols = (
+            {r[1] for r in self._conn.execute("PRAGMA table_info(call_arg)")}
+            if "call_arg" in tables
+            else set()
+        )
+        if "call_arg" in tables and "type_is_value" not in cacols:
+            self._conn.execute("ALTER TABLE call_arg ADD COLUMN type_is_value INTEGER")
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -1171,13 +1188,15 @@ class Storage:
         recv_type_usr: Optional[str] = None,
         recv_decl_usr: Optional[str] = None,
         recv_param_pos: Optional[int] = None,
+        recv_type_is_value: Optional[int] = None,
     ) -> None:
         """INSERT OR IGNORE an edge_site (PK collision = same site, harmless)."""
         self._conn.execute(
             "INSERT OR IGNORE INTO edge_site "
             "(edge_id, file_id, line, col, conditional, args_sig, "
-            " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+            " recv_type_is_value) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 edge_id,
                 file_id,
@@ -1189,6 +1208,7 @@ class Storage:
                 recv_type_usr,
                 recv_decl_usr,
                 recv_param_pos,
+                recv_type_is_value,
             ),
         )
 
@@ -1203,13 +1223,14 @@ class Storage:
         type_usr: Optional[str] = None,
         decl_usr: Optional[str] = None,
         callee_usr: Optional[str] = None,
+        type_is_value: Optional[int] = None,
     ) -> None:
         """INSERT OR IGNORE a call_arg row (PK collision = same arg, harmless)."""
         self._conn.execute(
             "INSERT OR IGNORE INTO call_arg "
             "(edge_id, file_id, line, col, position, src_kind, "
-            " type_usr, decl_usr, callee_usr) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " type_usr, decl_usr, callee_usr, type_is_value) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 edge_id,
                 file_id,
@@ -1220,6 +1241,7 @@ class Storage:
                 type_usr,
                 decl_usr,
                 callee_usr,
+                type_is_value,
             ),
         )
 

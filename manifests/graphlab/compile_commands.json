@@ -33,5 +33,15 @@
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
     "command": "c++ -std=c++17 -I. -c main.cpp -o main.o",
     "file": "main.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c devirt3.cpp -o devirt3.o",
+    "file": "devirt3.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c devirt3_caller.cpp -o devirt3_caller.o",
+    "file": "devirt3_caller.cpp"
   }
 ]

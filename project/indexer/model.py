@@ -535,15 +535,18 @@ class _GammaEngine:
     a dispatch site inside a given context.
     """
 
-    def __init__(self, cb: "CodeBase") -> None:
+    def __init__(self, cb: "CodeBase", assume_closed_world: bool = False) -> None:
         self._cb = cb
         self._g = cb.graph
+        self._cw = assume_closed_world
         # gamma[(ctx, decl_usr)] -> TypeSet
         self._gamma: dict[tuple, "_Top | frozenset[str]"] = {}
         # context (callee_id, param_sig) -> PENDING (in-flight) | result
         self._analysed: set[tuple] = set()
         # count distinct contexts analysed per callable USR (k-limit)
         self._ctx_count: dict[str, int] = {}
+        # Phase 3b: closed-world param-Γ memo keyed by (callee_usr, pos)
+        self._cw_memo: dict[tuple, "_Top | frozenset[str]"] = {}
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -611,28 +614,35 @@ class _GammaEngine:
         type_usr: Optional[str],
         decl_usr: Optional[str],
         callee_usr: Optional[str],
+        type_is_value: Optional[int] = None,
     ) -> "_Top | frozenset[str]":
         """Map a provenance record to a TypeSet in ctx."""
         if src_kind in (None, "literal", "unknown"):
             return TOP
         if src_kind == "construct":
             return frozenset({type_usr}) if type_usr else TOP
-        if src_kind in ("local", "this", "member", "global"):
+        if src_kind in ("member", "global"):
+            if type_is_value and type_usr:  # 3a: exact value singleton
+                return frozenset({type_usr})
             if decl_usr is None:
                 return TOP
-            key = (ctx, decl_usr)
-            val = self._gamma.get(key)
+            val = self._gamma.get((ctx, decl_usr))
+            return val if val is not None else TOP
+        if src_kind in ("local", "this"):
+            # 3a extension: a value-typed local has an exact concrete type.
+            # type_is_value=1 means the local variable holds T BY VALUE (not
+            # a reference/pointer), so its run-time type IS type_usr.
+            # This handles `B b; dispatch_param(b)` in cross-TU closed-world.
+            if type_is_value and type_usr:
+                return frozenset({type_usr})
+            if decl_usr is None:
+                return TOP
+            val = self._gamma.get((ctx, decl_usr))
             return val if val is not None else TOP
         if src_kind == "call_result":
-            if not callee_usr:
-                return TOP
-            callee = self._g.get(callee_usr)
-            if callee is None:
-                return TOP
-            # return type record: approximate as TOP (cross-TU, hard to know)
-            # A more precise implementation would look up the callee's return
-            # type symbol, but for Phase 2 we conservatively fall back.
-            return TOP
+            if type_is_value and type_usr:  # 3a: by-value return singleton
+                return frozenset({type_usr})
+            return TOP  # was unconditional TOP (Phase 2)
         return TOP
 
     def _param_sig(self, param_sets: list) -> tuple:
@@ -687,7 +697,12 @@ class _GammaEngine:
                 ts: "_Top | frozenset[str]" = frozenset()
                 for a in args_i:
                     a_ts = self._resolve_source(
-                        caller_ctx, a.src_kind, a.type_usr, a.decl_usr, a.callee_usr
+                        caller_ctx,
+                        a.src_kind,
+                        a.type_usr,
+                        a.decl_usr,
+                        a.callee_usr,
+                        a.type_is_value,
                     )
                     if a_ts is TOP:
                         ts = TOP
@@ -702,7 +717,12 @@ class _GammaEngine:
                 # Also seed decl_usr keys from each arg in this position.
                 for a in args_i:
                     a_ts2 = self._resolve_source(
-                        caller_ctx, a.src_kind, a.type_usr, a.decl_usr, a.callee_usr
+                        caller_ctx,
+                        a.src_kind,
+                        a.type_usr,
+                        a.decl_usr,
+                        a.callee_usr,
+                        a.type_is_value,
                     )
                     if a.decl_usr:
                         _join(self._gamma, (callee_ctx, a.decl_usr), a_ts2)
@@ -724,13 +744,22 @@ class _GammaEngine:
         """The TypeSet for a virtual call's receiver at ``site`` in ``ctx``.
 
         Lookup order (first hit wins):
+          0. 3a: value member/global/call_result receiver -> exact singleton.
           1. (ctx, recv_decl_usr)   — USR of the named local/param
           2. (ctx, recv_type_usr)   — static declared type USR
           3. (ctx, ("@pos", recv_param_pos))  — position-indexed binding from
              _bind_and_visit; fills the cross-function gap when decl_usr in the
              callee (a_parm_usr) differs from decl_usr in the caller (b_var_usr)
           4. construct shortcut     — recv_src_kind==construct -> {recv_type_usr}
+          5. 3b: closed-world cross-TU param union (when assume_closed_world).
         """
+        # 3a: value member/global/call_result receiver -> exact singleton.
+        if (
+            site.recv_type_is_value
+            and site.recv_src_kind in ("member", "global", "call_result")
+            and site.recv_type_usr
+        ):
+            return frozenset({site.recv_type_usr})
         if site.recv_decl_usr:
             val = self._gamma.get((ctx, site.recv_decl_usr))
             if val is not None:
@@ -749,7 +778,110 @@ class _GammaEngine:
         # Check if this is a construct site
         if site.recv_src_kind == "construct" and site.recv_type_usr:
             return frozenset({site.recv_type_usr})
+        # 3b: closed-world cross-TU param union (last resort, only when enabled).
+        if (
+            self._cw
+            and site.recv_src_kind == "local"
+            and site.recv_param_pos is not None
+        ):
+            cw = self._closed_world_param(ctx[0], site.recv_param_pos, frozenset())
+            if cw is not None:
+                return cw
         return TOP
+
+    def _closed_world_param(
+        self, callee_usr: str, pos: int, visited: "frozenset[str]"
+    ) -> "_Top | frozenset[str] | None":
+        """Monotone join of resolve_source(arg_pos) over ALL visible callers of
+        ``callee_usr``. Returns a frozenset (narrowed), TOP, or None (use TOP).
+        Sound only because the caller asserted assume_closed_world (the index is
+        whole-program + resolved)."""
+        if callee_usr in visited:  # in-flight cycle -> TOP
+            return TOP
+        memo_key = (callee_usr, pos)
+        if memo_key in self._cw_memo:
+            return self._cw_memo[memo_key]
+        callee = self._g.get(callee_usr)
+        if callee is None:
+            return TOP
+        self._cw_memo[memo_key] = TOP  # mark in-flight (breaks recursion)
+        union: "_Top | frozenset[str]" = frozenset()
+        saw_caller = False
+        for cc in self._g.call_sites_into(callee):
+            saw_caller = True
+            arg = next((a for a in cc.args if a.position == pos), None)
+            if arg is None:  # caller passes nothing knowable -> TOP
+                union = TOP
+                break
+            caller_ctx = (cc.caller.usr, ())
+            ts = self._resolve_source(
+                caller_ctx,
+                arg.src_kind,
+                arg.type_usr,
+                arg.decl_usr,
+                arg.callee_usr,
+                arg.type_is_value,
+            )
+            # transitive: a caller's arg is itself an unbound param -> recurse
+            if ts is TOP and arg.src_kind == "local" and arg.decl_usr:
+                t2 = self._closed_world_param_for_decl(
+                    cc.caller, arg.decl_usr, visited | {callee_usr}
+                )
+                ts = t2 if t2 is not None else TOP
+            if ts is TOP:
+                union = TOP
+                break
+            union = union | ts  # type: ignore[operator]
+        result: "_Top | frozenset[str]" = (
+            TOP if (union is TOP or not saw_caller) else union
+        )
+        self._cw_memo[memo_key] = result
+        return result
+
+    def _closed_world_param_for_decl(
+        self, caller: "Sym", decl_usr: str, visited: "frozenset[str]"
+    ) -> "_Top | frozenset[str] | None":
+        """Resolve a param's Γ by finding its position in ``caller`` and recursing.
+
+        ``decl_usr`` is the USR of a PARM_DECL or local VAR_DECL inside ``caller``
+        that was passed (as a ``local`` call_arg) to some callee we are analysing.
+        We need to know which position this param occupies in ``caller``'s parameter
+        list so that we can ask "what do *caller*'s callers pass at that position?"
+
+        Strategy: scan ``caller``'s OUTGOING call_arg rows for any arg whose
+        ``decl_usr`` equals the target.  The position of that arg in the outgoing
+        call is used as a proxy for the param's position inside ``caller``.  This is
+        exact for simple forwarding (``wrapper(A& a) { callee(a); }``) and
+        conservative (sounds) for reordered forwarding."""
+        callee_sym = self._g.get(caller.usr)
+        if callee_sym is None:
+            return TOP
+        memo_key = (caller.usr, decl_usr)
+        if memo_key in self._cw_memo:
+            return self._cw_memo[memo_key]
+        self._cw_memo[memo_key] = TOP  # in-flight sentinel
+
+        # Find the param position: look at caller's OUTGOING call_args for the
+        # arg that uses this decl_usr.  The arg.position in the outgoing call is
+        # used as a proxy for the param's position in caller's signature.
+        param_pos: Optional[int] = None
+        for edge in self._g._edges(
+            callee_sym, "out", ("calls",), 500, with_sites=False
+        ):
+            for arg_out in self._g.call_args(edge.edge_id):
+                if arg_out.decl_usr == decl_usr:
+                    param_pos = arg_out.position
+                    break
+            if param_pos is not None:
+                break
+
+        if param_pos is None:
+            self._cw_memo[memo_key] = TOP
+            return TOP
+
+        result = self._closed_world_param(caller.usr, param_pos, visited)
+        self._cw_memo[memo_key] = result if result is not None else TOP
+        return self._cw_memo[memo_key]
 
     # ------------------------------------------------------------------ #
     # Prune decision
@@ -894,6 +1026,7 @@ class Callable(Entity):
         fanout: int = 500,
         expand_virtual: bool = False,
         prune: bool = False,
+        assume_closed_world: bool = False,
     ) -> "Iterator[CallStep]":
         """Like :meth:`callgraph`, but each step is a :class:`CallStep` that
         carries the Phase-1 ``dispatch_site`` (the selection map) whenever the
@@ -909,7 +1042,15 @@ class Callable(Entity):
         Pass ``prune=True`` to run the Phase-2 Gamma propagation engine and
         narrow each virtual hop to its feasible subset.  ``prune=True`` implies
         ``expand_virtual=True``; passing ``prune=True, expand_virtual=False``
-        raises ``ValueError``."""
+        raises ``ValueError``.
+
+        Pass ``assume_closed_world=True`` (requires ``prune=True``) to also apply
+        Phase-3b cross-TU param narrowing: the index MUST be whole-program AND
+        ``resolve``d, else narrowing is unsound. Asserting closed-world on a
+        partial or un-resolved index yields unsound results."""
+        if assume_closed_world and not prune:
+            raise ValueError("assume_closed_world requires prune=True")
+
         if prune and expand_virtual is False:
             # The caller explicitly passed expand_virtual=False + prune=True.
             # expand_virtual defaults to False, so we only raise when it is
@@ -919,7 +1060,11 @@ class Callable(Entity):
         if prune:
             # prune=True implies expand_virtual=True.
             expand_virtual = True
-            yield from self._devirt_prune(depth=depth, fanout=fanout)
+            yield from self._devirt_prune(
+                depth=depth,
+                fanout=fanout,
+                assume_closed_world=assume_closed_world,
+            )
             return
 
         # ------------------------------------------------------------------ #
@@ -965,13 +1110,16 @@ class Callable(Entity):
                 stack.pop()
 
     def _devirt_prune(
-        self, depth: Optional[int] = None, fanout: int = 500
+        self,
+        depth: Optional[int] = None,
+        fanout: int = 500,
+        assume_closed_world: bool = False,
     ) -> "Iterator[CallStep]":
-        """Phase-2 pruned devirtualized callgraph walk (prune=True path).
+        """Phase-2/3 pruned devirtualized callgraph walk (prune=True path).
 
         Runs _GammaEngine once, then does a DFS where each virtual callee's
         children are narrowed to the pruned candidate set."""
-        engine = _GammaEngine(self._cb)
+        engine = _GammaEngine(self._cb, assume_closed_world=assume_closed_world)
         engine.analyse(self.sym)
 
         seen = {self.id}

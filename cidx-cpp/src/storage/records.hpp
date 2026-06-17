@@ -86,6 +86,7 @@ struct EdgeSite {
   std::optional<std::string> recv_type_usr;
   std::optional<std::string> recv_decl_usr;
   std::optional<int64_t> recv_param_pos;  // 0-based index of receiver in callee params
+  std::optional<int64_t> recv_type_is_value;  // v11: receiver held by value (1) else 0/NULL
 };
 
 struct CallArg {
@@ -98,6 +99,7 @@ struct CallArg {
   std::optional<std::string> type_usr;
   std::optional<std::string> decl_usr;
   std::optional<std::string> callee_usr;
+  std::optional<int64_t> type_is_value;  // v11: arg held by value (1) else 0/NULL
 };
 
 struct TemplateParam {
