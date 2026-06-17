@@ -686,6 +686,24 @@ Seed `dispatch_param(A& a){ a.rank() }` with `recv_src_kind=local`,
   `_cw_memo` keyed `(callee_usr, pos)` + in-flight-cycle → ⊤ + the existing
   `K_LIMIT`; measure on the self-index after landing. Revisit a precomputed
   `resolve_pass` summary (a v11 table + C++ parity) only if it is a hotspot.
+- **R-3b-3** (transitive param forwarding is conservatively ⊤ — *review finding
+  F1, 2026-06-17*). When a caller forwards one of **its own parameters** to a
+  callee (`wrapper(p,q){ callee(q,p); }`), the cross-TU union cannot soundly
+  chase the forwarded param into the caller's callers: **param ordinals are not
+  persisted** (parameters are not indexed as symbols, and only *receiver*-params
+  carry `recv_param_pos`), so a forwarded param cannot be mapped to its ordinal
+  in the caller's signature. The original implementation used the caller's
+  *outgoing-arg position* as a proxy, which is **UNSOUND under reordered
+  forwarding** (it dropped the actually-called target — verified: `Γ={B}` where
+  the receiver actually binds a `D`). **Resolution:** `_closed_world_param` stops
+  at ⊤ for any forwarded (non-value) param — sound + monotone (KEEP_ALL). The
+  **direct** cross-TU case (a caller passing a *value* local / `construct`, e.g.
+  `B b; f(b)`) still narrows via the `_resolve_source` value shortcut and is the
+  3b headline. Regression tests: `test_p3_17_transitive_forwarding_is_conservative_top`
+  (forwarding → ⊤) and `test_p3_17b_reordered_forwarding_is_sound` (the F1 repro:
+  never narrows to `{B}`, `D::rank` retained). Full transitive precision is
+  deferred until param ordinals are persisted (a v-bump + Py/C++ parity), per the
+  phased plan.
 
 ## 10. References
 
