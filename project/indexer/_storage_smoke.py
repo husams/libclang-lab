@@ -88,10 +88,11 @@ def main():
         db.add_symbol(Symbol(usr="c:@N@rk@S@Conf@F@set", spelling="set",
                              kind="method", qual_name="rk::Conf::set",
                              parent_usr="c:@N@rk@S@Conf", is_pure=True,
-                             resolved=True))
+                             is_static=True, resolved=True))
         got = db.lookup_symbol("c:@N@rk@S@Conf@F@set")
         assert got.qual_name == "rk::Conf::set"
         assert got.is_pure is True, "is_pure round-trips"
+        assert got.is_static is True, "is_static round-trips"
         db.add_symbol(Symbol(usr="c:@N@rk@S@Conf@F@set", spelling="set",
                              kind="method", resolved=True))
         got = db.lookup_symbol("c:@N@rk@S@Conf@F@set")

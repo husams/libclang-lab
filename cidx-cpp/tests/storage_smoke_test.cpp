@@ -170,12 +170,14 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
     set_sym.qual_name = "rk::Conf::set";
     set_sym.parent_usr = "c:@N@rk@S@Conf";
     set_sym.is_pure = true;
+    set_sym.is_static = true;
     set_sym.resolved = true;
     db.add_symbol(set_sym);
     got = db.lookup_symbol("c:@N@rk@S@Conf@F@set");
     REQUIRE(got.has_value());
     CHECK(got->qual_name == std::string("rk::Conf::set"));
     CHECK_MESSAGE(got->is_pure, "is_pure round-trips");
+    CHECK_MESSAGE(got->is_static, "is_static round-trips");
     cidx::Symbol set_again;
     set_again.usr = "c:@N@rk@S@Conf@F@set";
     set_again.spelling = "set";
@@ -426,8 +428,8 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
                               "display_name", "kind", "type_info", "file_id",
                               "line", "col", "decl_file_id", "decl_line",
                               "decl_col", "decl_path", "is_definition",
-                              "is_pure", "linkage", "access", "parent_usr",
-                              "resolved"});
+                              "is_pure", "is_static", "linkage", "access",
+                              "parent_usr", "resolved"});
 
   // the 7 indexes (5 symbol + 2 edge)
   std::set<std::string> indexes;
@@ -450,7 +452,7 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "11");
+    CHECK(st.col_text(0) == "12");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

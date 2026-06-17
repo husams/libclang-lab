@@ -538,6 +538,47 @@ TEST_SUITE("clang") {
     CHECK(method->qual_name == "the_ns::the_class::the_method");
   }
 
+  TEST_CASE("is_static: static member function flagged; instance methods and "
+            "free functions are not (v12)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/statics.cpp";
+    write_file(path, "namespace ns {\n"
+                     "struct Widget {\n"
+                     "  static int make(int x);   // static member -> is_static\n"
+                     "  int area() const;         // instance method\n"
+                     "};\n"
+                     "int Widget::make(int x) { return x; }\n"
+                     "int Widget::area() const { return 0; }\n"
+                     "int free_fn(int x) { return x; }          // external\n"
+                     "static int hidden_fn(int x) { return x; } // internal\n"
+                     "} // namespace ns\n");
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+
+    const auto make = one_sym(f.db, "make", std::string("method"));
+    REQUIRE(make);
+    CHECK_MESSAGE(make->is_static, "static member function -> is_static");
+
+    const auto area = one_sym(f.db, "area", std::string("method"));
+    REQUIRE(area);
+    CHECK_FALSE_MESSAGE(area->is_static, "instance method -> not static");
+
+    const auto ext = one_sym(f.db, "free_fn", std::string("function"));
+    REQUIRE(ext);
+    CHECK_FALSE(ext->is_static);
+
+    // file-scope `static` free function: is_static stays false; its static-ness
+    // is reflected by internal linkage, not by this method-only flag.
+    const auto hidden = one_sym(f.db, "hidden_fn", std::string("function"));
+    REQUIRE(hidden);
+    CHECK_FALSE(hidden->is_static);
+    CHECK(hidden->linkage == std::string("internal"));
+  }
+
   TEST_CASE("templates: explicit instantiation -> instantiates (kind 5), "
             "explicit specialization -> specializes (kind 4); TYPE template_arg "
             "rows record the type spelling so Box<bool> != Box<int>") {

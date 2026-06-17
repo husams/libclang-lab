@@ -225,8 +225,8 @@ def _add_value_caller(
 
 
 def test_p3_01_schema_version():
-    """SCHEMA_VERSION == 11; fresh DB has both v11 columns."""
-    assert SCHEMA_VERSION == 11
+    """SCHEMA_VERSION >= 11; fresh DB has both v11 columns."""
+    assert SCHEMA_VERSION >= 11
 
 
 def test_p3_01_fresh_db_columns(tmp_path):
@@ -268,6 +268,7 @@ def test_p3_02_migration_v10_to_v11(tmp_path):
             decl_path TEXT,
             is_definition INTEGER NOT NULL DEFAULT 0,
             is_pure INTEGER NOT NULL DEFAULT 0,
+            is_static INTEGER NOT NULL DEFAULT 0,
             linkage TEXT, access TEXT, parent_usr TEXT, resolved INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE edge_kind (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
         INSERT OR IGNORE INTO edge_kind (id, name) VALUES
@@ -304,7 +305,8 @@ def test_p3_02_migration_v10_to_v11(tmp_path):
     ver = db._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 11, f"expected schema_version=11 after migration, got {ver}"
+    assert int(ver) == SCHEMA_VERSION, (
+        f"expected schema_version={SCHEMA_VERSION} after migration, got {ver}")
 
     es_cols = {r[1] for r in db._conn.execute("PRAGMA table_info(edge_site)")}
     ca_cols = {r[1] for r in db._conn.execute("PRAGMA table_info(call_arg)")}

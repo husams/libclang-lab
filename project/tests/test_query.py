@@ -294,7 +294,7 @@ def test_sym_to_dict_schema(g):
     d = g.get("c:@F@main").to_dict()
     assert set(d) == {"id", "usr", "spelling", "qual_name", "kind", "type_info",
                       "file", "line", "col", "is_definition", "is_pure",
-                      "is_stub"}
+                      "is_static", "is_stub"}
 
 
 def test_edge_to_dict_carries_peer_and_sites(g):

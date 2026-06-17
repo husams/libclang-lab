@@ -73,7 +73,7 @@ void check_migrated(const std::string &db_path) {
 
   const auto scols = table_columns(raw, "symbol");
   for (const char *c : {"qual_name", "decl_file_id", "decl_line", "decl_col",
-                        "is_pure", "decl_path"}) {
+                        "is_pure", "is_static", "decl_path"}) {
     CHECK_MESSAGE(has_col(scols, c), "symbol." << c << " present");
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
