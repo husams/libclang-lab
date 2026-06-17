@@ -228,6 +228,8 @@ class Site:
     recv_type_usr: Optional[str] = None
     recv_decl_usr: Optional[str] = None
     recv_param_pos: Optional[int] = None  # 0-based index of receiver in callee params
+    # Phase 3: value-ness flag (1=by-value exact, 0/None=not-value -> TOP)
+    recv_type_is_value: Optional[int] = None
 
     @property
     def loc(self) -> str:
@@ -262,6 +264,8 @@ class CallArg:
     type_usr: Optional[str] = None  # USR of the arg's static record type
     decl_usr: Optional[str] = None  # USR of the named local/param/field
     callee_usr: Optional[str] = None  # USR of callee for call_result
+    # Phase 3: value-ness flag (1=by-value exact, 0/None=not-value -> TOP)
+    type_is_value: Optional[int] = None
 
     def __repr__(self) -> str:
         return (
@@ -270,6 +274,17 @@ class CallArg:
             f"{f' type={self.type_usr!r}' if self.type_usr else ''}"
             f"{f' callee={self.callee_usr!r}' if self.callee_usr else ''})"
         )
+
+
+@dataclass(frozen=True)
+class CallContext:
+    """One incoming ``calls`` edge to a callee, with its argument provenance —
+    the unit the closed-world param-Γ union consumes (Phase 3b)."""
+
+    caller: "Sym"
+    edge_id: int
+    site: Optional[Site]
+    args: list[CallArg]
 
 
 #: template_param.param_kind / template_arg.arg_kind code -> readable name.
@@ -781,7 +796,8 @@ class GraphQuery:
         out: dict[int, list[Site]] = {}
         for r in self._c.execute(
             "SELECT edge_id, file_id, line, col, conditional, args_sig, "
-            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+            "       recv_type_is_value "
             f"FROM edge_site WHERE edge_id IN ({q}) "
             "ORDER BY edge_id, file_id, line, col",
             list(edge_ids),
@@ -798,6 +814,7 @@ class GraphQuery:
                     recv_type_usr=r["recv_type_usr"],
                     recv_decl_usr=r["recv_decl_usr"],
                     recv_param_pos=r["recv_param_pos"],
+                    recv_type_is_value=r["recv_type_is_value"],
                 )
             )
         return out
@@ -824,7 +841,8 @@ class GraphQuery:
         out = []
         for r in self._c.execute(
             "SELECT file_id, line, col, conditional, args_sig, "
-            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+            "       recv_type_is_value "
             "FROM edge_site WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
             (eid, limit),
         ):
@@ -840,6 +858,7 @@ class GraphQuery:
                     recv_type_usr=r["recv_type_usr"],
                     recv_decl_usr=r["recv_decl_usr"],
                     recv_param_pos=r["recv_param_pos"],
+                    recv_type_is_value=r["recv_type_is_value"],
                 )
             )
         return out
@@ -1233,7 +1252,7 @@ class GraphQuery:
         Returns one row per non-literal positional argument at any call site
         of this edge, ordered by (file_id, line, col, position)."""
         rows = self._c.execute(
-            "SELECT position, src_kind, type_usr, decl_usr, callee_usr "
+            "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
             "FROM call_arg WHERE edge_id = ? "
             "ORDER BY file_id, line, col, position",
             (edge_id,),
@@ -1245,6 +1264,7 @@ class GraphQuery:
                 type_usr=r["type_usr"],
                 decl_usr=r["decl_usr"],
                 callee_usr=r["callee_usr"],
+                type_is_value=r["type_is_value"],
             )
             for r in rows
         ]
@@ -1257,7 +1277,7 @@ class GraphQuery:
         Returns args for the given (edge_id, file_id, line, col) site in
         position order."""
         rows = self._c.execute(
-            "SELECT position, src_kind, type_usr, decl_usr, callee_usr "
+            "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
             "FROM call_arg WHERE edge_id = ? AND file_id = ? "
             "AND line = ? AND col = ? ORDER BY position",
             (edge_id, file_id, line, col),
@@ -1269,9 +1289,28 @@ class GraphQuery:
                 type_usr=r["type_usr"],
                 decl_usr=r["decl_usr"],
                 callee_usr=r["callee_usr"],
+                type_is_value=r["type_is_value"],
             )
             for r in rows
         ]
+
+    def call_sites_into(self, callee: "Sym") -> "list[CallContext]":
+        """Every incoming ``calls`` edge to ``callee``, each with caller + per-arg
+        provenance. Built on edges_in(callee, kinds=('calls',)) + call_args(edge).
+        Cross-TU/cross-repo callers appear automatically once the index is
+        ``resolve``d (stub->def edges point at the real callee)."""
+        out: list[CallContext] = []
+        for edge in self.edges_in(callee, kinds=("calls",), limit=10_000):
+            site = edge.sites[0] if edge.sites else None
+            out.append(
+                CallContext(
+                    caller=edge.peer,
+                    edge_id=edge.edge_id,
+                    site=site,
+                    args=self.call_args(edge.edge_id),
+                )
+            )
+        return out
 
     def receiver_provenance(
         self, edge_id: int, file_id: int, line: int, col: int
@@ -1282,7 +1321,8 @@ class GraphQuery:
         files = self._files()
         r = self._c.execute(
             "SELECT file_id, line, col, conditional, args_sig, "
-            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+            "       recv_type_is_value "
             "FROM edge_site WHERE edge_id = ? AND file_id = ? "
             "AND line = ? AND col = ?",
             (edge_id, file_id, line, col),
@@ -1300,6 +1340,7 @@ class GraphQuery:
             recv_type_usr=r["recv_type_usr"],
             recv_decl_usr=r["recv_decl_usr"],
             recv_param_pos=r["recv_param_pos"],
+            recv_type_is_value=r["recv_type_is_value"],
         )
 
     def _recv_for(self, edge_ids: Sequence[int]) -> dict[int, list[Site]]:
@@ -1314,7 +1355,8 @@ class GraphQuery:
         out: dict[int, list[Site]] = {}
         for r in self._c.execute(
             "SELECT edge_id, file_id, line, col, conditional, args_sig, "
-            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos "
+            "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+            "       recv_type_is_value "
             f"FROM edge_site WHERE edge_id IN ({q}) "
             "ORDER BY edge_id, file_id, line, col",
             list(edge_ids),
@@ -1331,6 +1373,7 @@ class GraphQuery:
                     recv_type_usr=r["recv_type_usr"],
                     recv_decl_usr=r["recv_decl_usr"],
                     recv_param_pos=r["recv_param_pos"],
+                    recv_type_is_value=r["recv_type_is_value"],
                 )
             )
         return out

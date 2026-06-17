@@ -741,6 +741,48 @@ std::string record_usr_of_type(LibClang &lib, CXType t) {
   return CxString(lib, lib.clang_getCursorUSR(decl)).str();
 }
 
+// Mirrors ast.py:_type_is_value. True iff `loc_type` holds `dispatch_record_usr`
+// by value (exact, non-erased). Sound: pointer/ref fail the RECORD kind gate;
+// a handle's wrapper USR never equals the dispatch USR.
+bool type_is_value(LibClang &lib, CXType loc_type,
+                   const std::string &dispatch_record_usr) {
+  if (dispatch_record_usr.empty()) return false;
+  CXType c = ::clang_getCanonicalType(loc_type);
+  if (c.kind != CXType_Record) return false;
+  const CXCursor decl = lib.clang_getTypeDeclaration(c);
+  if (lib.clang_Cursor_isNull(decl) ||
+      is_invalid_kind(lib.clang_getCursorKind(decl))) {
+    return false;
+  }
+  return CxString(lib, lib.clang_getCursorUSR(decl)).str() == dispatch_record_usr;
+}
+
+// Mirrors ast.py:_decl_type_for_expr.
+// Returns the DECLARED type of the value source, not the use-site expression type.
+// libclang auto-derefs lvalue-references at the call-site: a field "B& br" presents
+// as expression-type B.  For DECL_REF_EXPR / MEMBER_REF_EXPR we read
+// getCursorType(getCursorReferenced(peeled)) which preserves the reference.
+// For CALL_EXPR (call_result) we use getCursorResultType of the callee.
+// Falls back to getCursorType(peeled) for anything else (safe).
+static CXType decl_type_for_expr(LibClang &lib, CXCursor peeled) {
+  const CXCursorKind k = lib.clang_getCursorKind(peeled);
+  if (k == CXCursor_DeclRefExpr || k == CXCursor_MemberRefExpr) {
+    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
+    if (lib.clang_Cursor_isNull(ref)) {
+      return lib.clang_getCursorType(peeled);
+    }
+    return lib.clang_getCursorType(ref);
+  }
+  if (k == CXCursor_CallExpr || k == (CXCursorKind)128 /*CXXFunctionalCast*/) {
+    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
+    if (lib.clang_Cursor_isNull(ref)) {
+      return lib.clang_getCursorType(peeled);
+    }
+    return lib.clang_getCursorResultType(ref);
+  }
+  return lib.clang_getCursorType(peeled);
+}
+
 // Result of classify_value_source — mirrors the Python tuple.
 struct ValueSource {
   std::string src_kind;               // local|construct|member|global|call_result|literal|this|unknown
@@ -886,14 +928,15 @@ int64_t emit_body_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
   return edge_id;
 }
 
-// Emit a calls edge with Phase 2 receiver provenance on the edge_site.
+// Emit a calls edge with Phase 2/3 receiver provenance on the edge_site.
 // Returns the edge.id (needed for add_call_arg).
 int64_t emit_call_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
                        int64_t dst_id,
                        const std::string &recv_src_kind,
                        const std::string &recv_type_usr,
                        const std::string &recv_decl_usr,
-                       std::optional<int64_t> recv_param_pos = std::nullopt) {
+                       std::optional<int64_t> recv_param_pos = std::nullopt,
+                       std::optional<int64_t> recv_type_is_value = std::nullopt) {
   Edge e;
   e.src_id = ctx->src_id;
   e.dst_id = dst_id;
@@ -924,6 +967,9 @@ int64_t emit_call_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
   }
   if (recv_param_pos.has_value()) {
     site.recv_param_pos = recv_param_pos;
+  }
+  if (recv_type_is_value.has_value()) {
+    site.recv_type_is_value = recv_type_is_value;
   }
   ctx->db->add_edge_site(site);
   return edge_id;
@@ -958,6 +1004,16 @@ void emit_call_args(BodyDescentCtx *ctx, LibClang &lib, CXCursor call,
     }
     if (!vs.callee_usr.empty()) {
       ca.callee_usr = vs.callee_usr;
+    }
+    // Phase 3a: compute type_is_value for value-eligible arg kinds,
+    // including "local" (to distinguish value-typed locals from param re-passing).
+    // Use the declared type of the underlying decl (not the use-site expr type
+    // which auto-derefs lvalue-references in libclang).
+    if ((vs.src_kind == "member" || vs.src_kind == "global" ||
+         vs.src_kind == "call_result" || vs.src_kind == "local") && !vs.type_usr.empty()) {
+      const CXCursor peeled_arg = peel_expr(lib, arg);
+      ca.type_is_value = type_is_value(lib, decl_type_for_expr(lib, peeled_arg),
+                                       vs.type_usr) ? 1 : 0;
     }
     ctx->db->add_call_arg(ca);
   }
@@ -1120,13 +1176,39 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
                 }
               }
             }
+            // Phase 3a: compute recv_type_is_value for value-eligible src_kinds.
+            std::optional<int64_t> recv_type_is_value_opt;
+            if ((recv_src_kind == "member" || recv_src_kind == "global" ||
+                 recv_src_kind == "call_result") &&
+                !lib.clang_Cursor_isNull(recv_expr)) {
+              // dispatch_usr = USR of the class owning the virtual method.
+              std::string dispatch_usr;
+              const CXCursorKind ref_kind2 = lib.clang_getCursorKind(ref);
+              if (ref_kind2 == CXCursor_CXXMethod ||
+                  ref_kind2 == CXCursor_Constructor ||
+                  ref_kind2 == CXCursor_Destructor ||
+                  ref_kind2 == CXCursor_ConversionFunction) {
+                const CXCursor owner2 = lib.clang_getCursorSemanticParent(ref);
+                if (!lib.clang_Cursor_isNull(owner2)) {
+                  dispatch_usr =
+                      CxString(lib, lib.clang_getCursorUSR(owner2)).str();
+                }
+              }
+              // Use the DECLARED type of the underlying decl (not the use-site
+              // expression type, which auto-derefs references in libclang).
+              const CXCursor peeled_recv = peel_expr(lib, recv_expr);
+              recv_type_is_value_opt =
+                  type_is_value(lib, decl_type_for_expr(lib, peeled_recv),
+                                dispatch_usr) ? 1 : 0;
+            }
             unsigned call_line = 0, call_col = 0, call_off = 0;
             CXFile call_fh = nullptr;
             lib.clang_getExpansionLocation(lib.clang_getCursorLocation(cursor),
                                            &call_fh, &call_line, &call_col, &call_off);
             const int64_t edge_id = emit_call_edge(
                 ctx, lib, cursor, dst_id,
-                recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos);
+                recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,
+                recv_type_is_value_opt);
             emit_call_args(ctx, lib, cursor, edge_id, call_line, call_col);
 
             // B3 instantiates (kind=5): when the callee is a template

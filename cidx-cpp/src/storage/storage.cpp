@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS edge_site (
     recv_type_usr TEXT,
     recv_decl_usr TEXT,
     recv_param_pos INTEGER,
+    recv_type_is_value INTEGER,          -- v11: receiver held by value (1) else 0/NULL
     PRIMARY KEY (edge_id, file_id, line, col)
 ) WITHOUT ROWID;
 
@@ -163,11 +164,12 @@ CREATE TABLE IF NOT EXISTS call_arg (
     type_usr   TEXT,
     decl_usr   TEXT,
     callee_usr TEXT,
+    type_is_value INTEGER,               -- v11: arg held by value (1) else 0/NULL
     PRIMARY KEY (edge_id, file_id, line, col, position)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '10');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '11');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -535,6 +537,19 @@ void Storage::migrate() {
       // The call_arg table itself is created by the schema script (CREATE
       // TABLE IF NOT EXISTS), run after migrate(), so we only flip changed
       // to bump the version -- identical to the v6->v7 graph tables pattern.
+      changed = true;
+    }
+    // v10 -> v11: value-ness booleans for exact-singleton Gamma narrowing.
+    // No backfill -- reindex repopulates; old rows read as NULL == not-value == TOP.
+    if (!has_col(escols, "recv_type_is_value")) {
+      db_.exec("ALTER TABLE edge_site ADD COLUMN recv_type_is_value INTEGER");
+      changed = true;
+    }
+  }
+  if (has_table("call_arg")) {
+    const auto cacols = table_columns("call_arg");
+    if (!has_col(cacols, "type_is_value")) {
+      db_.exec("ALTER TABLE call_arg ADD COLUMN type_is_value INTEGER");
       changed = true;
     }
   }
@@ -1424,8 +1439,9 @@ void Storage::add_edge_site(const EdgeSite &s) {
   auto st = db_.prepare(
       "INSERT OR IGNORE INTO edge_site "
       "(edge_id, file_id, line, col, conditional, args_sig, "
-      " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+      " recv_type_is_value) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, s.edge_id);
   bind_opt(st, 2, s.file_id);
   bind_opt(st, 3, s.line);
@@ -1436,6 +1452,7 @@ void Storage::add_edge_site(const EdgeSite &s) {
   bind_opt(st, 8, s.recv_type_usr);
   bind_opt(st, 9, s.recv_decl_usr);
   bind_opt(st, 10, s.recv_param_pos);
+  bind_opt(st, 11, s.recv_type_is_value);
   st.step_done();
 }
 
@@ -1443,8 +1460,8 @@ void Storage::add_call_arg(const CallArg &a) {
   auto st = db_.prepare(
       "INSERT OR IGNORE INTO call_arg "
       "(edge_id, file_id, line, col, position, src_kind, "
-      " type_usr, decl_usr, callee_usr) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      " type_usr, decl_usr, callee_usr, type_is_value) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, a.edge_id);
   st.bind(2, a.file_id);
   st.bind(3, a.line);
@@ -1454,6 +1471,7 @@ void Storage::add_call_arg(const CallArg &a) {
   bind_opt(st, 7, a.type_usr);
   bind_opt(st, 8, a.decl_usr);
   bind_opt(st, 9, a.callee_usr);
+  bind_opt(st, 10, a.type_is_value);
   st.step_done();
 }
 

@@ -450,7 +450,7 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "10");
+    CHECK(st.col_text(0) == "11");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

@@ -882,8 +882,10 @@ def test_acc11_real_parse_construct_prunes_to_b_rank(prov_real_cb):
         assert not offenders, f"ACC-11: {absent}::rank should be pruned, found {offenders}"
 
 
-def test_acc12_real_parse_member_sound_fallback(prov_real_cb):
-    """ACC-12: top_rank(h.b) — src_kind='member' (decl_usr=field), Gamma=TOP -> no prune."""
+def test_acc12_real_parse_value_member_prunes_to_b_rank(prov_real_cb):
+    """ACC-12: top_rank(h.b) — src_kind='member', VALUE field (Holder{ B b; }).
+    Phase 3a: a value member's dynamic type is exactly its static type, so it
+    seeds the exact singleton {B} and a.rank() prunes to B::rank only."""
     cb, _ = prov_real_cb
 
     row = _arg0_to_top_rank(cb, "f_member")
@@ -896,15 +898,23 @@ def test_acc12_real_parse_member_sound_fallback(prov_real_cb):
     )
 
     steps = _virtual_steps(cb, "f_member")
-    assert steps, "ACC-12: expected at least one virtual dispatch step"
-    assert all(s.pruned_candidates is None for s in steps), (
-        "ACC-12: member src is TOP today -> must keep the full Phase-1 set (sound "
-        f"fallback), but a step was pruned: {[s.pruned_candidates for s in steps]}"
-    )
+    pruned = [s for s in steps if s.pruned_candidates is not None]
+    assert pruned, "ACC-12: value member arg should prune a.rank() but no step was pruned"
+    kept = {
+        sel.target.sym.usr
+        for step in pruned for sel in step.pruned_candidates
+        if sel.target is not None
+    }
+    assert any("@S@B@" in u for u in kept), f"ACC-12: B::rank missing from {kept}"
+    for absent in ("A", "C", "D"):
+        offenders = [u for u in kept if f"@S@{absent}@" in u]
+        assert not offenders, f"ACC-12: {absent}::rank should be pruned, found {offenders}"
 
 
-def test_acc13_real_parse_global_sound_fallback(prov_real_cb):
-    """ACC-13: top_rank(g_b) — src_kind='global' (decl_usr=g_b), Gamma=TOP -> no prune."""
+def test_acc13_real_parse_value_global_prunes_to_b_rank(prov_real_cb):
+    """ACC-13: top_rank(g_b) — src_kind='global', VALUE global (B g_b;).
+    Phase 3a: a value global is exactly its static type -> singleton {B} ->
+    a.rank() prunes to B::rank only."""
     cb, _ = prov_real_cb
 
     row = _arg0_to_top_rank(cb, "f_global")
@@ -916,15 +926,23 @@ def test_acc13_real_parse_global_sound_fallback(prov_real_cb):
     )
 
     steps = _virtual_steps(cb, "f_global")
-    assert steps, "ACC-13: expected at least one virtual dispatch step"
-    assert all(s.pruned_candidates is None for s in steps), (
-        "ACC-13: global src is TOP today -> must keep the full Phase-1 set (sound "
-        f"fallback), but a step was pruned: {[s.pruned_candidates for s in steps]}"
-    )
+    pruned = [s for s in steps if s.pruned_candidates is not None]
+    assert pruned, "ACC-13: value global arg should prune a.rank() but no step was pruned"
+    kept = {
+        sel.target.sym.usr
+        for step in pruned for sel in step.pruned_candidates
+        if sel.target is not None
+    }
+    assert any("@S@B@" in u for u in kept), f"ACC-13: B::rank missing from {kept}"
+    for absent in ("A", "C", "D"):
+        offenders = [u for u in kept if f"@S@{absent}@" in u]
+        assert not offenders, f"ACC-13: {absent}::rank should be pruned, found {offenders}"
 
 
-def test_acc14_real_parse_call_result_sound_fallback(prov_real_cb):
-    """ACC-14: top_rank(make_b()) — src_kind='call_result' (callee=make_b), TOP -> no prune."""
+def test_acc14_real_parse_value_call_result_prunes_to_b_rank(prov_real_cb):
+    """ACC-14: top_rank(make_b()) — src_kind='call_result', BY-VALUE return (B make_b()).
+    Phase 3a: a by-value return is exactly its static type -> singleton {B} ->
+    a.rank() prunes to B::rank only."""
     cb, _ = prov_real_cb
 
     row = _arg0_to_top_rank(cb, "f_callresult")
@@ -936,11 +954,17 @@ def test_acc14_real_parse_call_result_sound_fallback(prov_real_cb):
     )
 
     steps = _virtual_steps(cb, "f_callresult")
-    assert steps, "ACC-14: expected at least one virtual dispatch step"
-    assert all(s.pruned_candidates is None for s in steps), (
-        "ACC-14: call_result src is TOP today -> must keep the full Phase-1 set (sound "
-        f"fallback), but a step was pruned: {[s.pruned_candidates for s in steps]}"
-    )
+    pruned = [s for s in steps if s.pruned_candidates is not None]
+    assert pruned, "ACC-14: by-value return arg should prune a.rank() but no step was pruned"
+    kept = {
+        sel.target.sym.usr
+        for step in pruned for sel in step.pruned_candidates
+        if sel.target is not None
+    }
+    assert any("@S@B@" in u for u in kept), f"ACC-14: B::rank missing from {kept}"
+    for absent in ("A", "C", "D"):
+        offenders = [u for u in kept if f"@S@{absent}@" in u]
+        assert not offenders, f"ACC-14: {absent}::rank should be pruned, found {offenders}"
 
 
 def test_acc15_real_parse_all_kinds_monotone(prov_real_cb):

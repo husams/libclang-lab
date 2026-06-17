@@ -542,6 +542,54 @@ def _peel_expr(expr: cx.Cursor) -> cx.Cursor:
     return cur
 
 
+def _type_is_value(loc_type: cx.Type, dispatch_record_usr: Optional[str]) -> bool:
+    """True iff loc_type holds `dispatch_record_usr` BY VALUE (exact, non-erased).
+
+    Sound: pointer / lvalue-ref / rvalue-ref / builtin fail the RECORD kind gate;
+    a smart-pointer/handle (shared_ptr<B>, IntrusiveRefCntPtr<B>, …) is canonical
+    RECORD but its decl USR is the *wrapper*, never the dispatch type, so the
+    USR-equality clause rejects it with no denylist.  typedef/using is stripped
+    by get_canonical()."""
+    if not dispatch_record_usr:
+        return False
+    c = loc_type.get_canonical()  # strips typedef/using; KEEPS ref/ptr/cv
+    if c.kind != cx.TypeKind.RECORD:  # POINTER / L/RVALUEREF / builtin -> not value
+        return False
+    decl = c.get_declaration()
+    if decl is None or decl.kind.value <= 0:
+        return False
+    return (decl.get_usr() or None) == dispatch_record_usr
+
+
+def _decl_type_for_expr(peeled: cx.Cursor) -> Optional[cx.Type]:
+    """Return the DECLARED type of the value source, not the use-site expression type.
+
+    At the call-site, libclang auto-derefs lvalue-references: a field ``B& br``
+    presents as expression-type ``B``, so feeding ``peeled.type`` to
+    ``_type_is_value`` would misclassify a reference as a value.
+
+    Instead we read the declared type from the underlying decl:
+      DECL_REF_EXPR / MEMBER_REF_EXPR → referenced decl's ``.type``  (B& preserved)
+      CALL_EXPR (call_result)          → referenced callee's ``.result_type``
+    Falls back to ``peeled.type`` for anything else (safe: only harms
+    call_result without a referenced decl, which can't be value-narrowed anyway)."""
+    k = peeled.kind
+    if k in (cx.CursorKind.DECL_REF_EXPR, cx.CursorKind.MEMBER_REF_EXPR):
+        ref = peeled.referenced
+        if ref is None:
+            return None
+        return ref.type
+    if k in (cx.CursorKind.CALL_EXPR, cx.CursorKind.CXX_FUNCTIONAL_CAST_EXPR):
+        ref = peeled.referenced
+        if ref is None:
+            # Fallback to expression type: for a value return this IS the return
+            # type; for a ref return the expression type is LVALUEREFERENCE, which
+            # _type_is_value's RECORD-kind gate then correctly rejects.
+            return peeled.type
+        return ref.result_type
+    return peeled.type
+
+
 def _record_usr_of_type(t: cx.Type) -> Optional[str]:
     """Return the USR of the record declaration for type ``t``, stripping
     reference/pointer/cv-qualifiers.  Returns None for builtins."""
@@ -807,6 +855,37 @@ def _body_descent(
                                 recv_src_kind = "this"
                                 recv_type_usr = owner_usr or None
                                 recv_decl_usr = owner_usr or None
+                        # Phase 3a: compute recv_type_is_value for value-eligible
+                        # src_kinds (member/global/call_result).
+                        recv_type_is_value: Optional[int] = None
+                        if (
+                            recv_src_kind in ("member", "global", "call_result")
+                            and recv_expr is not None
+                        ):
+                            dispatch_usr = None
+                            if ref is not None and ref.kind in (
+                                cx.CursorKind.CXX_METHOD,
+                                cx.CursorKind.CONSTRUCTOR,
+                                cx.CursorKind.DESTRUCTOR,
+                                cx.CursorKind.CONVERSION_FUNCTION,
+                            ):
+                                owner = ref.semantic_parent
+                                dispatch_usr = (
+                                    owner.get_usr() if owner is not None else None
+                                )
+                            # Use the DECLARED type of the underlying decl, not the
+                            # use-site expression type (which auto-derefs references
+                            # in libclang: B& br presents as B at the call-site).
+                            peeled_recv = _peel_expr(recv_expr)
+                            decl_type = _decl_type_for_expr(peeled_recv)
+                            recv_type_is_value = (
+                                1
+                                if (
+                                    decl_type is not None
+                                    and _type_is_value(decl_type, dispatch_usr)
+                                )
+                                else 0
+                            )
                         db.add_edge_site(
                             edge_id,
                             file_id,
@@ -817,6 +896,7 @@ def _body_descent(
                             recv_type_usr=recv_type_usr,
                             recv_decl_usr=recv_decl_usr,
                             recv_param_pos=recv_param_pos,
+                            recv_type_is_value=recv_type_is_value,
                         )
                         # Phase 2: emit call_arg rows for non-literal positional args
                         for pos, arg_cursor in enumerate(child.get_arguments()):
@@ -824,6 +904,25 @@ def _body_descent(
                                 _classify_value_source(arg_cursor)
                             )
                             if a_kind != "literal":
+                                # Phase 3a: compute type_is_value for eligible arg kinds.
+                                # Use the declared type of the underlying decl (not the
+                                # use-site expression type which auto-derefs references).
+                                a_is_value: Optional[int] = None
+                                if (
+                                    a_kind
+                                    in ("member", "global", "call_result", "local")
+                                    and a_type_usr
+                                ):
+                                    peeled_arg = _peel_expr(arg_cursor)
+                                    decl_type_a = _decl_type_for_expr(peeled_arg)
+                                    a_is_value = (
+                                        1
+                                        if (
+                                            decl_type_a is not None
+                                            and _type_is_value(decl_type_a, a_type_usr)
+                                        )
+                                        else 0
+                                    )
                                 db.add_call_arg(
                                     edge_id,
                                     file_id,
@@ -834,6 +933,7 @@ def _body_descent(
                                     type_usr=a_type_usr,
                                     decl_usr=a_decl_usr,
                                     callee_usr=a_callee_usr,
+                                    type_is_value=a_is_value,
                                 )
                         # B3 instantiates (kind=5): when the callee is a template
                         # specialization, emit an edge to the primary template.

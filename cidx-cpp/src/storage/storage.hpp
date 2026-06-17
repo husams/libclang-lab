@@ -26,7 +26,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 10;
+constexpr int kSchemaVersion = 11;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
 // SQL CHECK and by an application-side StorageError (§3.2).
