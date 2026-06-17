@@ -41,6 +41,8 @@ subcommands. Anything the CLI prints, you can compute (and post-process) here.
 | `03_navigation.py`        | `neighbors` (+ `with_kind=True` for relation types), bounded `walk` (BFS), `reaches`, `path_to` |
 | `04_hierarchy_dispatch.py`| class `bases` / `subclasses` / `members` (+ `access=` filter); virtual `overrides` / `dispatch_targets` (C++) |
 | `05_json_export.py`       | `.to_dict()` → stable JSON for piping into other tools / languages |
+| `06_model_layer.py`       | the high-level model: typed entities (`Function`/`Method`/`Class`/…) with semantic properties instead of graph verbs |
+| `07_devirtualization.py`  | two-phase devirtualized callgraph: `Method.dispatch_selection()` selection map + `Callable.devirtualized_callgraph(prune=True)` Γ type-pruning |
 
 ## The data model in one paragraph
 
