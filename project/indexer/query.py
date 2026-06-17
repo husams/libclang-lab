@@ -127,6 +127,8 @@ class Sym:
     external: bool = False  # `file` is a raw path in an UNREGISTERED file
     # (system/stdlib header no component owns), not a
     # location in any indexed file -- see is_stub
+    is_static: bool = False  # C++ static member function (free functions are
+    # False; a file-scope `static` free function is reflected by linkage)
 
     @property
     def loc(self) -> str:
@@ -162,6 +164,7 @@ class Sym:
             "col": self.col,
             "is_definition": self.is_definition,
             "is_pure": self.is_pure,
+            "is_static": self.is_static,
             "is_stub": self.is_stub,
         }
 
@@ -442,7 +445,8 @@ class DispatchSite:
 _SYM_COLS = (
     "s.id, s.usr, s.spelling, s.qual_name, s.kind, s.type_info, "
     "s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, s.decl_col, "
-    "s.decl_path, s.is_definition, s.is_pure, s.access, s.parent_usr, s.resolved"
+    "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.access, "
+    "s.parent_usr, s.resolved"
 )
 
 
@@ -578,6 +582,7 @@ class GraphQuery:
             type_info=r["type_info"],
             is_definition=bool(r["is_definition"]),
             is_pure=bool(r["is_pure"]),
+            is_static=bool(r["is_static"]),
             access=r["access"],
             parent_usr=r["parent_usr"],
             resolved=bool(r["resolved"]),

@@ -1216,6 +1216,11 @@ class Method(Callable):
         return self.sym.is_pure
 
     @property
+    def is_static(self) -> bool:
+        """C++ ``static`` member function: no implicit ``this`` receiver."""
+        return self.sym.is_static
+
+    @property
     def is_virtual(self) -> bool:
         """Participates in dynamic dispatch (pure, overrides, or is overridden)."""
         return self._cb.graph.is_virtual_method(self.sym)

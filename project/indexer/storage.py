@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -120,6 +120,11 @@ CREATE TABLE IF NOT EXISTS symbol (
     is_definition INTEGER NOT NULL DEFAULT 0,
     is_pure      INTEGER NOT NULL DEFAULT 0,  -- C++: pure virtual ('= 0'), so
                                               -- no definition can ever exist
+    is_static    INTEGER NOT NULL DEFAULT 0,  -- v12: C++ static member function
+                                              -- (clang_CXXMethod_isStatic). Free
+                                              -- functions/non-methods are 0; a
+                                              -- file-scope `static` free function
+                                              -- is captured by linkage='internal'
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
@@ -256,6 +261,7 @@ class Symbol:
     # (system/stdlib) target -- see schema
     is_definition: bool = False
     is_pure: bool = False
+    is_static: bool = False
     linkage: Optional[str] = None
     access: Optional[str] = None
     parent_usr: Optional[str] = None
@@ -270,6 +276,7 @@ def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
     if cls is Symbol:
         kwargs["is_definition"] = bool(kwargs["is_definition"])
         kwargs["is_pure"] = bool(kwargs["is_pure"])
+        kwargs["is_static"] = bool(kwargs["is_static"])
         kwargs["resolved"] = bool(kwargs["resolved"])
     if cls is File:
         kwargs["indexed"] = bool(kwargs["indexed"])
@@ -354,6 +361,13 @@ class Storage:
             # No backfill possible from stored data -- reindex to populate.
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0"
+            )
+            changed = True
+        if "is_static" not in cols:
+            # v11 -> v12: C++ static member function flag. No backfill possible
+            # from stored data -- reindex to populate; old rows read as 0.
+            self._conn.execute(
+                "ALTER TABLE symbol ADD COLUMN is_static INTEGER NOT NULL DEFAULT 0"
             )
             changed = True
         if "decl_path" not in cols:
@@ -897,6 +911,7 @@ class Storage:
         "decl_path",
         "is_definition",
         "is_pure",
+        "is_static",
         "linkage",
         "access",
         "parent_usr",
@@ -932,6 +947,7 @@ class Storage:
             "  decl_col      = COALESCE(excluded.decl_col, symbol.decl_col), "
             "  is_definition = MAX(excluded.is_definition, symbol.is_definition), "
             "  is_pure       = MAX(excluded.is_pure, symbol.is_pure), "
+            "  is_static     = MAX(excluded.is_static, symbol.is_static), "
             "  linkage       = COALESCE(excluded.linkage, symbol.linkage), "
             "  access        = COALESCE(excluded.access, symbol.access), "
             "  parent_usr    = COALESCE(excluded.parent_usr, symbol.parent_usr), "

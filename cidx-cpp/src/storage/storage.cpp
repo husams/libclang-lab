@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS symbol (
                                               -- so the stub keeps the path here
     is_definition INTEGER NOT NULL DEFAULT 0,
     is_pure      INTEGER NOT NULL DEFAULT 0,
+    is_static    INTEGER NOT NULL DEFAULT 0,  -- v12: C++ static member function
     linkage      TEXT,
     access       TEXT,
     parent_usr   TEXT,
@@ -169,7 +170,7 @@ CREATE TABLE IF NOT EXISTS call_arg (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '11');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '12');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -204,11 +205,11 @@ constexpr std::array<std::string_view, 17> kSymbolKinds = {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 19> kSymbolInsertCols = {
+constexpr std::array<std::string_view, 20> kSymbolInsertCols = {
     "usr",       "spelling",   "qual_name",     "display_name", "kind",
     "type_info", "file_id",    "line",          "col",          "decl_file_id",
     "decl_line", "decl_col",   "decl_path",     "is_definition", "is_pure",
-    "linkage",   "access",     "parent_usr",    "resolved",
+    "is_static", "linkage",    "access",        "parent_usr",   "resolved",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
@@ -220,11 +221,11 @@ constexpr char kFileCols[] =
 constexpr char kSymbolCols[] =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
-    "linkage, access, parent_usr, resolved, decl_path";
+    "is_static, linkage, access, parent_usr, resolved, decl_path";
 constexpr char kSymbolColsS[] =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
-    "s.decl_col, s.is_definition, s.is_pure, s.linkage, s.access, "
+    "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
     "s.parent_usr, s.resolved, s.decl_path";
 
 std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
@@ -323,11 +324,12 @@ Symbol symbol_from(const SqliteStmt &st) {
   s.decl_col = opt_int64(st, 12);
   s.is_definition = st.col_int64(13) != 0;
   s.is_pure = st.col_int64(14) != 0;
-  s.linkage = opt_text(st, 15);
-  s.access = opt_text(st, 16);
-  s.parent_usr = opt_text(st, 17);
-  s.resolved = st.col_int64(18) != 0;
-  s.decl_path = opt_text(st, 19);
+  s.is_static = st.col_int64(15) != 0;
+  s.linkage = opt_text(st, 16);
+  s.access = opt_text(st, 17);
+  s.parent_usr = opt_text(st, 18);
+  s.resolved = st.col_int64(19) != 0;
+  s.decl_path = opt_text(st, 20);
   return s;
 }
 
@@ -495,6 +497,13 @@ void Storage::migrate() {
     // No backfill possible from stored data -- reindex to populate.
     db_.exec(
         "ALTER TABLE symbol ADD COLUMN is_pure INTEGER NOT NULL DEFAULT 0");
+    changed = true;
+  }
+  if (!has_col(cols, "is_static")) {
+    // v11 -> v12: C++ static member function flag. No backfill possible from
+    // stored data -- reindex to populate; old rows read as 0.
+    db_.exec(
+        "ALTER TABLE symbol ADD COLUMN is_static INTEGER NOT NULL DEFAULT 0");
     changed = true;
   }
   if (!has_col(cols, "decl_path")) {
@@ -1066,9 +1075,9 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   auto st = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
-      "is_definition, is_pure, linkage, access, parent_usr, resolved, "
-      "decl_path) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "is_definition, is_pure, is_static, linkage, access, parent_usr, "
+      "resolved, decl_path) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  spelling      = excluded.spelling, "
       "  qual_name     = COALESCE(excluded.qual_name, symbol.qual_name), "
@@ -1089,6 +1098,7 @@ int64_t Storage::add_symbol(const Symbol &sym) {
       "  decl_col      = COALESCE(excluded.decl_col, symbol.decl_col), "
       "  is_definition = MAX(excluded.is_definition, symbol.is_definition), "
       "  is_pure       = MAX(excluded.is_pure, symbol.is_pure), "
+      "  is_static     = MAX(excluded.is_static, symbol.is_static), "
       "  linkage       = COALESCE(excluded.linkage, symbol.linkage), "
       "  access        = COALESCE(excluded.access, symbol.access), "
       "  parent_usr    = COALESCE(excluded.parent_usr, symbol.parent_usr), "
@@ -1108,13 +1118,14 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   bind_opt(st, 12, sym.decl_col);
   st.bind(13, static_cast<int64_t>(sym.is_definition ? 1 : 0));
   st.bind(14, static_cast<int64_t>(sym.is_pure ? 1 : 0));
-  bind_opt(st, 15, sym.linkage);
-  bind_opt(st, 16, sym.access);
-  bind_opt(st, 17, sym.parent_usr);
-  st.bind(18, static_cast<int64_t>(sym.resolved ? 1 : 0));
+  st.bind(15, static_cast<int64_t>(sym.is_static ? 1 : 0));
+  bind_opt(st, 16, sym.linkage);
+  bind_opt(st, 17, sym.access);
+  bind_opt(st, 18, sym.parent_usr);
+  st.bind(19, static_cast<int64_t>(sym.resolved ? 1 : 0));
   // decl_path is INSERTed but intentionally NOT in the ON CONFLICT SET: a real
   // add_symbol never clobbers a stub's recorded external path (mirrors Python).
-  bind_opt(st, 19, sym.decl_path);
+  bind_opt(st, 20, sym.decl_path);
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }

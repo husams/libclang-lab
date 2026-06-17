@@ -54,6 +54,9 @@ struct Symbol {
                                         // (system/stdlib) target -- see schema
   bool is_definition = false;
   bool is_pure = false;
+  bool is_static = false; // v12: C++ static member function. Free functions and
+                          // non-methods are false; a file-scope `static` free
+                          // function is reflected by linkage='internal'.
   std::optional<std::string> linkage;
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;

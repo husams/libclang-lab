@@ -252,6 +252,9 @@ def _to_symbol(cursor: cx.Cursor, file_id: int) -> Symbol | None:
         decl_col=None if is_def else cursor.location.column,
         is_definition=is_def,
         is_pure=cursor.is_pure_virtual_method(),
+        # C++ static member function. False for free functions and non-methods;
+        # a file-scope `static` free function is captured by linkage='internal'.
+        is_static=cursor.is_static_method(),
         linkage=_linkage(cursor),
         access=_ACCESS.get(cursor.access_specifier),
         parent_usr=parent_usr,

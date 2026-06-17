@@ -175,6 +175,9 @@ public:
   unsigned clang_CXXMethod_isPureVirtual(CXCursor c) const {
     return ::clang_CXXMethod_isPureVirtual(c);
   }
+  unsigned clang_CXXMethod_isStatic(CXCursor c) const {
+    return ::clang_CXXMethod_isStatic(c);
+  }
   CXLinkageKind clang_getCursorLinkage(CXCursor c) const {
     return ::clang_getCursorLinkage(c);
   }

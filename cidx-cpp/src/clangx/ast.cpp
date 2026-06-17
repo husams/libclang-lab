@@ -490,6 +490,9 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
   }
   sym.is_definition = is_def;
   sym.is_pure = lib.clang_CXXMethod_isPureVirtual(cursor) != 0;
+  // C++ static member function. False for free functions and non-methods; a
+  // file-scope `static` free function is captured by linkage='internal'.
+  sym.is_static = lib.clang_CXXMethod_isStatic(cursor) != 0;
   sym.linkage = linkage_name(lib.clang_getCursorLinkage(cursor));
   sym.access = access_name(lib.clang_getCXXAccessSpecifier(cursor));
   sym.parent_usr = std::move(parent_usr);
