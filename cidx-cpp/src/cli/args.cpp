@@ -19,14 +19,14 @@ namespace {
 // ---------------------------------------------------------------------------
 
 const char kTopUsage[] =
-    "usage: cidx [-h]\n"
+    "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
     "search,show,list,ls,delete} "
     "...\n";
 
 const char kTopHelp[] =
-    "usage: cidx [-h]\n"
+    "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
     "search,show,list,ls,delete} "
@@ -54,7 +54,8 @@ const char kTopHelp[] =
     "    delete              delete a component, directory, file, or symbol\n"
     "\n"
     "options:\n"
-    "  -h, --help            show this help message and exit\n";
+    "  -h, --help            show this help message and exit\n"
+    "  --version             show program's version number and exit\n";
 
 const char kInitUsage[] = "usage: cidx init [-h] [--force]\n";
 
@@ -805,16 +806,26 @@ struct CommandScan {
   std::optional<std::string> command;
   std::size_t next = 0;
   bool help = false;
+  bool version = false;
 };
 
 CommandScan scan_command(const std::vector<std::string> &tokens, std::size_t i,
-                         std::vector<std::string> &extras) {
+                         std::vector<std::string> &extras,
+                         bool allow_version = false) {
   CommandScan out;
   const std::size_t n = tokens.size();
   while (i < n) {
     const std::string &tok = tokens[i];
     if (tok == "-h" || tok == "--help") {
       out.help = true;
+      out.next = i + 1;
+      return out;
+    }
+    // argparse's version action fires the instant `--version` is consumed
+    // (before the required-subcommand check). Only the top parser registers
+    // it, so sub-scans (show/list/delete) leave it to the extras path.
+    if (allow_version && tok == "--version") {
+      out.version = true;
       out.next = i + 1;
       return out;
     }
@@ -1108,9 +1119,13 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
   std::vector<std::string> extras;
   ParsedArgs pa;
 
-  CommandScan top = scan_command(argv, 0, extras);
+  CommandScan top = scan_command(argv, 0, extras, /*allow_version=*/true);
   if (top.help) {
     pa.help_text = kTopHelp;
+    return pa;
+  }
+  if (top.version) {
+    pa.version = true;
     return pa;
   }
   if (!top.command) {

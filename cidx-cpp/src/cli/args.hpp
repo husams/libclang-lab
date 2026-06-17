@@ -22,12 +22,19 @@
 namespace cidx {
 namespace cli {
 
+// Tool version. Keep in sync with pyproject.toml [project].version and the
+// Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
+inline constexpr const char *kVersion = "0.1.0";
+
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
   std::string what;    // show: symbol|file; list: components|dirs|files|symbols
 
   // -h/--help anywhere: when set, print to stdout and exit 0 (argparse).
   std::optional<std::string> help_text;
+
+  // --version at the top level: print "cidx <kVersion>" to stdout, exit 0.
+  bool version = false;
 
   std::string path;                       // add-source --path (required)
   std::optional<std::string> name;        // add-source/import --name

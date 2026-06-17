@@ -54,6 +54,10 @@ int main(int argc, char **argv) {
       std::cout << *parsed.help_text;
       return 0;
     }
+    if (parsed.version) { // argparse --version: version on stdout, exit 0
+      std::cout << "cidx " << cidx::cli::kVersion << "\n";
+      return 0;
+    }
 
     cidx::cli::Context ctx;
     ctx.cache_dir = cidx::cli::resolve_cache_dir();
