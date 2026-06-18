@@ -14,6 +14,7 @@
 #include "astcache/astcache.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
+#include "cli/format.hpp"
 #include "cli/json_out.hpp"
 #include "cli/kind_names.hpp"
 #include "storage/storage.hpp"
@@ -21,19 +22,21 @@
 
 namespace cidx {
 
+namespace fmt = cli::format;
+
 // ---------------------------------------------------------------------------
 // CursorKind classification sets
 // ---------------------------------------------------------------------------
 
 bool is_function_kind(CXCursorKind k) {
-  // _FUNCTION_KINDS from clang/ast.py lines 122-128.
+  // _FUNCTION_KINDS from clang/ast.py lines 122-130 (5 kinds; ConversionFunction
+  // intentionally excluded — Python does not include it).
   switch (k) {
   case CXCursor_FunctionDecl:
   case CXCursor_CXXMethod:
   case CXCursor_Constructor:
   case CXCursor_Destructor:
   case CXCursor_FunctionTemplate:
-  case CXCursor_ConversionFunction:
     return true;
   default:
     return false;
@@ -434,7 +437,15 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
       // COMPONENT://PATH form.
       const auto sep = target.find("://");
       const std::string comp_name = target.substr(0, sep);
-      const std::string rel = target.substr(sep + 3);
+      // Mirror Python: rel.lstrip("/") so "lab:///manifests/…" strips extra slashes
+      // before join (pathutil::join resets on a leading '/' component).
+      std::string rel = target.substr(sep + 3);
+      const std::size_t first_nonslash = rel.find_first_not_of('/');
+      if (first_nonslash != std::string::npos) {
+        rel = rel.substr(first_nonslash);
+      } else {
+        rel.clear();
+      }
 
       try {
         Storage db(ctx.index_path);
@@ -536,17 +547,20 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
     if (!sym_opt) {
       // Print appropriate error.
       if (args.ast_usr) {
-        *ctx.err << "error: no symbol with USR '" << *args.ast_usr << "'\n";
+        // N1: Python emits !r (single-quoted) for the USR.
+        *ctx.err << "error: no symbol with USR " << fmt::py_repr(*args.ast_usr) << "\n";
       } else if (args.ast_id) {
         *ctx.err << "error: no symbol with id " << *args.ast_id << "\n";
       } else {
         // --name: get the hits for the disambiguation message.
         auto hits = db.search_symbols(*args.name, args.kind);
         if (hits.empty()) {
-          *ctx.err << "error: no symbol matches --name '" << *args.name << "'"
+          // N1: use py_repr for the name (Python !r — single-quoted, backslash-escaped).
+          *ctx.err << "error: no symbol matches --name "
+                   << fmt::py_repr(*args.name)
                    << (args.kind ? " (kind " + *args.kind + ")" : "") << "\n";
         } else {
-          *ctx.err << "error: --name '" << *args.name << "' matches "
+          *ctx.err << "error: --name " << fmt::py_repr(*args.name) << " matches "
                    << hits.size()
                    << " symbols; disambiguate with --usr/--id (or pass "
                       "--first):\n";
@@ -554,8 +568,9 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
           for (std::size_t i = 0; i < show; ++i) {
             const auto &s = hits[i];
             const std::string loc = s.qual_name ? *s.qual_name : s.spelling;
-            *ctx.err << "  #" << s.id << "  " << s.kind << "  " << loc
-                     << "  [" << s.usr << "]\n";
+            // B1: pad kind to 14 chars (Python: f"  #{s.id}  {s.kind:<14}  {loc}  [{s.usr}]").
+            *ctx.err << "  #" << s.id << "  " << fmt::ljust(s.kind, 14)
+                     << "  " << loc << "  [" << s.usr << "]\n";
           }
           if (hits.size() > 25) {
             *ctx.err << "  ... and " << (hits.size() - 25) << " more\n";

@@ -22,21 +22,21 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete} "
+    "search,show,list,ls,delete,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete} "
+    "search,show,list,ls,delete,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
     "  {init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete}\n"
+    "search,show,list,ls,delete,ast}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
@@ -52,6 +52,8 @@ const char kTopHelp[] =
     "    list (ls)           browse the index: components, dirs, files, "
     "symbols\n"
     "    delete              delete a component, directory, file, or symbol\n"
+    "    ast                 on-demand AST analysis (dump, locals, conditions, "
+    "cache)\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
@@ -455,22 +457,30 @@ const char kAstHelp[] =
     "  -h, --help   show this help message and exit\n";
 
 const char kAstDumpUsage[] =
-    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types]\n"
-    "                     [--usr USR] [--id N] [--name FUZZY]\n"
-    "                     [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                     [--cache | --no-cache]\n"
-    "                     [FILE|COMPONENT://PATH] [-- FLAGS]\n";
+    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
+    "                     [--id N] [--name FUZZY]\n"
+    "                     [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,"
+    "namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                     [FILE|COMPONENT://PATH] ...\n";
 
 const char kAstDumpHelp[] =
-    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types]\n"
-    "                     [--usr USR] [--id N] [--name FUZZY]\n"
-    "                     [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                     [--cache | --no-cache]\n"
-    "                     [FILE|COMPONENT://PATH] [-- FLAGS]\n"
+    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
+    "                     [--id N] [--name FUZZY]\n"
+    "                     [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,"
+    "namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                     [FILE|COMPONENT://PATH] ...\n"
     "\n"
     "positional arguments:\n"
-    "  FILE|COMPONENT://PATH  a source file or indexed path\n"
-    "  -- FLAGS               ad-hoc compile flags for un-imported files\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
@@ -479,68 +489,107 @@ const char kAstDumpHelp[] =
     "  --types               annotate cursor types\n"
     "  --usr USR             exact clang USR\n"
     "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match\n"
-    "  --kind KIND           restrict a --name match to one symbol kind\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
     "  --first               if --name is ambiguous, take the closest match\n"
     "  --db PATH             index database to read (default: the standard "
     "index)\n"
     "  --json                emit machine-readable JSON\n"
     "  --cache               use the on-disk AST cache (default)\n"
-    "  --no-cache            ignore the cache: always reparse\n";
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
 
 const char kAstLocalsUsage[] =
-    "usage: cidx ast locals [-h] [--params]\n"
-    "                       [--usr USR] [--id N] [--name FUZZY]\n"
-    "                       [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                       [--cache | --no-cache]\n"
-    "                       [FILE|COMPONENT://PATH] [-- FLAGS]\n";
+    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                       [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,namespace,"
+    "struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                       [FILE|COMPONENT://PATH] ...\n";
 
 const char kAstLocalsHelp[] =
-    "usage: cidx ast locals [-h] [--params]\n"
-    "                       [--usr USR] [--id N] [--name FUZZY]\n"
-    "                       [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                       [--cache | --no-cache]\n"
-    "                       [FILE|COMPONENT://PATH] [-- FLAGS]\n"
+    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                       [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,namespace,"
+    "struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                       [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
     "\n"
     "options:\n"
-    "  -h, --help   show this help message and exit\n"
-    "  --params     include parameters, not just body locals\n"
-    "  --usr USR    exact clang USR\n"
-    "  --id N       numeric symbol id\n"
-    "  --name FUZZY fuzzy qualified-name match\n"
-    "  --kind KIND  restrict a --name match to one symbol kind\n"
-    "  --first      if --name is ambiguous, take the closest match\n"
-    "  --db PATH    index database to read (default: the standard index)\n"
-    "  --json       emit machine-readable JSON\n"
-    "  --cache      use the on-disk AST cache (default)\n"
-    "  --no-cache   ignore the cache: always reparse\n";
+    "  -h, --help            show this help message and exit\n"
+    "  --params              include parameters, not just body locals\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
 
 const char kAstConditionsUsage[] =
-    "usage: cidx ast conditions [-h] [--ast]\n"
-    "                           [--usr USR] [--id N] [--name FUZZY]\n"
-    "                           [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                           [--cache | --no-cache]\n"
-    "                           [FILE|COMPONENT://PATH] [-- FLAGS]\n";
+    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--cache |\n"
+    "                           --no-cache]\n"
+    "                           [FILE|COMPONENT://PATH] ...\n";
 
 const char kAstConditionsHelp[] =
-    "usage: cidx ast conditions [-h] [--ast]\n"
-    "                           [--usr USR] [--id N] [--name FUZZY]\n"
-    "                           [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                           [--cache | --no-cache]\n"
-    "                           [FILE|COMPONENT://PATH] [-- FLAGS]\n"
+    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--cache |\n"
+    "                           --no-cache]\n"
+    "                           [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
     "\n"
     "options:\n"
-    "  -h, --help   show this help message and exit\n"
-    "  --ast        also emit the condition's AST subtree\n"
-    "  --usr USR    exact clang USR\n"
-    "  --id N       numeric symbol id\n"
-    "  --name FUZZY fuzzy qualified-name match\n"
-    "  --kind KIND  restrict a --name match to one symbol kind\n"
-    "  --first      if --name is ambiguous, take the closest match\n"
-    "  --db PATH    index database to read (default: the standard index)\n"
-    "  --json       emit machine-readable JSON\n"
-    "  --cache      use the on-disk AST cache (default)\n"
-    "  --no-cache   ignore the cache: always reparse\n";
+    "  -h, --help            show this help message and exit\n"
+    "  --ast                 also emit the condition's AST subtree\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
 
 const char kAstCacheUsage[] =
     "usage: cidx ast cache [-h] {build,status,clear} ...\n";
@@ -550,34 +599,114 @@ const char kAstCacheHelp[] =
     "\n"
     "positional arguments:\n"
     "  {build,status,clear}\n"
-    "    build   parse + cache the target's AST (force-reparse)\n"
-    "    status  list cache entries, sizes, validity\n"
-    "    clear   remove cached AST(s) for a target, or all\n"
+    "    build               parse + cache the target's AST (force-reparse)\n"
+    "    status              list cache entries, sizes, validity\n"
+    "    clear               remove cached AST(s) for a target, or all\n"
     "\n"
     "options:\n"
-    "  -h, --help  show this help message and exit\n";
+    "  -h, --help            show this help message and exit\n";
 
 const char kAstCacheBuildUsage[] =
-    "usage: cidx ast cache build [-h]\n"
-    "                            [--usr USR] [--id N] [--name FUZZY]\n"
-    "                            [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                            [FILE|COMPONENT://PATH] [-- FLAGS]\n";
+    "usage: cidx ast cache build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n";
 
 const char kAstCacheBuildHelp[] =
-    "usage: cidx ast cache build [-h]\n"
-    "                            [--usr USR] [--id N] [--name FUZZY]\n"
-    "                            [--kind KIND] [--first] [--db PATH] [--json]\n"
-    "                            [FILE|COMPONENT://PATH] [-- FLAGS]\n"
+    "usage: cidx ast cache build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
     "\n"
     "options:\n"
-    "  -h, --help   show this help message and exit\n"
-    "  --usr USR    exact clang USR\n"
-    "  --id N       numeric symbol id\n"
-    "  --name FUZZY fuzzy qualified-name match\n"
-    "  --kind KIND  restrict a --name match to one symbol kind\n"
-    "  --first      if --name is ambiguous, take the closest match\n"
-    "  --db PATH    index database to read (default: the standard index)\n"
-    "  --json       emit machine-readable JSON\n";
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+// B6: per-action help constants so -h shows the correct subcommand name.
+const char kAstCacheStatusHelp[] =
+    "usage: cidx ast cache status [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                             [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                             [--first] [--db PATH] [--json]\n"
+    "                             [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+const char kAstCacheClearHelp[] =
+    "usage: cidx ast cache clear [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n";
 
 // ---------------------------------------------------------------------------
 // Choice sets
@@ -1686,12 +1815,15 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
         return pa;
       }
       if (!csub.command) {
+        // B5: Python dest="cache_action" so the required-arg error says
+        // "cache_action", not "what".
         fail(kAstCacheUsage, "cidx ast cache",
-             "the following arguments are required: what");
+             "the following arguments are required: cache_action");
       }
       if (!contains(kAstCacheWhats, *csub.command)) {
+        // B5: same dest name in the invalid-choice message.
         fail(kAstCacheUsage, "cidx ast cache",
-             "argument what: invalid choice: '" + *csub.command +
+             "argument cache_action: invalid choice: '" + *csub.command +
                  "' (choose from " + join(kAstCacheWhats, ", ") + ")");
       }
       pa.cache_action = *csub.command;
@@ -1700,7 +1832,14 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
                                                          : kAstCacheClearSpec;
       ParseState st = parse_leaf(spec, argv, csub.next, extras);
       if (st.help) {
-        pa.help_text = kAstCacheBuildHelp;
+        // B6: route help by action so `-h` shows the correct subcommand's usage.
+        if (pa.cache_action == "status") {
+          pa.help_text = kAstCacheStatusHelp;
+        } else if (pa.cache_action == "clear") {
+          pa.help_text = kAstCacheClearHelp;
+        } else {
+          pa.help_text = kAstCacheBuildHelp;
+        }
         return pa;
       }
       fill_ast_common(st);

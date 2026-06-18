@@ -1506,12 +1506,11 @@ focus_function(const ParsedArgs &args, Context &ctx,
   if (!is_function_kind(clang_getCursorKind(focus))) {
     CXString sp = clang_getCursorSpelling(focus);
     const char *name = clang_getCString(sp);
-    CXCursorKind k = clang_getCursorKind(focus);
-    CXString kstr = clang_getCursorKindSpelling(k);
-    const char *ks = clang_getCString(kstr);
+    // B2: Python uses kind.name (e.g. "STRUCT_DECL"), not clang_getCursorKindSpelling
+    // (which returns "StructDecl"). Use cli::kind_name for byte-identical output.
+    const char *ks = cli::kind_name(static_cast<unsigned>(clang_getCursorKind(focus)));
     *ctx.err << "error: '" << (name ? name : "?") << "' is a "
-             << (ks ? ks : "?") << ", not a function\n";
-    clang_disposeString(kstr);
+             << ks << ", not a function\n";
     clang_disposeString(sp);
     return {std::nullopt, 1};
   }
@@ -1846,8 +1845,11 @@ int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx) {
   const bool dir_exists =
       (::stat(fd.c_str(), &fdst) == 0 && S_ISDIR(fdst.st_mode));
 
-  const bool has_target =
-      !args.target.empty() || args.ast_usr || args.ast_id || args.name;
+  // B4: Python keys on args.target only (not --usr/--id/--name) for per-target
+  // mode; selectors are not a cache address — they need an index lookup that is
+  // out of scope for the cache sub-commands.  Also: dir-exists check must run
+  // first so "no cache dir" prints before any target resolution attempt.
+  const bool has_target = !args.target.empty();
 
   if (has_target) {
     auto [t_opt, rc] = resolve_target(args, ctx);
@@ -1865,8 +1867,14 @@ int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx) {
 
     if (!ast_exists) {
       if (args.ast_json) {
-        *ctx.out << "{\"key\": \"" << short_key << "\", \"present\": false, "
-                 << "\"abspath\": \"" << t.abspath << "\"}\n";
+        // S1: route through json_out to properly escape abspath (backslashes,
+        // quotes, etc.) — matches Python json.dumps default.
+        json_out::Object absent;
+        absent.push_back({"key", json_out::Value::of(short_key)});
+        absent.push_back({"present", json_out::Value::of(false)});
+        absent.push_back({"abspath", json_out::Value::of(t.abspath)});
+        *ctx.out << json_out::dumps_indent2(json_out::Value::obj(std::move(absent)))
+                 << "\n";
       } else {
         *ctx.out << short_key << "  ABSENT  " << t.abspath << "\n";
       }
@@ -1880,13 +1888,15 @@ int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx) {
     const std::string status_str = valid ? "valid" : "STALE";
 
     if (args.ast_json) {
-      *ctx.out << "{\n"
-               << "  \"key\": \"" << short_key << "\",\n"
-               << "  \"present\": true,\n"
-               << "  \"valid\": " << (valid ? "true" : "false") << ",\n"
-               << "  \"size\": " << size << ",\n"
-               << "  \"abspath\": \"" << abspath_str << "\"\n"
-               << "}\n";
+      // S1: route through json_out to properly escape abspath.
+      json_out::Object present;
+      present.push_back({"key", json_out::Value::of(short_key)});
+      present.push_back({"present", json_out::Value::of(true)});
+      present.push_back({"valid", json_out::Value::of(valid)});
+      present.push_back({"size", json_out::Value::of(size)});
+      present.push_back({"abspath", json_out::Value::of(abspath_str)});
+      *ctx.out << json_out::dumps_indent2(json_out::Value::obj(std::move(present)))
+               << "\n";
     } else {
       *ctx.out << short_key << "  "
                << format::rjust(format::group_thousands(size), 10) << "  "
@@ -1966,29 +1976,22 @@ int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx) {
 
   const int64_t total_entries = static_cast<int64_t>(entries.size());
   if (args.ast_json) {
-    *ctx.out << "{\n  \"entries\": [";
-    if (entries.empty()) {
-      *ctx.out << "],\n";
-    } else {
-      *ctx.out << "\n";
-      for (std::size_t ei = 0; ei < entries.size(); ++ei) {
-        const auto &e = entries[ei];
-        *ctx.out << "    {\n"
-                 << "      \"key\": \"" << e.key << "\",\n"
-                 << "      \"status\": \"" << e.status << "\",\n"
-                 << "      \"size\": " << e.size << ",\n"
-                 << "      \"abspath\": \"" << e.abspath << "\"\n"
-                 << "    }";
-        if (ei + 1 < entries.size()) {
-          *ctx.out << ",";
-        }
-        *ctx.out << "\n";
-      }
-      *ctx.out << "  ],\n";
+    // S1: route bulk status through json_out to properly escape abspath strings.
+    json_out::Array entries_arr;
+    for (const auto &e : entries) {
+      json_out::Object entry;
+      entry.push_back({"key", json_out::Value::of(e.key)});
+      entry.push_back({"status", json_out::Value::of(e.status)});
+      entry.push_back({"size", json_out::Value::of(e.size)});
+      entry.push_back({"abspath", json_out::Value::of(e.abspath)});
+      entries_arr.push_back(json_out::Value::obj(std::move(entry)));
     }
-    *ctx.out << "  \"total_entries\": " << total_entries << ",\n"
-             << "  \"total_bytes\": " << total_bytes << "\n"
-             << "}\n";
+    json_out::Object root;
+    root.push_back({"entries", json_out::Value::arr(std::move(entries_arr))});
+    root.push_back({"total_entries", json_out::Value::of(total_entries)});
+    root.push_back({"total_bytes", json_out::Value::of(total_bytes)});
+    *ctx.out << json_out::dumps_indent2(json_out::Value::obj(std::move(root)))
+             << "\n";
   } else {
     if (entries.empty()) {
       *ctx.out << "cache is empty\n";
@@ -2018,8 +2021,8 @@ int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx) {
 int cmd_ast_cache_clear(const ParsedArgs &args, Context &ctx) {
   namespace fs = std::filesystem;
   const std::string fd = astcache::files_dir();
-  const bool has_target =
-      !args.target.empty() || args.ast_usr || args.ast_id || args.name;
+  // B4: same as cmd_ast_cache_status — only args.target drives per-target mode.
+  const bool has_target = !args.target.empty();
 
   if (has_target) {
     auto [t_opt, rc] = resolve_target(args, ctx);
