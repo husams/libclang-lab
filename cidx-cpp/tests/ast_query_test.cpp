@@ -572,10 +572,13 @@ TEST_CASE("argparse: ast bogus subcommand → exit 2") {
   CHECK(f.msg.find("invalid choice") != std::string::npos);
 }
 
-TEST_CASE("argparse: no prefix abbreviation — --dept is unrecognized") {
-  // D6: no abbreviation; --dept must NOT expand to --depth
-  auto f = parse_fail({"ast", "dump", "--dept", "2", "foo.c"});
-  CHECK(f.code == 2);
+TEST_CASE("argparse: prefix abbreviation — --dept expands to --depth") {
+  // Python argparse (allow_abbrev=True) accepts --dept as an unambiguous prefix
+  // of --depth. The C++ parser now mirrors this for byte-identical parity
+  // (QD-2 fix; formerly D6 delta). Must parse successfully with ast_depth=2.
+  auto pa = cli::parse_args({"ast", "dump", "--dept", "2", "foo.c"});
+  REQUIRE(!pa.help_text.has_value());
+  CHECK(pa.depth == 2);
 }
 
 TEST_CASE("argparse: ast dump --kind valid choice") {

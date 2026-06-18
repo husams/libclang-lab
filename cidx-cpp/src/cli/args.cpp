@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <string>
@@ -1123,12 +1124,29 @@ bool parse_py_int(const std::string &raw, long &out) {
 }
 
 const OptSpec *find_long(const Spec &spec, const std::string &name) {
+  // Exact match first (fast path; also avoids ambiguity when the token IS a
+  // full option name, e.g. "--name" vs "--name-with-suffix").
   for (const OptSpec &o : spec.opts) {
     if (name == o.name) {
       return &o;
     }
   }
-  return nullptr;
+  // Unambiguous prefix match — mirrors Python argparse allow_abbrev=True.
+  // Return the unique option whose long name starts with `name`; if zero or
+  // two-or-more options match, return nullptr (treated as unrecognized).
+  const std::size_t nlen = name.size();
+  const OptSpec *match = nullptr;
+  for (const OptSpec &o : spec.opts) {
+    // o.name is const char*; use strncmp to check if it starts with `name`.
+    if (std::strncmp(o.name, name.c_str(), nlen) == 0) {
+      if (match != nullptr) {
+        // Ambiguous: more than one option matches the prefix → unrecognized.
+        return nullptr;
+      }
+      match = &o;
+    }
+  }
+  return match;
 }
 
 const OptSpec *find_short(const Spec &spec, char c) {

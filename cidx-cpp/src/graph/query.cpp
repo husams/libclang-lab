@@ -378,6 +378,7 @@ GraphQuery::walk(int64_t start_id,
   tr.nodes_by_id[start_sym->id] = *start_sym;
   tr.depth_by_id[start_sym->id] = 0;
   tr.parent_by_id[start_sym->id] = std::nullopt;
+  tr.insertion_order_.push_back(start_sym->id);
 
   std::vector<int64_t> frontier = {start_sym->id};
   const auto kid_ids = kind_ids(kinds);
@@ -392,6 +393,7 @@ GraphQuery::walk(int64_t start_id,
           tr.nodes_by_id[e.peer.id] = e.peer;
           tr.depth_by_id[e.peer.id] = d;
           tr.parent_by_id[e.peer.id] = nid;
+          tr.insertion_order_.push_back(e.peer.id);
           nxt.push_back(e.peer.id);
           if (static_cast<int>(tr.nodes_by_id.size()) >= max_nodes) {
             return tr;

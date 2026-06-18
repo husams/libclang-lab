@@ -209,14 +209,26 @@ struct Traversal {
   std::unordered_map<int64_t, Sym> nodes_by_id;
   std::unordered_map<int64_t, int> depth_by_id;
   std::unordered_map<int64_t, std::optional<int64_t>> parent_by_id;
+  // BFS insertion order: ids in the order they were first discovered.
+  // Required so that stable_sort by (depth, name) breaks same-key ties by
+  // BFS discovery order (mirrors Python dict insertion order + sorted() stable).
+  // Populated by GraphQuery::walk(); callers that build Traversal directly
+  // should also append to this vector whenever they insert into nodes_by_id.
+  std::vector<int64_t> insertion_order_;
 
   // Python Traversal.nodes property (query.py:1667-1673, R5):
   // stable_sort by (depth, name) where name = sym.name (COALESCE).
+  // The initial vector is built in BFS insertion order so that stable_sort
+  // preserves discovery order for same (depth, name) ties.
   std::vector<Sym> nodes() const {
     std::vector<Sym> out;
-    out.reserve(nodes_by_id.size());
-    for (const auto &kv : nodes_by_id) {
-      out.push_back(kv.second);
+    out.reserve(insertion_order_.size());
+    // Build in insertion order to get a deterministic stable_sort input.
+    for (int64_t id : insertion_order_) {
+      auto it = nodes_by_id.find(id);
+      if (it != nodes_by_id.end()) {
+        out.push_back(it->second);
+      }
     }
     std::stable_sort(out.begin(), out.end(), [this](const Sym &a, const Sym &b) {
       const int da = depth_by_id.count(a.id) ? depth_by_id.at(a.id) : 0;
