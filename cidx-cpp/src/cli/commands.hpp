@@ -57,6 +57,17 @@ int cmd_ast_cache_build(const ParsedArgs &args, Context &ctx);
 int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx);
 int cmd_ast_cache_clear(const ParsedArgs &args, Context &ctx);
 
+// Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
+//                            hierarchy|dispatch)
+int cmd_graph_callers(const ParsedArgs &args, Context &ctx);
+int cmd_graph_callees(const ParsedArgs &args, Context &ctx);
+int cmd_graph_refs(const ParsedArgs &args, Context &ctx);
+int cmd_graph_neighbors(const ParsedArgs &args, Context &ctx);
+int cmd_graph_walk(const ParsedArgs &args, Context &ctx);
+int cmd_graph_path(const ParsedArgs &args, Context &ctx);
+int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx);
+int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx);
+
 // Dispatch on args.command/args.what (args.help_text handled by the caller).
 int run_command(const ParsedArgs &args, Context &ctx);
 

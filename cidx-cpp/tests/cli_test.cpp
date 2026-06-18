@@ -322,7 +322,7 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,ast} "
+    "search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 // Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
@@ -389,7 +389,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, add-source, import, index, resolve, set, file, "
-            "dump-compile-commands, search, show, list, ls, delete, ast)\n");
+            "dump-compile-commands, search, show, list, ls, delete, graph, "
+            "ast)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -470,13 +471,14 @@ TEST_CASE("args: extra positional -> exit 2, unrecognized arguments") {
                      "cidx: error: unrecognized arguments: extra\n");
 }
 
-TEST_CASE("args: NO prefix abbreviation — --lim is unrecognized (D6 delta)") {
-  // Python argparse (allow_abbrev) accepts `--lim`; cidx-cpp deliberately
-  // does not. Documented delta — golden tests never use abbreviations.
-  const ParseFail f = parse_fail({"search", "--lim", "5", "foo"});
-  CHECK(f.code == 2);
-  CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: unrecognized arguments: --lim foo\n");
+TEST_CASE("args: prefix abbreviation — --lim expands to --limit (allow_abbrev parity)") {
+  // Python argparse (allow_abbrev=True) accepts `--lim` as an unambiguous
+  // prefix of `--limit`. The C++ parser now mirrors this for byte-identical
+  // parity (QD-2 fix, formerly D6 delta). --lim 5 sets limit=5 and does not
+  // raise a UsageError.
+  const auto pa = cli::parse_args({"search", "--lim", "5", "foo"});
+  REQUIRE(!pa.help_text.has_value());
+  CHECK(pa.limit == 5);
 }
 
 TEST_CASE("args: missing required positional -> subparser exit 2") {
@@ -805,7 +807,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "positional arguments:\n"
           "  "
           "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-          "search,show,list,ls,delete,ast}"
+          "search,show,list,ls,delete,graph,ast}"
           "\n"
           "    init                create a blank index database\n"
           "    add-source          register a component\n"
@@ -827,6 +829,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "files, symbols\n"
           "    delete              delete a component, directory, file, or "
           "symbol\n"
+          "    graph               query the relationship graph (callers, "
+          "callees, refs, neighbors, walk, path, hierarchy, dispatch)\n"
           "    ast                 on-demand AST analysis (dump, locals, "
           "conditions, cache)\n"
           "\n"

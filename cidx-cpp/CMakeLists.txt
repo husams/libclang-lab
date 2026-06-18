@@ -266,6 +266,8 @@ add_library(cidx_core STATIC
   src/cli/json_out.cpp
   src/cli/kind_names.cpp
   src/cli/commands.cpp
+  src/graph/query.cpp
+  src/graph/emit.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )

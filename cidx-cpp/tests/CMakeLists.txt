@@ -10,6 +10,8 @@ set(CIDX_DEFAULT_TESTS
   storage_smoke_test
   storage_migration_test
   graph_storage_test
+  graph_query_test
+  graph_parity_boundary_test
   fuzzy_match_test
   repo_test
 )

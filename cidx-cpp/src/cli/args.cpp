@@ -2,12 +2,14 @@
 
 #include <cctype>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "util/errors.hpp"
+#include "util/pathutil.hpp"
 
 namespace cidx {
 namespace cli {
@@ -22,21 +24,21 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,ast} "
+    "search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,ast} "
+    "search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
     "  {init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,ast}\n"
+    "search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
@@ -52,6 +54,8 @@ const char kTopHelp[] =
     "    list (ls)           browse the index: components, dirs, files, "
     "symbols\n"
     "    delete              delete a component, directory, file, or symbol\n"
+    "    graph               query the relationship graph (callers, callees, "
+    "refs, neighbors, walk, path, hierarchy, dispatch)\n"
     "    ast                 on-demand AST analysis (dump, locals, conditions, "
     "cache)\n"
     "\n"
@@ -179,6 +183,248 @@ const char kDumpCcHelp[] =
     "options:\n"
     "  -h, --help  show this help message and exit\n"
     "  --db PATH   operate on this index DB (default: the standard index)\n";
+
+// ---- graph help texts -------------------------------------------------------
+
+const char kGraphUsage[] =
+    "usage: cidx graph [-h]\n"
+    "                  "
+    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch} ...\n";
+
+const char kGraphHelp[] =
+    "usage: cidx graph [-h]\n"
+    "                  "
+    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch}\n"
+    "    callers             functions that call the symbol\n"
+    "    callees             functions the symbol calls\n"
+    "    refs                incoming references (calls + uses) to the symbol\n"
+    "    neighbors           one-hop typed neighbors\n"
+    "    walk                bounded BFS over typed edges\n"
+    "    path                shortest path between two symbols, or none\n"
+    "    hierarchy           class bases, subclasses, and members\n"
+    "    dispatch            run-time targets of a virtual-method call\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+// The shared selector block (--usr/--id/--name/--kind/--first/--db/--json/
+// --limit) appears in every graph subcommand's usage.
+#define GRAPH_SELECTOR_USAGE_ARGS                                              \
+  "(--usr USR | --id N | --name FUZZY)\n"                                     \
+  "                          [--kind {class,class-template,constructor,"       \
+  "destructor,enum,enum-constant,function,function-template,macro,member,"     \
+  "method,namespace,struct,type-alias,typedef,union,variable}]\n"             \
+  "                          [--first] [--db PATH] [--json] [--limit N]"
+
+// Shared options block (printed identically in every graph subcommand's help).
+#define GRAPH_SELECTOR_OPTIONS                                                 \
+  "  -h, --help            show this help message and exit\n"                  \
+  "  --usr USR             exact clang USR\n"                                  \
+  "  --id N                numeric symbol id\n"                                \
+  "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"         \
+  "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"  \
+  "function,function-template,macro,member,method,namespace,struct,type-alias,"\
+  "typedef,union,variable}\n"                                                  \
+  "                        restrict a --name match to one symbol kind\n"       \
+  "  --first               if --name is ambiguous, take the closest match\n"   \
+  "  --db PATH             index database to query (default: the standard cache\n"\
+  "                        index)\n"                                           \
+  "  --json                emit stable machine-readable JSON\n"                \
+  "  --limit N             cap the number of results (default 50)\n"
+
+const char kGraphCallersUsage[] =
+    "usage: cidx graph callers [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
+
+const char kGraphCallersHelp[] =
+    "usage: cidx graph callers [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS;
+
+const char kGraphCalleesUsage[] =
+    "usage: cidx graph callees [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
+
+const char kGraphCalleesHelp[] =
+    "usage: cidx graph callees [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS;
+
+// "usage: cidx graph refs [-h] " is 28 chars → continuation indent = 28 spaces
+// (different from callers/callees which are 31 chars wide).
+const char kGraphRefsUsage[] =
+    "usage: cidx graph refs [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n";
+
+const char kGraphRefsHelp[] =
+    "usage: cidx graph refs [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS;
+
+const char kGraphNeighborsUsage[] =
+    "usage: cidx graph neighbors [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                            "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--edge KINDS] [--direction {in,out}]\n";
+
+const char kGraphNeighborsHelp[] =
+    "usage: cidx graph neighbors [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                            "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--edge KINDS] [--direction {in,out}]\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS
+    "  --edge KINDS          comma-separated edge kinds (calls, contains, "
+    "field_of,\n"
+    "                        inherits, instantiates, method_of, overrides,\n"
+    "                        specializes, uses) (default: all)\n"
+    "  --direction {in,out}  edge direction (default out)\n";
+
+const char kGraphWalkUsage[] =
+    "usage: cidx graph walk [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n";
+
+const char kGraphWalkHelp[] =
+    "usage: cidx graph walk [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS
+    "  --edge KINDS          comma-separated edge kinds (calls, contains, "
+    "field_of,\n"
+    "                        inherits, instantiates, method_of, overrides,\n"
+    "                        specializes, uses) (default: calls)\n"
+    "  --direction {in,out}  edge direction (default out)\n"
+    "  --depth N             max BFS depth (default 3)\n";
+
+const char kGraphPathUsage[] =
+    "usage: cidx graph path [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       (--to-usr USR | --to-id N | --to-name FUZZY)\n"
+    "                       [--to-kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n";
+
+const char kGraphPathHelp[] =
+    "usage: cidx graph path [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       (--to-usr USR | --to-id N | --to-name FUZZY)\n"
+    "                       [--to-kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS
+    "  --to-usr USR          destination by USR\n"
+    "  --to-id N             destination by id\n"
+    "  --to-name FUZZY       destination by name\n"
+    "  --to-kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --to-name match to one symbol kind\n"
+    "  --edge KINDS          comma-separated edge kinds (calls, contains, "
+    "field_of,\n"
+    "                        inherits, instantiates, method_of, overrides,\n"
+    "                        specializes, uses) (default: calls)\n"
+    "  --direction {in,out}  edge direction (default out)\n"
+    "  --depth N             max search depth (default 8)\n";
+
+const char kGraphHierarchyUsage[] =
+    "usage: cidx graph hierarchy [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                            "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--transitive]\n"
+    "                            [--access {public,protected,private,all}]\n";
+
+const char kGraphHierarchyHelp[] =
+    "usage: cidx graph hierarchy [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                            "
+    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--transitive]\n"
+    "                            [--access {public,protected,private,all}]\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS
+    "  --transitive          walk the whole inheritance tree, not just direct "
+    "edges\n"
+    "  --access {public,protected,private,all}\n"
+    "                        filter members by C++ access specifier (default "
+    "all)\n";
+
+// "usage: cidx graph dispatch [-h] " is 32 chars → continuation indent = 27
+// spaces (argparse aligns continuation under the first arg after the prog+opts).
+const char kGraphDispatchUsage[] =
+    "usage: cidx graph dispatch [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--limit N]\n";
+
+const char kGraphDispatchHelp[] =
+    "usage: cidx graph dispatch [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--limit N]\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS;
 
 // The 17 symbol kinds, sorted — sorted(SYMBOL_KINDS) in cli.py.
 #define CIDX_KIND_BRACE                                                        \
@@ -723,7 +969,10 @@ const std::vector<std::string> kCommands = {
     "init",  "add-source", "import",                "index",
     "resolve", "set",      "file",                  "dump-compile-commands",
     "search",  "show",     "list",                  "ls",
-    "delete",  "ast"};
+    "delete",  "graph",    "ast"};
+const std::vector<std::string> kGraphWhats = {
+    "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
+    "dispatch"};
 const std::vector<std::string> kAstWhats = {"dump", "locals", "conditions",
                                             "cache"};
 const std::vector<std::string> kAstCacheWhats = {"build", "status", "clear"};
@@ -875,12 +1124,29 @@ bool parse_py_int(const std::string &raw, long &out) {
 }
 
 const OptSpec *find_long(const Spec &spec, const std::string &name) {
+  // Exact match first (fast path; also avoids ambiguity when the token IS a
+  // full option name, e.g. "--name" vs "--name-with-suffix").
   for (const OptSpec &o : spec.opts) {
     if (name == o.name) {
       return &o;
     }
   }
-  return nullptr;
+  // Unambiguous prefix match — mirrors Python argparse allow_abbrev=True.
+  // Return the unique option whose long name starts with `name`; if zero or
+  // two-or-more options match, return nullptr (treated as unrecognized).
+  const std::size_t nlen = name.size();
+  const OptSpec *match = nullptr;
+  for (const OptSpec &o : spec.opts) {
+    // o.name is const char*; use strncmp to check if it starts with `name`.
+    if (std::strncmp(o.name, name.c_str(), nlen) == 0) {
+      if (match != nullptr) {
+        // Ambiguous: more than one option matches the prefix → unrecognized.
+        return nullptr;
+      }
+      match = &o;
+    }
+  }
+  return match;
 }
 
 const OptSpec *find_short(const Spec &spec, char c) {
@@ -1390,6 +1656,136 @@ const Spec kDeleteSymbolSpec = {
     {1},
 };
 
+// -- graph leaf specs (M6) ---------------------------------------------------
+// mutex group 1: --usr|--id|--name (required selector)
+// mutex group 2: --to-usr|--to-id|--to-name (required path destination)
+#define GRAPH_SELECTOR_OPTS                                                    \
+  {"--usr", '\0', ValueKind::kString, "--usr", nullptr, 1},                   \
+      {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},                    \
+      {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},             \
+      {"--kind", '\0', ValueKind::kString, "--kind", &kSymbolKinds, 0},       \
+      {"--first", '\0', ValueKind::kNone, "--first", nullptr, 0},             \
+      {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},                 \
+      {"--json", '\0', ValueKind::kNone, "--json", nullptr, 0},               \
+  {"--limit", '\0', ValueKind::kInt, "--limit", nullptr, 0}
+
+const std::vector<std::string> kDirectionChoices = {"in", "out"};
+const std::vector<std::string> kAccessChoices = {
+    "public", "protected", "private", "all"};
+
+const Spec kGraphCallersSpec = {
+    "cidx graph callers",
+    kGraphCallersUsage,
+    kGraphCallersHelp,
+    {GRAPH_SELECTOR_OPTS},
+    {},
+    false,
+    {},
+    {1}, // required mutex: one of --usr|--id|--name
+};
+
+const Spec kGraphCalleesSpec = {
+    "cidx graph callees",
+    kGraphCalleesUsage,
+    kGraphCalleesHelp,
+    {GRAPH_SELECTOR_OPTS},
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kGraphRefsSpec = {
+    "cidx graph refs",
+    kGraphRefsUsage,
+    kGraphRefsHelp,
+    {GRAPH_SELECTOR_OPTS},
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kGraphNeighborsSpec = {
+    "cidx graph neighbors",
+    kGraphNeighborsUsage,
+    kGraphNeighborsHelp,
+    {
+        GRAPH_SELECTOR_OPTS,
+        {"--edge", '\0', ValueKind::kString, "--edge", nullptr, 0},
+        {"--direction", '\0', ValueKind::kString, "--direction",
+         &kDirectionChoices, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kGraphWalkSpec = {
+    "cidx graph walk",
+    kGraphWalkUsage,
+    kGraphWalkHelp,
+    {
+        GRAPH_SELECTOR_OPTS,
+        {"--edge", '\0', ValueKind::kString, "--edge", nullptr, 0},
+        {"--direction", '\0', ValueKind::kString, "--direction",
+         &kDirectionChoices, 0},
+        {"--depth", '\0', ValueKind::kInt, "--depth", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kGraphPathSpec = {
+    "cidx graph path",
+    kGraphPathUsage,
+    kGraphPathHelp,
+    {
+        GRAPH_SELECTOR_OPTS,
+        {"--to-usr", '\0', ValueKind::kString, "--to-usr", nullptr, 2},
+        {"--to-id", '\0', ValueKind::kInt, "--to-id", nullptr, 2},
+        {"--to-name", '\0', ValueKind::kString, "--to-name", nullptr, 2},
+        {"--to-kind", '\0', ValueKind::kString, "--to-kind", &kSymbolKinds, 0},
+        {"--edge", '\0', ValueKind::kString, "--edge", nullptr, 0},
+        {"--direction", '\0', ValueKind::kString, "--direction",
+         &kDirectionChoices, 0},
+        {"--depth", '\0', ValueKind::kInt, "--depth", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1, 2}, // both selector and destination required
+};
+
+const Spec kGraphHierarchySpec = {
+    "cidx graph hierarchy",
+    kGraphHierarchyUsage,
+    kGraphHierarchyHelp,
+    {
+        GRAPH_SELECTOR_OPTS,
+        {"--transitive", '\0', ValueKind::kNone, "--transitive", nullptr, 0},
+        {"--access", '\0', ValueKind::kString, "--access", &kAccessChoices, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+const Spec kGraphDispatchSpec = {
+    "cidx graph dispatch",
+    kGraphDispatchUsage,
+    kGraphDispatchHelp,
+    {GRAPH_SELECTOR_OPTS},
+    {},
+    false,
+    {},
+    {1},
+};
+
 // -- ast leaf specs (ADR-006 M5) --------------------------------------------
 // Shared "common" options for all ast sub-commands (mirrors _ast_common).
 // mutex group 2: --cache (kNone/true by default) vs --no-cache (kNone/false).
@@ -1739,6 +2135,123 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.usr = opt_value(st, "--usr");
     pa.component = opt_value(st, "--component");
     pa.dry_run = st.flags.count("--dry-run") != 0;
+  } else if (pa.command == "graph") {
+    // -- graph sub-command (M6) -----------------------------------------------
+    // Shared helper to fill graph selector fields from a ParseState.
+    auto fill_graph_selector = [&](const ParseState &st) {
+      pa.usr = opt_value(st, "--usr");
+      if (const auto v = opt_value(st, "--id")) {
+        long parsed = 0;
+        parse_py_int(*v, parsed);
+        pa.graph_id = static_cast<int64_t>(parsed);
+      }
+      pa.name = opt_value(st, "--name");
+      pa.kind = opt_value(st, "--kind");
+      pa.first = st.flags.count("--first") != 0;
+      pa.index_db = opt_value(st, "--db");
+      pa.graph_json = st.flags.count("--json") != 0;
+      pa.graph_limit = int_value(st, "--limit", 50);
+    };
+
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kGraphHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kGraphUsage, "cidx graph",
+           "the following arguments are required: what");
+    }
+    if (!contains(kGraphWhats, *what.command)) {
+      fail(kGraphUsage, "cidx graph",
+           "argument what: invalid choice: '" + *what.command +
+               "' (choose from " + join(kGraphWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+
+    if (pa.what == "callers") {
+      ParseState st = parse_leaf(kGraphCallersSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphCallersHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+    } else if (pa.what == "callees") {
+      ParseState st = parse_leaf(kGraphCalleesSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphCalleesHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+    } else if (pa.what == "refs") {
+      ParseState st = parse_leaf(kGraphRefsSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphRefsHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+    } else if (pa.what == "neighbors") {
+      ParseState st =
+          parse_leaf(kGraphNeighborsSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphNeighborsHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+      pa.edge = opt_value(st, "--edge");
+      pa.direction = opt_value(st, "--direction").value_or("out");
+    } else if (pa.what == "walk") {
+      ParseState st = parse_leaf(kGraphWalkSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphWalkHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+      pa.edge = opt_value(st, "--edge");
+      pa.direction = opt_value(st, "--direction").value_or("out");
+      pa.graph_depth = int_value(st, "--depth", 3);
+    } else if (pa.what == "path") {
+      ParseState st = parse_leaf(kGraphPathSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphPathHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+      pa.to_usr = opt_value(st, "--to-usr");
+      if (const auto v = opt_value(st, "--to-id")) {
+        long parsed = 0;
+        parse_py_int(*v, parsed);
+        pa.to_id = static_cast<int64_t>(parsed);
+      }
+      pa.to_name = opt_value(st, "--to-name");
+      pa.to_kind = opt_value(st, "--to-kind");
+      pa.edge = opt_value(st, "--edge");
+      pa.direction = opt_value(st, "--direction").value_or("out");
+      pa.graph_depth = int_value(st, "--depth", 8);
+    } else if (pa.what == "hierarchy") {
+      ParseState st =
+          parse_leaf(kGraphHierarchySpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphHierarchyHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+      pa.transitive = st.flags.count("--transitive") != 0;
+      pa.access = opt_value(st, "--access").value_or("all");
+    } else { // dispatch
+      ParseState st =
+          parse_leaf(kGraphDispatchSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphDispatchHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+    }
+    // Apply abspath+expanduser to --db for graph (cli.py:1819)
+    if (pa.index_db) {
+      pa.index_db =
+          pathutil::abspath(pathutil::expanduser(*pa.index_db));
+    }
   } else if (pa.command == "ast") {
     // -- ast sub-command -------------------------------------------------------
     CommandScan what = scan_command(argv, i, extras);

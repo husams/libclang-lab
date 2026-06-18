@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -220,6 +221,66 @@ public:
   std::vector<Edge> cross_repo_edges();
 
   Stats stats();
+
+  // -- graph read-only accessors (M6 — query.py parity) ----------------------
+  // A1: total edge count (query.py:558)
+  int64_t edge_count();
+
+  // A2: true once `cidx resolve` has rolled up edge counts (query.py:579-583)
+  bool graph_resolved();
+
+  // A3/A4: fetch one symbol by USR / numeric id (query.py:666-668)
+  std::optional<Symbol> graph_symbol_by_usr(const std::string &usr);
+  std::optional<Symbol> graph_symbol_by_id(int64_t id);
+
+  // A5: fuzzy COALESCE(qual_name,spelling) lookup (query.py:707-738, R1).
+  // Escapes ONLY % and _ (matching query.py:719 -- NOT storage escape_like).
+  std::vector<Symbol> find_symbols(const std::string &pattern,
+                                   const std::optional<std::string> &kind,
+                                   int limit);
+
+  // A6 result row: 8 edge columns + decoded symbol-from-offset (plan §A6).
+  struct GraphEdgeRow {
+    int64_t eid = -1;
+    int64_t src_id = -1;
+    int64_t dst_id = -1;
+    int64_t ekind = 0;
+    int64_t ecount = 0;
+    int64_t rawcount = 0;
+    std::optional<int64_t> base_access;
+    std::optional<int64_t> is_virtual;
+    Symbol sym; // decoded from cols 8..29 via symbol_from_offset
+  };
+
+  // A7 result row for batch site loading.
+  struct EdgeSiteRow {
+    int64_t edge_id = -1;
+    std::optional<int64_t> file_id;
+    std::optional<int64_t> line;
+    std::optional<int64_t> col;
+    bool conditional = false;
+    std::optional<std::string> args_sig;
+    std::optional<std::string> recv_src_kind;
+    std::optional<std::string> recv_type_usr;
+    std::optional<std::string> recv_decl_usr;
+    std::optional<int64_t> recv_param_pos;
+    std::optional<int64_t> recv_type_is_value;
+  };
+
+  // A6: typed-edge query (query.py:782-813)
+  // direction "in"|"out"; kind_ids empty => no kind filter; count_resolved
+  // controls which count expression is used (A6 plan §count_expr).
+  std::vector<GraphEdgeRow>
+  graph_edges(int64_t mine_id, const std::string &direction,
+              const std::vector<int64_t> &kind_ids, bool count_resolved,
+              int limit);
+
+  // A7: batch-load edge_site rows for many edge_ids (query.py:839-870)
+  std::map<int64_t, std::vector<EdgeSiteRow>>
+  edge_sites_for(const std::vector<int64_t> &edge_ids);
+
+  // A8: single-edge sites with LIMIT (query.py:884-906)
+  std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit);
 
   // Raw connection — exposed for tests (schema assertions on :memory: DBs)
   // and future maintenance commands. Not part of the indexing flow.
