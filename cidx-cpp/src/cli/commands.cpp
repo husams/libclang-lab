@@ -31,6 +31,9 @@
 #include "cli/json_out.hpp"
 #include "cli/kind_names.hpp"
 #include "compiledb/compiledb.hpp"
+#include "graph/emit.hpp"
+#include "graph/query.hpp"
+#include "graph/records.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 #include "util/env.hpp"
@@ -2082,6 +2085,369 @@ int cmd_ast_cache_clear(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// ============================================================================
+// M6 graph command group helpers
+// ============================================================================
+
+namespace {
+
+// Parse a comma-separated edge-kind spec into a vector.
+// Returns nullopt for null/empty string (= all kinds).
+// Mirrors cli.py:_edge_kinds (cli.py:999-1004).
+std::optional<std::vector<std::string>>
+graph_edge_kinds(const std::optional<std::string> &spec) {
+  if (!spec || spec->empty()) {
+    return std::nullopt;
+  }
+  std::vector<std::string> out;
+  std::string cur;
+  for (char c : *spec) {
+    if (c == ',') {
+      if (!cur.empty()) {
+        // strip leading/trailing spaces
+        std::size_t b = 0, e = cur.size();
+        while (b < e && cur[b] == ' ') ++b;
+        while (e > b && cur[e-1] == ' ') --e;
+        if (b < e) out.push_back(cur.substr(b, e-b));
+      }
+      cur.clear();
+    } else {
+      cur += c;
+    }
+  }
+  if (!cur.empty()) {
+    std::size_t b = 0, e = cur.size();
+    while (b < e && cur[b] == ' ') ++b;
+    while (e > b && cur[e-1] == ' ') --e;
+    if (b < e) out.push_back(cur.substr(b, e-b));
+  }
+  if (out.empty()) {
+    return std::nullopt;
+  }
+  return out;
+}
+
+// Resolve --usr/--id/--name to a single Sym.
+// Returns (nullopt, rc) on failure.
+// Mirrors cli.py:_select_one (cli.py:1007-1046).
+std::pair<std::optional<graph::Sym>, int>
+graph_select_one(graph::GraphQuery &g,
+                 const std::optional<std::string> &usr_opt,
+                 const std::optional<int64_t> &id_opt,
+                 const std::optional<std::string> &name_opt,
+                 const std::optional<std::string> &kind_opt,
+                 bool first,
+                 std::ostream &err_out) {
+  if (usr_opt) {
+    auto s = g.get_by_usr(*usr_opt);
+    if (!s) {
+      err_out << "error: no symbol with USR "
+              << format::py_repr(*usr_opt) << "\n";
+      return {std::nullopt, 1};
+    }
+    return {s, 0};
+  }
+  if (id_opt) {
+    auto s = g.get_by_id(*id_opt);
+    if (!s) {
+      err_out << "error: no symbol with id " << *id_opt << "\n";
+      return {std::nullopt, 1};
+    }
+    return {s, 0};
+  }
+  if (!name_opt) {
+    err_out << "error: one of the arguments --usr --id --name is required\n";
+    return {std::nullopt, 2};
+  }
+  const std::string &name = *name_opt;
+  auto hits = g.find(name, kind_opt, 50);
+  if (hits.empty()) {
+    err_out << "error: no symbol matches --name " << format::py_repr(name);
+    if (kind_opt) {
+      err_out << " (kind " << *kind_opt << ")";
+    }
+    err_out << "\n";
+    return {std::nullopt, 1};
+  }
+  if (hits.size() > 1 && !first) {
+    err_out << "error: --name " << format::py_repr(name) << " matches "
+            << hits.size()
+            << " symbols; disambiguate with --usr/--id (or pass --first):\n";
+    const std::size_t show = std::min(hits.size(), std::size_t{25});
+    for (std::size_t j = 0; j < show; ++j) {
+      const auto &s = hits[j];
+      err_out << "  #" << s.id << "  "
+              << format::ljust(s.kind, 14) << " " << s.name
+              << "  @" << s.loc() << "  [" << s.usr << "]\n";
+    }
+    if (hits.size() > 25) {
+      err_out << "  ... and " << (hits.size() - 25) << " more\n";
+    }
+    return {std::nullopt, 2};
+  }
+  return {hits[0], 0};
+}
+
+// Open graph + enforce edges. Returns (nullptr, 1) on failure.
+// `storage_out` receives the opened Storage (must outlive GraphQuery).
+struct GraphHandle {
+  std::unique_ptr<Storage> storage;
+  std::unique_ptr<graph::GraphQuery> g;
+};
+
+std::optional<GraphHandle>
+open_graph(const ParsedArgs & /*args*/, Context &ctx) {
+  GraphHandle h;
+  h.storage = std::make_unique<Storage>(ctx.index_path);
+
+  // Check file exists (NoIndexError)
+  {
+    struct stat st{};
+    if (::stat(ctx.index_path.c_str(), &st) != 0) {
+      const std::string repr = format::py_repr(ctx.index_path);
+      *ctx.err << "error: no cidx index at " << repr
+               << ". Build one with:\n"
+               << "    cd <repo> && cidx add-source --path . && cidx import "
+                  "--db <build> && cidx index && cidx resolve\n"
+               << "or pass --db PATH / set $INDEXER_CACHE.\n";
+      return std::nullopt;
+    }
+  }
+
+  h.g = std::make_unique<graph::GraphQuery>(*h.storage, ctx.index_path);
+  if (h.g->edge_count() == 0) {
+    const std::string repr = format::py_repr(ctx.index_path);
+    *ctx.err << "error: index " << repr
+             << " has no graph edges -- it was built with "
+                "`cidx index --no-graph`, or the graph was cleared. Re-run "
+                "`cidx index` (without --no-graph) then `cidx resolve`.\n";
+    return std::nullopt;
+  }
+  return h;
+}
+
+} // namespace
+
+// ============================================================================
+// M6 graph sub-command handlers
+// ============================================================================
+
+int cmd_graph_callers(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto edges = h->g->edges_in(sym->id, std::vector<std::string>{"calls"},
+                              args.graph_limit);
+  graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
+                    "callers of " + sym->name + " (@" + sym->loc() + "):");
+  return 0;
+}
+
+int cmd_graph_callees(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto edges = h->g->edges_out(sym->id, std::vector<std::string>{"calls"},
+                               args.graph_limit);
+  graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
+                    "callees of " + sym->name + " (@" + sym->loc() + "):");
+  return 0;
+}
+
+int cmd_graph_refs(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto edges = h->g->references(sym->id, args.graph_limit);
+  graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
+                    "references to " + sym->name + " (@" + sym->loc() + "):");
+  return 0;
+}
+
+int cmd_graph_neighbors(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto kinds_vec = graph_edge_kinds(args.edge);
+  std::optional<std::vector<int64_t>> kid_ids;
+  try {
+    kid_ids = h->g->kind_ids(kinds_vec);
+  } catch (const std::invalid_argument &e) {
+    *ctx.err << "error: " << e.what() << "\n";
+    return 1;
+  }
+  auto edges = h->g->edges(sym->id, args.direction, kid_ids, args.graph_limit);
+  const std::string kinds_str = args.edge.value_or("all");
+  graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
+                    args.direction + "-neighbors of " + sym->name +
+                        " (@" + sym->loc() + ") over " + kinds_str + ":");
+  return 0;
+}
+
+int cmd_graph_walk(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto kinds_vec = graph_edge_kinds(args.edge);
+  // walk default edge kind is "calls"
+  if (!kinds_vec) {
+    kinds_vec = std::vector<std::string>{"calls"};
+  }
+  graph::Traversal tr;
+  try {
+    tr = h->g->walk(sym->id, *kinds_vec, args.direction, args.graph_depth,
+                    args.graph_limit);
+  } catch (const std::invalid_argument &e) {
+    *ctx.err << "error: " << e.what() << "\n";
+    return 1;
+  }
+  // Exclude the start node from output
+  std::vector<graph::Sym> nodes;
+  for (const auto &n : tr.nodes()) {
+    if (n.id != sym->id) {
+      nodes.push_back(n);
+    }
+  }
+  // Build kinds comma-separated string for header
+  std::string kinds_str;
+  for (std::size_t ki = 0; ki < kinds_vec->size(); ++ki) {
+    if (ki != 0) kinds_str += ",";
+    kinds_str += (*kinds_vec)[ki];
+  }
+  graph::emit_syms(
+      nodes, args.graph_json, *ctx.out,
+      "reachable from " + sym->name + " (@" + sym->loc() + ") over " +
+          kinds_str + " " + args.direction + ", depth<=" +
+          std::to_string(args.graph_depth) + ":",
+      &tr.depth_by_id);
+  return 0;
+}
+
+int cmd_graph_path(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [src, rc_src] = graph_select_one(*h->g, args.usr, args.graph_id,
+                                        args.name, args.kind, args.first,
+                                        *ctx.err);
+  if (!src) return rc_src;
+  auto [dst, rc_dst] = graph_select_one(*h->g, args.to_usr, args.to_id,
+                                        args.to_name, args.to_kind, args.first,
+                                        *ctx.err);
+  if (!dst) return rc_dst;
+
+  auto kinds_vec = graph_edge_kinds(args.edge);
+  // path default edge kind is "calls"
+  if (!kinds_vec) {
+    kinds_vec = std::vector<std::string>{"calls"};
+  }
+  std::optional<std::vector<graph::Sym>> chain;
+  try {
+    chain = h->g->reaches(src->id, dst->id, *kinds_vec, args.direction,
+                          args.graph_depth);
+  } catch (const std::invalid_argument &e) {
+    *ctx.err << "error: " << e.what() << "\n";
+    return 1;
+  }
+  if (!chain) {
+    if (args.graph_json) {
+      *ctx.out << "null\n";
+    } else {
+      std::string ks;
+      for (std::size_t ki = 0; ki < kinds_vec->size(); ++ki) {
+        if (ki != 0) ks += ",";
+        ks += (*kinds_vec)[ki];
+      }
+      *ctx.out << "no path from " << src->name << " to " << dst->name
+               << " over " << ks << " " << args.direction << " within depth "
+               << args.graph_depth << "\n";
+    }
+    return 1;
+  }
+  graph::emit_syms(
+      *chain, args.graph_json, *ctx.out,
+      "path " + src->name + " -> " + dst->name + " (" +
+          std::to_string(chain->size() - 1) + " hop(s)):");
+  return 0;
+}
+
+int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  const bool direct = !args.transitive;
+  auto bases = h->g->bases(sym->id, direct);
+  auto subs = h->g->subclasses(sym->id, direct);
+  std::optional<std::string> access_filter;
+  if (args.access != "all") {
+    access_filter = args.access;
+  }
+  std::vector<graph::Sym> mems;
+  try {
+    mems = h->g->members(sym->id, access_filter);
+  } catch (const std::invalid_argument &e) {
+    *ctx.err << "error: " << e.what() << "\n";
+    return 1;
+  }
+  if (args.graph_json) {
+    using namespace json_out;
+    Array barr, sarr, marr;
+    for (const auto &s : bases) barr.push_back(s.to_dict());
+    for (const auto &s : subs) sarr.push_back(s.to_dict());
+    for (const auto &s : mems) marr.push_back(s.to_dict());
+    Object o;
+    o.push_back({"symbol", sym->to_dict()});
+    o.push_back({"bases", Value::arr(std::move(barr))});
+    o.push_back({"subclasses", Value::arr(std::move(sarr))});
+    o.push_back({"members", Value::arr(std::move(marr))});
+    *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
+    return 0;
+  }
+  const std::string scope = args.transitive ? "all" : "direct";
+  *ctx.out << "hierarchy of " << sym->name << " (@" << sym->loc() << "):\n";
+  graph::emit_syms(bases, false, *ctx.out, "  bases (" + scope + "):");
+  graph::emit_syms(subs, false, *ctx.out, "  subclasses (" + scope + "):");
+  graph::emit_syms(mems, false, *ctx.out, "  members:");
+  return 0;
+}
+
+int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto targets = h->g->dispatch_targets(sym->id);
+  const bool virt = h->g->is_virtual_method(sym->id);
+  if (args.graph_json) {
+    using namespace json_out;
+    Array tarr;
+    for (const auto &t : targets) tarr.push_back(t.to_dict());
+    Object o;
+    o.push_back({"method", sym->to_dict()});
+    o.push_back({"is_virtual", Value::of(virt)});
+    o.push_back({"targets", Value::arr(std::move(tarr))});
+    *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
+    return 0;
+  }
+  const std::string note = virt ? "" : "  (not a virtual method -- only itself)";
+  graph::emit_syms(targets, false, *ctx.out,
+                   "run-time dispatch targets of " + sym->name +
+                       " (@" + sym->loc() + ")" + note + ":");
+  return 0;
+}
+
 int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "init") {
     return cmd_init(args, ctx);
@@ -2137,6 +2503,16 @@ int run_command(const ParsedArgs &args, Context &ctx) {
       return cmd_ast_conditions(args, ctx);
     }
     return cmd_ast_cache(args, ctx);
+  }
+  if (args.command == "graph") {
+    if (args.what == "callers")   return cmd_graph_callers(args, ctx);
+    if (args.what == "callees")   return cmd_graph_callees(args, ctx);
+    if (args.what == "refs")      return cmd_graph_refs(args, ctx);
+    if (args.what == "neighbors") return cmd_graph_neighbors(args, ctx);
+    if (args.what == "walk")      return cmd_graph_walk(args, ctx);
+    if (args.what == "path")      return cmd_graph_path(args, ctx);
+    if (args.what == "hierarchy") return cmd_graph_hierarchy(args, ctx);
+    if (args.what == "dispatch")  return cmd_graph_dispatch(args, ctx);
   }
   // list
   if (args.what == "components") {

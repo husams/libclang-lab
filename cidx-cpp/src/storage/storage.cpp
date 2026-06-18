@@ -316,33 +316,38 @@ File file_from(const SqliteStmt &st) {
   return f;
 }
 
-Symbol symbol_from(const SqliteStmt &st) {
+// symbol_from_offset: decode kSymbolColsS starting at column `off`.
+// Called by symbol_from (off=0) and by A6 graph_edges (off=8, where 8 edge
+// columns precede the symbol columns).
+Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   Symbol s;
-  s.id = st.col_int64(0);
-  s.usr = st.col_text(1);
-  s.spelling = st.col_text(2);
-  s.qual_name = opt_text(st, 3);
-  s.display_name = opt_text(st, 4);
-  s.kind = st.col_text(5);
-  s.type_info = opt_text(st, 6);
-  s.file_id = opt_int64(st, 7);
-  s.line = opt_int64(st, 8);
-  s.col = opt_int64(st, 9);
-  s.decl_file_id = opt_int64(st, 10);
-  s.decl_line = opt_int64(st, 11);
-  s.decl_col = opt_int64(st, 12);
-  s.is_definition = st.col_int64(13) != 0;
-  s.is_pure = st.col_int64(14) != 0;
-  s.is_static = st.col_int64(15) != 0;
-  s.linkage = opt_text(st, 16);
-  s.access = opt_text(st, 17);
-  s.parent_usr = opt_text(st, 18);
-  s.resolved = st.col_int64(19) != 0;
-  s.decl_path = opt_text(st, 20);
-  // is_instantiation appended at end (col 21) -- stable decode on migrated DBs
-  // where ALTER TABLE appended the column (mirrors decl_path at col 20).
-  s.is_instantiation = st.col_int64(21) != 0;
+  s.id = st.col_int64(off + 0);
+  s.usr = st.col_text(off + 1);
+  s.spelling = st.col_text(off + 2);
+  s.qual_name = opt_text(st, off + 3);
+  s.display_name = opt_text(st, off + 4);
+  s.kind = st.col_text(off + 5);
+  s.type_info = opt_text(st, off + 6);
+  s.file_id = opt_int64(st, off + 7);
+  s.line = opt_int64(st, off + 8);
+  s.col = opt_int64(st, off + 9);
+  s.decl_file_id = opt_int64(st, off + 10);
+  s.decl_line = opt_int64(st, off + 11);
+  s.decl_col = opt_int64(st, off + 12);
+  s.is_definition = st.col_int64(off + 13) != 0;
+  s.is_pure = st.col_int64(off + 14) != 0;
+  s.is_static = st.col_int64(off + 15) != 0;
+  s.linkage = opt_text(st, off + 16);
+  s.access = opt_text(st, off + 17);
+  s.parent_usr = opt_text(st, off + 18);
+  s.resolved = st.col_int64(off + 19) != 0;
+  s.decl_path = opt_text(st, off + 20);
+  s.is_instantiation = st.col_int64(off + 21) != 0;
   return s;
+}
+
+Symbol symbol_from(const SqliteStmt &st) {
+  return symbol_from_offset(st, 0);
 }
 
 // Escape the LIKE metacharacters for use with ESCAPE '\' — order matters:
@@ -1664,6 +1669,262 @@ Stats Storage::stats() {
     }
   }
   return s;
+}
+
+// ============================================================================
+// M6 graph read-only accessors (A1–A8)
+// ============================================================================
+
+// A1 — total edge count (query.py:558)
+int64_t Storage::edge_count() {
+  auto st = db_.prepare("SELECT COUNT(*) FROM edge");
+  if (!st.step()) {
+    return 0;
+  }
+  return st.col_int64(0);
+}
+
+// A2 — true once graph_resolved_at is set (query.py:579-583)
+bool Storage::graph_resolved() {
+  auto st = db_.prepare(
+      "SELECT value FROM meta WHERE key = 'graph_resolved_at'");
+  if (!st.step()) {
+    return false;
+  }
+  const std::string val = st.col_text(0);
+  return !val.empty();
+}
+
+// A3 — fetch one symbol by USR (query.py:666-668)
+std::optional<Symbol> Storage::graph_symbol_by_usr(const std::string &usr) {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolColsS +
+                        " FROM symbol s WHERE s.usr = ?");
+  st.bind(1, std::string_view(usr));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return symbol_from_offset(st, 0);
+}
+
+// A4 — fetch one symbol by numeric id (query.py:666-668)
+std::optional<Symbol> Storage::graph_symbol_by_id(int64_t id) {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolColsS +
+                        " FROM symbol s WHERE s.id = ?");
+  st.bind(1, id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return symbol_from_offset(st, 0);
+}
+
+// A5 — fuzzy COALESCE(qual_name,spelling) lookup (query.py:707-738, R1)
+// Escapes ONLY % and _ (NOT backslash — matching query.py:719).
+std::vector<Symbol> Storage::find_symbols(const std::string &pattern,
+                                          const std::optional<std::string> &kind,
+                                          int limit) {
+  // Build like: "%" + join("%", escaped_segs) + "%"
+  // where escaped_segs = each "::" segment with % and _ escaped.
+  std::vector<std::string> segs;
+  std::size_t start = 0;
+  while (start <= pattern.size()) {
+    const std::size_t pos = pattern.find("::", start);
+    const std::string seg = pattern.substr(
+        start, pos == std::string::npos ? std::string::npos : pos - start);
+    if (!seg.empty()) {
+      std::string esc;
+      esc.reserve(seg.size());
+      for (const char c : seg) {
+        if (c == '%') {
+          esc += "\\%";
+        } else if (c == '_') {
+          esc += "\\_";
+        } else {
+          esc += c;
+        }
+      }
+      segs.push_back(esc);
+    }
+    if (pos == std::string::npos) {
+      break;
+    }
+    start = pos + 2;
+  }
+  std::string like = "%";
+  for (std::size_t i = 0; i < segs.size(); ++i) {
+    if (i != 0) {
+      like += "%";
+    }
+    like += segs[i];
+  }
+  like += "%";
+
+  std::string sql = std::string("SELECT ") + kSymbolColsS +
+                    " FROM symbol s WHERE COALESCE(s.qual_name, s.spelling) "
+                    "LIKE ? ESCAPE '\\'";
+  std::vector<SqlValue> args;
+  args.emplace_back(like);
+  if (kind) {
+    sql += " AND s.kind = ?";
+    args.emplace_back(*kind);
+  }
+  sql += " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
+         "COALESCE(s.qual_name, s.spelling) LIMIT ?";
+  args.emplace_back(static_cast<int64_t>(limit));
+
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from_offset(st, 0));
+  }
+  return out;
+}
+
+// A6 — typed-edge query (query.py:782-813)
+std::vector<Storage::GraphEdgeRow>
+Storage::graph_edges(int64_t mine_id, const std::string &direction,
+                     const std::vector<int64_t> &kind_ids, bool count_resolved,
+                     int limit) {
+  // direction "in": mine=dst_id, peer=src_id
+  // direction "out": mine=src_id, peer=dst_id
+  std::string mine, peer;
+  if (direction == "in") {
+    mine = "dst_id";
+    peer = "src_id";
+  } else {
+    mine = "src_id";
+    peer = "dst_id";
+  }
+
+  const std::string count_expr =
+      count_resolved
+          ? "e.count"
+          : "(SELECT COUNT(*) FROM edge_site es WHERE es.edge_id = e.id)";
+
+  std::string sql =
+      "SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, " +
+      count_expr +
+      " AS ecount, e.count AS rawcount, "
+      "e.base_access, e.is_virtual, " +
+      std::string(kSymbolColsS) +
+      " FROM edge e JOIN symbol s ON s.id = e." + peer +
+      " WHERE e." + mine + " = ?";
+
+  std::vector<SqlValue> args;
+  args.emplace_back(mine_id);
+
+  if (!kind_ids.empty()) {
+    sql += " AND e.kind IN (";
+    for (std::size_t i = 0; i < kind_ids.size(); ++i) {
+      if (i != 0) {
+        sql += ",";
+      }
+      sql += "?";
+    }
+    sql += ")";
+    for (int64_t kid : kind_ids) {
+      args.emplace_back(kid);
+    }
+  }
+  sql += " ORDER BY ecount DESC, e.kind LIMIT ?";
+  args.emplace_back(static_cast<int64_t>(limit));
+
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+
+  std::vector<GraphEdgeRow> out;
+  while (st.step()) {
+    GraphEdgeRow row;
+    row.eid = st.col_int64(0);
+    row.src_id = st.col_int64(1);
+    row.dst_id = st.col_int64(2);
+    row.ekind = st.col_int64(3);
+    row.ecount = st.col_int64(4);
+    row.rawcount = st.col_int64(5);
+    row.base_access = opt_int64(st, 6);
+    row.is_virtual = opt_int64(st, 7);
+    // Sym columns start at col 8 (R: column-order mismatch, plan §CRITICAL)
+    row.sym = symbol_from_offset(st, 8);
+    out.push_back(std::move(row));
+  }
+  return out;
+}
+
+// A7 — batch-load edge_site rows for many edge_ids (query.py:839-870)
+std::map<int64_t, std::vector<Storage::EdgeSiteRow>>
+Storage::edge_sites_for(const std::vector<int64_t> &edge_ids) {
+  if (edge_ids.empty()) {
+    return {};
+  }
+  std::string sql =
+      "SELECT edge_id, file_id, line, col, conditional, args_sig, "
+      "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
+      "       recv_type_is_value "
+      "FROM edge_site WHERE edge_id IN (";
+  for (std::size_t i = 0; i < edge_ids.size(); ++i) {
+    if (i != 0) {
+      sql += ",";
+    }
+    sql += "?";
+  }
+  sql += ") ORDER BY edge_id, file_id, line, col";
+
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < edge_ids.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), edge_ids[i]);
+  }
+
+  std::map<int64_t, std::vector<EdgeSiteRow>> out;
+  while (st.step()) {
+    EdgeSiteRow row;
+    row.edge_id = st.col_int64(0);
+    row.file_id = opt_int64(st, 1);
+    row.line = opt_int64(st, 2);
+    row.col = opt_int64(st, 3);
+    row.conditional = st.col_int64(4) != 0;
+    row.args_sig = opt_text(st, 5);
+    row.recv_src_kind = opt_text(st, 6);
+    row.recv_type_usr = opt_text(st, 7);
+    row.recv_decl_usr = opt_text(st, 8);
+    row.recv_param_pos = opt_int64(st, 9);
+    row.recv_type_is_value = opt_int64(st, 10);
+    out[row.edge_id].push_back(std::move(row));
+  }
+  return out;
+}
+
+// A8 — single-edge sites with LIMIT (query.py:884-906)
+std::vector<Storage::EdgeSiteRow>
+Storage::edge_sites_one(int64_t edge_id, int limit) {
+  auto st = db_.prepare(
+      "SELECT file_id, line, col, conditional, args_sig, "
+      "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
+      "       recv_type_is_value "
+      "FROM edge_site WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?");
+  st.bind(1, edge_id);
+  st.bind(2, static_cast<int64_t>(limit));
+
+  std::vector<EdgeSiteRow> out;
+  while (st.step()) {
+    EdgeSiteRow row;
+    row.edge_id = edge_id;
+    row.file_id = opt_int64(st, 0);
+    row.line = opt_int64(st, 1);
+    row.col = opt_int64(st, 2);
+    row.conditional = st.col_int64(3) != 0;
+    row.args_sig = opt_text(st, 4);
+    row.recv_src_kind = opt_text(st, 5);
+    row.recv_type_usr = opt_text(st, 6);
+    row.recv_decl_usr = opt_text(st, 7);
+    row.recv_param_pos = opt_int64(st, 8);
+    row.recv_type_is_value = opt_int64(st, 9);
+    out.push_back(std::move(row));
+  }
+  return out;
 }
 
 } // namespace cidx

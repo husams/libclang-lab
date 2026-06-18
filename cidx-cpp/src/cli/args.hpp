@@ -77,6 +77,23 @@ struct ParsedArgs {
   bool params = false;                   // locals --params
   bool cond_ast = false;                 // conditions --ast
   std::string cache_action;              // ast cache build|status|clear
+
+  // -- graph sub-command fields (cidx graph callers|callees|…) ---------------
+  // Shared selector: reuse usr (above), kind (above), first (above), index_db.
+  std::optional<int64_t> graph_id;       // --id  N (graph: numeric symbol id)
+  bool graph_json = false;               // --json (emit machine-readable JSON)
+  int graph_limit = 50;                  // --limit N (default 50)
+  std::string direction{"out"};          // --direction {in,out} (default out)
+  std::optional<std::string> edge;       // --edge KINDS (comma-separated)
+  int graph_depth = 3;                   // --depth N (walk default 3, path 8)
+  // path destination selector
+  std::optional<std::string> to_usr;     // --to-usr USR
+  std::optional<int64_t> to_id;          // --to-id N
+  std::optional<std::string> to_name;    // --to-name FUZZY
+  std::optional<std::string> to_kind;    // --to-kind {17 kinds}
+  // hierarchy flags
+  bool transitive = false;               // --transitive (walk whole hierarchy)
+  std::string access{"all"};             // --access {public,protected,private,all}
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

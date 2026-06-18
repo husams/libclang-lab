@@ -322,7 +322,7 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,ast} "
+    "search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 // Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
@@ -389,7 +389,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, add-source, import, index, resolve, set, file, "
-            "dump-compile-commands, search, show, list, ls, delete, ast)\n");
+            "dump-compile-commands, search, show, list, ls, delete, graph, "
+            "ast)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -805,7 +806,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "positional arguments:\n"
           "  "
           "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-          "search,show,list,ls,delete,ast}"
+          "search,show,list,ls,delete,graph,ast}"
           "\n"
           "    init                create a blank index database\n"
           "    add-source          register a component\n"
@@ -827,6 +828,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "files, symbols\n"
           "    delete              delete a component, directory, file, or "
           "symbol\n"
+          "    graph               query the relationship graph (callers, "
+          "callees, refs, neighbors, walk, path, hierarchy, dispatch)\n"
           "    ast                 on-demand AST analysis (dump, locals, "
           "conditions, cache)\n"
           "\n"
