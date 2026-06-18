@@ -64,7 +64,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 
 def cache_dir() -> str:
@@ -325,8 +325,6 @@ def cmd_index(args) -> int:
 def cmd_resolve(args) -> int:
     """DB-only pass: roll up edge counts, finalize cross-repo edges."""
     with Storage(args.index) as db:
-        if getattr(args, "rebuild", False):
-            db.clear_edges()
         stubs, cross = db.resolve_pass()
     print(f"resolve: {stubs} still-stub, {cross} cross-repo edge(s)")
     return 0
@@ -1329,11 +1327,6 @@ def main(argv=None) -> int:
 
     p = sub.add_parser(
         "resolve", help="finalize cross-repo edges and roll up edge counts"
-    )
-    p.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="clear all edges before resolving (forces full re-extract)",
     )
     p.set_defaults(fn=cmd_resolve)
 

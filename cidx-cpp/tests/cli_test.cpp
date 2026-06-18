@@ -777,12 +777,12 @@ TEST_CASE("args: index collects FILE... and --source") {
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {
-  // $ python3 -m indexer --version   -> "cidx 0.4.0" on stdout, exit 0
+  // $ python3 -m indexer --version   -> "cidx 0.4.1" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.4.0");
+  CHECK(std::string(cli::kVersion) == "0.4.1");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -848,13 +848,16 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
   const ParseFail f = parse_fail({"search", "--kind", "bogus", "-h"});
   CHECK(f.code == 2);
 
-  // $ cidx resolve -h: assert --rebuild option help text is byte-identical
-  // to Python's argparse text (M3 golden lock).
+  // $ cidx resolve -h: byte-identical to Python's argparse text. resolve takes
+  // no options other than -h (the destructive --rebuild flag was removed in
+  // v0.4.1 — it cleared all edges with no re-extract path).
   pa = cli::parse_args({"resolve", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(pa.help_text->find(
-            "clear all edges before resolving (forces full re-extract)") !=
-        std::string::npos);
+  CHECK(*pa.help_text ==
+        "usage: cidx resolve [-h]\n"
+        "\n"
+        "options:\n"
+        "  -h, --help  show this help message and exit\n");
 
   // $ python3 -m indexer list files -h                (first usage line
   // matches the wrapped [--indexed | --pending] block)

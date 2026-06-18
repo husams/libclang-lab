@@ -914,15 +914,8 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx) {
 }
 
 int cmd_resolve(const ParsedArgs &args, Context &ctx) {
+  (void)args;
   Storage db(ctx.index_path);
-  if (args.rebuild) {
-    // Clear all edge, edge_site (CASCADE), template_param, template_arg rows.
-    // Then fall through to resolve_pass so the summary line is identical
-    // to a non-rebuild run (parity with Python cli.py:cmd_resolve).
-    db.raw_db().exec("DELETE FROM template_arg");
-    db.raw_db().exec("DELETE FROM template_param");
-    db.raw_db().exec("DELETE FROM edge");
-  }
   const int stubs = db.resolve_pass();
   const std::vector<Edge> cross = db.cross_repo_edges();
   // ISO 8601 UTC timestamp matching Python's
