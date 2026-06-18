@@ -1760,7 +1760,7 @@ def main(argv=None) -> int:
             "--no-cache",
             dest="cache",
             action="store_false",
-            help="ignore the cache: always reparse (and refresh it)",
+            help="ignore the cache: always reparse (no cache read or write)",
         )
 
     q = asub.add_parser("dump", help="dump the AST subtree of a symbol or file")

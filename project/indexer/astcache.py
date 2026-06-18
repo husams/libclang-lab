@@ -350,16 +350,6 @@ def cmd_status(args) -> int:
     except OSError:
         names = []
 
-    import dataclasses
-
-    @dataclasses.dataclass
-    class _FakeTgt:
-        """Minimal target-like object for is_valid when we have no live flags."""
-
-        abspath: str
-        flags: list
-        driver: str | None
-
     for name in names:
         if not name.endswith(".json"):
             continue
