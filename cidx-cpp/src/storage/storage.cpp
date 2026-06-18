@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS symbol (
     is_definition INTEGER NOT NULL DEFAULT 0,
     is_pure      INTEGER NOT NULL DEFAULT 0,
     is_static    INTEGER NOT NULL DEFAULT 0,  -- v12: C++ static member function
+    is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
+                                              -- instantiation node (own USR,
+                                              -- definition via instantiates edge)
     linkage      TEXT,
     access       TEXT,
     parent_usr   TEXT,
@@ -170,7 +173,7 @@ CREATE TABLE IF NOT EXISTS call_arg (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '12');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '13');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -205,14 +208,20 @@ constexpr std::array<std::string_view, 17> kSymbolKinds = {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 20> kSymbolInsertCols = {
-    "usr",       "spelling",   "qual_name",     "display_name", "kind",
-    "type_info", "file_id",    "line",          "col",          "decl_file_id",
-    "decl_line", "decl_col",   "decl_path",     "is_definition", "is_pure",
-    "is_static", "linkage",    "access",        "parent_usr",   "resolved",
+constexpr std::array<std::string_view, 21> kSymbolInsertCols = {
+    "usr",            "spelling",      "qual_name",    "display_name",
+    "kind",           "type_info",     "file_id",      "line",
+    "col",            "decl_file_id",  "decl_line",    "decl_col",
+    "decl_path",      "is_definition", "is_pure",      "is_static",
+    "is_instantiation", "linkage",     "access",       "parent_usr",
+    "resolved",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
+// Column order mirrors _SYMBOL_COLS in storage.py; is_instantiation comes
+// right after is_static (col index 16), then linkage/access/parent_usr/resolved
+// (17-20), then decl_path appended last (21) -- append-at-end pattern for
+// migrated DBs (ALTER TABLE appends; positional decode in symbol_from must match).
 constexpr char kComponentCols[] = "id, name, path, kind";
 constexpr char kDirectoryCols[] = "id, component_id, path";
 constexpr char kFileCols[] =
@@ -221,12 +230,12 @@ constexpr char kFileCols[] =
 constexpr char kSymbolCols[] =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
-    "is_static, linkage, access, parent_usr, resolved, decl_path";
+    "is_static, linkage, access, parent_usr, resolved, decl_path, is_instantiation";
 constexpr char kSymbolColsS[] =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
-    "s.parent_usr, s.resolved, s.decl_path";
+    "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation";
 
 std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -330,6 +339,9 @@ Symbol symbol_from(const SqliteStmt &st) {
   s.parent_usr = opt_text(st, 18);
   s.resolved = st.col_int64(19) != 0;
   s.decl_path = opt_text(st, 20);
+  // is_instantiation appended at end (col 21) -- stable decode on migrated DBs
+  // where ALTER TABLE appended the column (mirrors decl_path at col 20).
+  s.is_instantiation = st.col_int64(21) != 0;
   return s;
 }
 
@@ -504,6 +516,13 @@ void Storage::migrate() {
     // stored data -- reindex to populate; old rows read as 0.
     db_.exec(
         "ALTER TABLE symbol ADD COLUMN is_static INTEGER NOT NULL DEFAULT 0");
+    changed = true;
+  }
+  if (!has_col(cols, "is_instantiation")) {
+    // v12 -> v13: implicit template-instantiation node marker. No backfill
+    // possible from stored data -- reindex to populate; old rows read as 0.
+    db_.exec(
+        "ALTER TABLE symbol ADD COLUMN is_instantiation INTEGER NOT NULL DEFAULT 0");
     changed = true;
   }
   if (!has_col(cols, "decl_path")) {
@@ -1075,34 +1094,35 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   auto st = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
-      "is_definition, is_pure, is_static, linkage, access, parent_usr, "
-      "resolved, decl_path) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "is_definition, is_pure, is_static, is_instantiation, linkage, access, "
+      "parent_usr, resolved, decl_path) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(usr) DO UPDATE SET "
-      "  spelling      = excluded.spelling, "
-      "  qual_name     = COALESCE(excluded.qual_name, symbol.qual_name), "
-      "  display_name  = COALESCE(excluded.display_name, symbol.display_name), "
-      "  kind          = excluded.kind, "
-      "  type_info     = COALESCE(excluded.type_info, symbol.type_info), "
-      "  file_id       = CASE WHEN excluded.is_definition >= "
+      "  spelling         = excluded.spelling, "
+      "  qual_name        = COALESCE(excluded.qual_name, symbol.qual_name), "
+      "  display_name     = COALESCE(excluded.display_name, symbol.display_name), "
+      "  kind             = excluded.kind, "
+      "  type_info        = COALESCE(excluded.type_info, symbol.type_info), "
+      "  file_id          = CASE WHEN excluded.is_definition >= "
       "symbol.is_definition "
-      "                       THEN excluded.file_id ELSE symbol.file_id END, "
-      "  line          = CASE WHEN excluded.is_definition >= "
+      "                          THEN excluded.file_id ELSE symbol.file_id END, "
+      "  line             = CASE WHEN excluded.is_definition >= "
       "symbol.is_definition "
-      "                       THEN excluded.line ELSE symbol.line END, "
-      "  col           = CASE WHEN excluded.is_definition >= "
+      "                          THEN excluded.line ELSE symbol.line END, "
+      "  col              = CASE WHEN excluded.is_definition >= "
       "symbol.is_definition "
-      "                       THEN excluded.col ELSE symbol.col END, "
-      "  decl_file_id  = COALESCE(excluded.decl_file_id, symbol.decl_file_id), "
-      "  decl_line     = COALESCE(excluded.decl_line, symbol.decl_line), "
-      "  decl_col      = COALESCE(excluded.decl_col, symbol.decl_col), "
-      "  is_definition = MAX(excluded.is_definition, symbol.is_definition), "
-      "  is_pure       = MAX(excluded.is_pure, symbol.is_pure), "
-      "  is_static     = MAX(excluded.is_static, symbol.is_static), "
-      "  linkage       = COALESCE(excluded.linkage, symbol.linkage), "
-      "  access        = COALESCE(excluded.access, symbol.access), "
-      "  parent_usr    = COALESCE(excluded.parent_usr, symbol.parent_usr), "
-      "  resolved      = MAX(excluded.resolved, symbol.resolved) "
+      "                          THEN excluded.col ELSE symbol.col END, "
+      "  decl_file_id     = COALESCE(excluded.decl_file_id, symbol.decl_file_id), "
+      "  decl_line        = COALESCE(excluded.decl_line, symbol.decl_line), "
+      "  decl_col         = COALESCE(excluded.decl_col, symbol.decl_col), "
+      "  is_definition    = MAX(excluded.is_definition, symbol.is_definition), "
+      "  is_pure          = MAX(excluded.is_pure, symbol.is_pure), "
+      "  is_static        = MAX(excluded.is_static, symbol.is_static), "
+      "  is_instantiation = MAX(excluded.is_instantiation, symbol.is_instantiation), "
+      "  linkage          = COALESCE(excluded.linkage, symbol.linkage), "
+      "  access           = COALESCE(excluded.access, symbol.access), "
+      "  parent_usr       = COALESCE(excluded.parent_usr, symbol.parent_usr), "
+      "  resolved         = MAX(excluded.resolved, symbol.resolved) "
       "RETURNING id");
   st.bind(1, std::string_view(sym.usr));
   st.bind(2, std::string_view(sym.spelling));
@@ -1119,13 +1139,14 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   st.bind(13, static_cast<int64_t>(sym.is_definition ? 1 : 0));
   st.bind(14, static_cast<int64_t>(sym.is_pure ? 1 : 0));
   st.bind(15, static_cast<int64_t>(sym.is_static ? 1 : 0));
-  bind_opt(st, 16, sym.linkage);
-  bind_opt(st, 17, sym.access);
-  bind_opt(st, 18, sym.parent_usr);
-  st.bind(19, static_cast<int64_t>(sym.resolved ? 1 : 0));
+  st.bind(16, static_cast<int64_t>(sym.is_instantiation ? 1 : 0));
+  bind_opt(st, 17, sym.linkage);
+  bind_opt(st, 18, sym.access);
+  bind_opt(st, 19, sym.parent_usr);
+  st.bind(20, static_cast<int64_t>(sym.resolved ? 1 : 0));
   // decl_path is INSERTed but intentionally NOT in the ON CONFLICT SET: a real
   // add_symbol never clobbers a stub's recorded external path (mirrors Python).
-  bind_opt(st, 20, sym.decl_path);
+  bind_opt(st, 21, sym.decl_path);
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }
@@ -1369,7 +1390,8 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
                                 const std::optional<int64_t> &decl_file_id,
                                 const std::optional<int64_t> &decl_line,
                                 const std::optional<int64_t> &decl_col,
-                                const std::optional<std::string> &decl_path) {
+                                const std::optional<std::string> &decl_path,
+                                bool is_instantiation) {
   // The follow-up SELECT returns the stable id whether the row was minted or
   // already present. 'function' is the fallback kind when the cursor kind is
   // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
@@ -1378,22 +1400,25 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   // (registered id or raw path) is filled in only when still absent (COALESCE).
   // decl_path carries the location of a target in an UNREGISTERED (system/
   // stdlib) file so the stub stays located instead of @<no-location>.
+  // is_instantiation marks implicit template-instantiation nodes (v13); MAX()
+  // ensures a stub->instantiation promotion always upgrades but never downgrades.
   auto ins = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "                    decl_file_id, decl_line, decl_col, decl_path, "
-      "                    resolved) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+      "                    is_instantiation, resolved) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
       "ON CONFLICT(usr) DO UPDATE SET "
-      "  kind         = CASE WHEN symbol.spelling = '' "
-      "                      THEN excluded.kind ELSE symbol.kind END, "
-      "  spelling     = CASE WHEN symbol.spelling = '' "
-      "                      THEN excluded.spelling ELSE symbol.spelling END, "
-      "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
-      "  display_name = COALESCE(symbol.display_name, excluded.display_name), "
-      "  decl_file_id = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
-      "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
-      "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col), "
-      "  decl_path    = COALESCE(symbol.decl_path, excluded.decl_path)");
+      "  kind             = CASE WHEN symbol.spelling = '' "
+      "                          THEN excluded.kind ELSE symbol.kind END, "
+      "  spelling         = CASE WHEN symbol.spelling = '' "
+      "                          THEN excluded.spelling ELSE symbol.spelling END, "
+      "  qual_name        = COALESCE(symbol.qual_name, excluded.qual_name), "
+      "  display_name     = COALESCE(symbol.display_name, excluded.display_name), "
+      "  decl_file_id     = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
+      "  decl_line        = COALESCE(symbol.decl_line, excluded.decl_line), "
+      "  decl_col         = COALESCE(symbol.decl_col, excluded.decl_col), "
+      "  decl_path        = COALESCE(symbol.decl_path, excluded.decl_path), "
+      "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation)");
   ins.bind(1, std::string_view(usr));
   ins.bind(2, std::string_view(spelling));
   if (qual_name.empty()) {
@@ -1411,6 +1436,7 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   bind_opt(ins, 7, decl_line);
   bind_opt(ins, 8, decl_col);
   bind_opt(ins, 9, decl_path);
+  ins.bind(10, static_cast<int64_t>(is_instantiation ? 1 : 0));
   ins.step_done();
   auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
   sel.bind(1, std::string_view(usr));

@@ -428,8 +428,8 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
                               "display_name", "kind", "type_info", "file_id",
                               "line", "col", "decl_file_id", "decl_line",
                               "decl_col", "decl_path", "is_definition",
-                              "is_pure", "is_static", "linkage", "access",
-                              "parent_usr", "resolved"});
+                              "is_pure", "is_static", "is_instantiation",
+                              "linkage", "access", "parent_usr", "resolved"});
 
   // the 7 indexes (5 symbol + 2 edge)
   std::set<std::string> indexes;
@@ -452,7 +452,7 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "12");
+    CHECK(st.col_text(0) == "13");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

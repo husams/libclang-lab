@@ -57,6 +57,9 @@ struct Symbol {
   bool is_static = false; // v12: C++ static member function. Free functions and
                           // non-methods are false; a file-scope `static` free
                           // function is reflected by linkage='internal'.
+  bool is_instantiation = false; // v13: implicit template-instantiation node
+                                 // (X<int> type node or X<int>::member); its
+                                 // definition is expressed via instantiates edge.
   std::optional<std::string> linkage;
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;

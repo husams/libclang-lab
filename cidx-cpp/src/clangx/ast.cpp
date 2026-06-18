@@ -1075,6 +1075,122 @@ CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
   return lib.clang_getNullCursor();
 }
 
+// ADR-004: mint the X<int> type node, write its template_arg rows, and add
+// instantiates + method_of edges for an implicit template instantiation.
+// Mirror of Python _mint_instantiation_nodes().
+//
+// ref             -- the callee reference cursor (X<int>::method)
+// member_id       -- already-minted symbol id for X<int>::method (dst_id)
+// prim_member_id  -- symbol id of the primary template method X::method
+//
+// Steps:
+//   (b) instantiates(5): member_id -> prim_member_id
+//   (c) mint X<int> TYPE node from ref's semantic parent
+//   (d) method_of(9):    member_id -> type_id
+//   (e) instantiates(5): type_id   -> class_primary_id (guarded)
+//   (f) template_arg rows on the TYPE node via clang_Type_getTemplateArgumentAsType
+//       (TYPE args only; method-template type API returns 0/null args — logged)
+void mint_instantiation_nodes(LibClang &lib, Storage &db,
+                              const CXCursor &ref,
+                              int64_t member_id,
+                              int64_t prim_member_id) {
+  // (b) member instantiates -> primary method
+  Edge inst_b;
+  inst_b.src_id = member_id;
+  inst_b.dst_id = prim_member_id;
+  inst_b.kind = 5; // instantiates
+  inst_b.count = 1;
+  db.add_edge(inst_b);
+
+  // (c) mint X<int> TYPE node from semantic parent of ref
+  const CXCursor parent = lib.clang_getCursorSemanticParent(ref);
+  if (lib.clang_Cursor_isNull(parent) ||
+      is_invalid_kind(lib.clang_getCursorKind(parent))) {
+    return;
+  }
+  const std::string type_usr =
+      CxString(lib, lib.clang_getCursorUSR(parent)).str();
+  if (type_usr.empty()) {
+    return;
+  }
+  const std::string parent_spelling =
+      CxString(lib, lib.clang_getCursorSpelling(parent)).str();
+  const std::string parent_qual = qualified_name(lib, parent);
+  const std::string parent_display =
+      CxString(lib, lib.clang_getCursorDisplayName(parent)).str();
+  const std::string parent_kind = stub_kind(lib, parent);
+  const RefDeclLoc tdl = ref_decl_loc(lib, db, parent);
+  const int64_t type_id = db.mint_symbol_id(
+      type_usr, parent_spelling, parent_qual, parent_display,
+      parent_kind, tdl.file_id, tdl.line, tdl.col, tdl.path,
+      /*is_instantiation=*/true);
+
+  // (d) method_of(9): member_id -> type_id
+  Edge mo;
+  mo.src_id = member_id;
+  mo.dst_id = type_id;
+  mo.kind = 9; // method_of
+  mo.count = 1;
+  db.add_edge(mo);
+
+  // (e) instantiates(5): type_id -> class primary, guarded by primary indexed
+  const CXCursor class_primary =
+      lib.clang_getSpecializedCursorTemplate(parent);
+  if (!lib.clang_Cursor_isNull(class_primary) &&
+      !is_invalid_kind(lib.clang_getCursorKind(class_primary))) {
+    const std::string class_prim_usr =
+        CxString(lib, lib.clang_getCursorUSR(class_primary)).str();
+    if (!class_prim_usr.empty() && class_prim_usr != type_usr) {
+      const auto class_prim_sym = db.lookup_symbol(class_prim_usr);
+      if (class_prim_sym) {
+        Edge inst_e;
+        inst_e.src_id = type_id;
+        inst_e.dst_id = class_prim_sym->id;
+        inst_e.kind = 5; // instantiates
+        inst_e.count = 1;
+        db.add_edge(inst_e);
+      }
+    }
+  }
+
+  // (f) template_arg rows on TYPE node via clang_Type_getTemplateArgumentAsType
+  // (TYPE args only -- same as VAR_DECL B3 pattern at ast.cpp:1280).
+  // For a method template the type API returns nargs <= 0; skip silently.
+  const CXType parent_type = lib.clang_getCursorType(parent);
+  const int nargs = lib.clang_Type_getNumTemplateArguments(parent_type);
+  if (nargs <= 0) {
+    // Method-template or type API unavailable: node+edges already emitted.
+    // This is the ADR-004 §1b known limitation -- no token-extent parse here.
+    return;
+  }
+  for (int ai = 0; ai < nargs; ++ai) {
+    const CXType arg_type = lib.clang_Type_getTemplateArgumentAsType(
+        parent_type, static_cast<unsigned>(ai));
+    TemplateArg ta;
+    ta.owner_id = type_id;
+    ta.position = static_cast<int64_t>(ai);
+    ta.arg_kind = 1; // TYPE (only kind available via type API)
+    const std::string spelling =
+        CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+    if (!spelling.empty()) {
+      ta.literal = spelling;
+    }
+    // Try to resolve the arg type to an indexed symbol (ref_id FK).
+    const CXCursor arg_decl = lib.clang_getTypeDeclaration(arg_type);
+    if (!lib.clang_Cursor_isNull(arg_decl) &&
+        !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+      const std::string ref_usr =
+          CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+      if (!ref_usr.empty()) {
+        if (const auto rsym = db.lookup_symbol(ref_usr)) {
+          ta.ref_id = rsym->id;
+        }
+      }
+    }
+    db.add_template_arg(ta);
+  }
+}
+
 // Non-recursive entry point: visits all children via clang_visitChildren,
 // capturing CALL_EXPR (calls) + DECL_REF_EXPR / MEMBER_REF_EXPR (uses)
 // nodes and recursing depth-first.
@@ -1110,12 +1226,25 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
             }
           } else {
             const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);
+            // Pre-check: is this an instantiation member? Set is_instantiation=1
+            // on the mint if the callee has a specialized parent.
+            const CXCursor pre_primary =
+                lib.clang_getSpecializedCursorTemplate(ref);
+            const bool is_inst_member =
+                !lib.clang_Cursor_isNull(pre_primary) &&
+                !is_invalid_kind(lib.clang_getCursorKind(pre_primary)) &&
+                [&]() {
+                  const std::string pp_usr =
+                      CxString(lib, lib.clang_getCursorUSR(pre_primary)).str();
+                  return !pp_usr.empty() && pp_usr != callee_usr;
+                }();
             dst_id = ctx->db->mint_symbol_id(
                 callee_usr,
                 CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
                 qualified_name(lib, ref),
                 CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
-                stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path);
+                stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path,
+                /*is_instantiation=*/is_inst_member);
           }
           if (dst_id >= 0) {
             // Phase 2: compute receiver provenance for member calls
@@ -1237,6 +1366,10 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
                   inst.kind = 5; // instantiates
                   inst.count = 1;
                   ctx->db->add_edge(inst);
+                  // ADR-004 instantiation-member promotion block.
+                  // Runs alongside the existing caller->primary edge above.
+                  mint_instantiation_nodes(lib, *ctx->db, ref, dst_id,
+                                           prim_sym->id);
                 }
               }
             }
