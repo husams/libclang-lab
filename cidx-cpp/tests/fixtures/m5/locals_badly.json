@@ -1,0 +1,20 @@
+[
+  {
+    "name": "A",
+    "type": "int",
+    "kind": "param",
+    "loc": "messy.c:5:28"
+  },
+  {
+    "name": "B",
+    "type": "int",
+    "kind": "param",
+    "loc": "messy.c:5:35"
+  },
+  {
+    "name": "Result",
+    "type": "int",
+    "kind": "local",
+    "loc": "messy.c:6:9"
+  }
+]
