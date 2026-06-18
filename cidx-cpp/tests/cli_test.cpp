@@ -389,7 +389,7 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, add-source, import, index, resolve, set, file, "
-            "dump-compile-commands, search, show, list, ls, delete)\n");
+            "dump-compile-commands, search, show, list, ls, delete, ast)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {

@@ -46,6 +46,10 @@ void print_symbols(Storage &db, const std::vector<Symbol> &hits, int limit,
 void print_field(std::ostream &out, const std::string &key,
                  const std::string &value);
 
+// Python f"{n:,}" — thousands-grouped decimal string.
+// Examples: 0->"0", 1234->"1,234", 1234567->"1,234,567", -1->"−1" (sign before groups).
+std::string group_thousands(int64_t n);
+
 } // namespace format
 } // namespace cli
 } // namespace cidx

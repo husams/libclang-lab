@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
+#include <limits>
 
 #include "storage/storage.hpp"
 
@@ -109,6 +111,36 @@ void print_symbols(Storage &db, const std::vector<Symbol> &hits, int limit,
 void print_field(std::ostream &out, const std::string &key,
                  const std::string &value) {
   out << ljust(key, 12) << " " << value << "\n";
+}
+
+std::string group_thousands(int64_t n) {
+  // Mirror Python f"{n:,}": comma-separated groups of 3 digits.
+  bool negative = n < 0;
+  // Use unsigned arithmetic to handle INT64_MIN safely.
+  uint64_t abs_n = negative ? (n == std::numeric_limits<int64_t>::min()
+                                   ? static_cast<uint64_t>(9223372036854775808ULL)
+                                   : static_cast<uint64_t>(-n))
+                            : static_cast<uint64_t>(n);
+  if (abs_n == 0) {
+    return "0";
+  }
+  // Build digits in reverse, inserting commas every 3.
+  std::string rev;
+  rev.reserve(26);
+  int pos = 0;
+  while (abs_n > 0) {
+    if (pos > 0 && pos % 3 == 0) {
+      rev += ',';
+    }
+    rev += static_cast<char>('0' + (abs_n % 10));
+    abs_n /= 10;
+    ++pos;
+  }
+  if (negative) {
+    rev += '-';
+  }
+  std::string result(rev.rbegin(), rev.rend());
+  return result;
 }
 
 } // namespace format

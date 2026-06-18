@@ -242,7 +242,7 @@ elseif(CIDX_STATIC)
   endif()
 endif()
 
-# Core library: util + storage + clangx + compiledb + cli + vendored MD5.
+# Core library: util + storage + clangx + compiledb + cli + vendored MD5/SHA1.
 add_library(cidx_core STATIC
   src/util/logger.cpp
   src/util/env.cpp
@@ -258,11 +258,16 @@ add_library(cidx_core STATIC
   src/clangx/toolchain.cpp
   src/clangx/parse.cpp
   src/clangx/ast.cpp
+  src/clangx/ast_query.cpp
+  src/astcache/astcache.cpp
   src/compiledb/compiledb.cpp
   src/cli/args.cpp
   src/cli/format.cpp
+  src/cli/json_out.cpp
+  src/cli/kind_names.cpp
   src/cli/commands.cpp
   third_party/md5/md5.c
+  third_party/sha1/sha1.c
 )
 
 # A1.1: link libclang (shared by default; a static archive group under
