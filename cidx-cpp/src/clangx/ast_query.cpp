@@ -48,6 +48,7 @@ bool is_cond_kind(CXCursorKind k) {
   case CXCursor_DoStmt:
   case CXCursor_ForStmt:
   case CXCursor_SwitchStmt:
+  case CXCursor_CaseStmt:
   case CXCursor_ConditionalOperator:
     return true;
   default:
