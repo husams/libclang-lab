@@ -103,7 +103,7 @@ void for_file_cursors(CXTranslationUnit tu, const std::string &filename,
 }
 
 // Recursive C++ helper for subtree (no separate visitor — pure C++ recursion).
-static void subtree_rec(CXCursor cursor, int depth, CXCursor parent,
+static void subtree_rec(CXCursor cursor, int depth, CXCursor /*parent*/,
                         std::vector<SubtreeNode> &out) {
   // Visit children of cursor.
   struct VisitState {

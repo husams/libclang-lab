@@ -1488,7 +1488,7 @@ int cmd_ast_dump(const ParsedArgs &args, Context &ctx) {
 
 // Helper: resolve target and find the focus function cursor, printing errors.
 static std::pair<std::optional<CXCursor>, int>
-focus_function(const ParsedArgs &args, Context &ctx,
+focus_function(const ParsedArgs & /*args*/, Context &ctx,
                const AstTarget &t, CXTranslationUnit tu) {
   if (t.whole_file()) {
     *ctx.err << "error: this command needs a function "
