@@ -1355,15 +1355,6 @@ class Storage:
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
 
-    def clear_edges(self) -> None:
-        """Delete all edge, edge_site, call_arg, template_param, template_arg rows."""
-        self._conn.execute("DELETE FROM template_arg")
-        self._conn.execute("DELETE FROM template_param")
-        self._conn.execute("DELETE FROM call_arg")
-        self._conn.execute("DELETE FROM edge_site")
-        self._conn.execute("DELETE FROM edge")
-        self._commit()
-
     def set_meta(self, key: str, value: str) -> None:
         """Upsert a meta row."""
         self._conn.execute(

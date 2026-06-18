@@ -121,14 +121,13 @@ const char kIndexHelp[] =
     "  --no-graph          skip relationship-graph extraction (calls, inherits, …)\n";
 
 const char kResolveUsage[] =
-    "usage: cidx resolve [-h] [--rebuild]\n";
+    "usage: cidx resolve [-h]\n";
 
 const char kResolveHelp[] =
-    "usage: cidx resolve [-h] [--rebuild]\n"
+    "usage: cidx resolve [-h]\n"
     "\n"
     "options:\n"
-    "  -h, --help   show this help message and exit\n"
-    "  --rebuild    clear all edges before resolving (forces full re-extract)\n";
+    "  -h, --help  show this help message and exit\n";
 
 const char kSetUsage[] =
     "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
@@ -1454,9 +1453,7 @@ const Spec kResolveSpec = {
     "cidx resolve",
     kResolveUsage,
     kResolveHelp,
-    {
-        {"--rebuild", '\0', ValueKind::kNone, "--rebuild", nullptr, 0},
-    },
+    {},
     {},
     false,
     {},
@@ -1951,7 +1948,6 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.help_text = kResolveHelp;
       return pa;
     }
-    pa.rebuild = st.flags.count("--rebuild") != 0;
   } else if (pa.command == "set") {
     ParseState st = parse_leaf(kSetSpec, argv, i, extras);
     if (st.help) {

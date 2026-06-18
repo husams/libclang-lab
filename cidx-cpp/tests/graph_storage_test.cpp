@@ -517,9 +517,10 @@ TEST_CASE("rollup_edge_counts: count becomes COUNT(edge_site)") {
 }
 
 // ---------------------------------------------------------------------------
-// QA-v7-recheck: clear_edges wipes all graph rows (resolve --rebuild hermetic)
+// QA-v7-recheck: deleting edge rows cascades to edge_site and leaves symbols
+// intact (FK schema invariant; independent of any CLI command).
 // ---------------------------------------------------------------------------
-TEST_CASE("clear_edges removes all edge/edge_site/template rows") {
+TEST_CASE("deleting edge/template rows cascades to edge_site, symbols survive") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
