@@ -23,13 +23,6 @@ Value Value::of(bool val) {
   return v;
 }
 
-Value Value::of(long long val) {
-  Value v;
-  v.t = T::Int;
-  v.i = val;
-  return v;
-}
-
 Value Value::of(const std::string &val) {
   Value v;
   v.t = T::Str;

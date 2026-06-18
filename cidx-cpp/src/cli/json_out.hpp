@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -43,7 +44,20 @@ struct Value {
 
   static Value null();
   static Value of(bool v);
-  static Value of(long long v);
+  // Any integral type (except bool) -> Int. A constrained template — rather
+  // than a single of(long long) overload — keeps the call portable: int64_t is
+  // `long long` on macOS but `long` on LP64 Linux, and a `long` argument would
+  // otherwise be ambiguous between of(bool) and of(long long). bool is excluded
+  // so it routes to of(bool).
+  template <typename Int, typename = std::enable_if_t<
+                              std::is_integral_v<Int> &&
+                              !std::is_same_v<std::remove_cv_t<Int>, bool>>>
+  static Value of(Int v) {
+    Value out;
+    out.t = T::Int;
+    out.i = static_cast<long long>(v);
+    return out;
+  }
   static Value of(const std::string &v);
   static Value of(std::string &&v);
   static Value arr(Array v);
