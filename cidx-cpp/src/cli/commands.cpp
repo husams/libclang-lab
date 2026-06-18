@@ -2198,9 +2198,10 @@ struct GraphHandle {
 std::optional<GraphHandle>
 open_graph(const ParsedArgs & /*args*/, Context &ctx) {
   GraphHandle h;
-  h.storage = std::make_unique<Storage>(ctx.index_path);
 
-  // Check file exists (NoIndexError)
+  // Check file exists BEFORE opening Storage (Storage constructor uses
+  // SQLITE_OPEN_CREATE which would create the file on disk, making a
+  // subsequent stat() always succeed even for a missing index).
   {
     struct stat st{};
     if (::stat(ctx.index_path.c_str(), &st) != 0) {
@@ -2214,6 +2215,7 @@ open_graph(const ParsedArgs & /*args*/, Context &ctx) {
     }
   }
 
+  h.storage = std::make_unique<Storage>(ctx.index_path);
   h.g = std::make_unique<graph::GraphQuery>(*h.storage, ctx.index_path);
   if (h.g->edge_count() == 0) {
     const std::string repr = format::py_repr(ctx.index_path);

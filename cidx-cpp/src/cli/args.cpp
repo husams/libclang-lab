@@ -252,11 +252,23 @@ const char kGraphCalleesHelp[] =
     "options:\n"
     GRAPH_SELECTOR_OPTIONS;
 
+// "usage: cidx graph refs [-h] " is 28 chars → continuation indent = 28 spaces
+// (different from callers/callees which are 31 chars wide).
 const char kGraphRefsUsage[] =
-    "usage: cidx graph refs [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
+    "usage: cidx graph refs [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n";
 
 const char kGraphRefsHelp[] =
-    "usage: cidx graph refs [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
+    "usage: cidx graph refs [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
     "\n"
     "options:\n"
     GRAPH_SELECTOR_OPTIONS;
@@ -392,11 +404,23 @@ const char kGraphHierarchyHelp[] =
     "                        filter members by C++ access specifier (default "
     "all)\n";
 
+// "usage: cidx graph dispatch [-h] " is 32 chars → continuation indent = 27
+// spaces (argparse aligns continuation under the first arg after the prog+opts).
 const char kGraphDispatchUsage[] =
-    "usage: cidx graph dispatch [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
+    "usage: cidx graph dispatch [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--limit N]\n";
 
 const char kGraphDispatchHelp[] =
-    "usage: cidx graph dispatch [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
+    "usage: cidx graph dispatch [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--limit N]\n"
     "\n"
     "options:\n"
     GRAPH_SELECTOR_OPTIONS;
