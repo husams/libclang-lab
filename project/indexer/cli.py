@@ -32,16 +32,23 @@ import os
 import sys
 from datetime import datetime
 
-if __package__ in (None, ""):                       # direct execution
+if __package__ in (None, ""):  # direct execution
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from indexer.storage import SYMBOL_KINDS, File, Storage  # noqa: E402
-    from indexer import compiledb                   # noqa: E402
+    from indexer import compiledb  # noqa: E402
     from indexer.clang import ClangParseError, index_source  # noqa: E402
-    from indexer.query import (                      # noqa: E402
-        EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError,
+    from indexer.query import (  # noqa: E402
+        EDGE_KINDS,
+        GraphQuery,
+        NoEdgesError,
+        NoIndexError,
     )
-    from indexer.utils import (                     # noqa: E402
-        git_root, index_status, md5_of, repo_name, resolve_file_arg,
+    from indexer.utils import (  # noqa: E402
+        git_root,
+        index_status,
+        md5_of,
+        repo_name,
+        resolve_file_arg,
     )
 else:
     from .storage import SYMBOL_KINDS, File, Storage
@@ -57,7 +64,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 def cache_dir() -> str:
@@ -97,18 +104,20 @@ def _setup_logging() -> None:
     delay=True keeps read-only subcommands from creating an empty log file.
     """
     logger = logging.getLogger("cidx")
-    if logger.handlers:                             # already configured
+    if logger.handlers:  # already configured
         return
     os.makedirs(cache_dir(), exist_ok=True)
     handler = logging.FileHandler(log_path(), delay=True)
     handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     handler.addFilter(_warnings)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
 
 # -- subcommands -----------------------------------------------------------------
+
 
 def cmd_init(args) -> int:
     """Create a blank index database (schema v6, no rows) in the cache dir.
@@ -118,13 +127,15 @@ def cmd_init(args) -> int:
     path = args.index
     existed = os.path.exists(path)
     if existed and not args.force:
-        print(f"error: index database already exists at {path} "
-              f"(use --force to recreate)", file=sys.stderr)
+        print(
+            f"error: index database already exists at {path} (use --force to recreate)",
+            file=sys.stderr,
+        )
         return 1
     if existed:
         os.remove(path)
     with Storage(path):
-        pass                # constructing Storage applies the schema
+        pass  # constructing Storage applies the schema
     action = "recreated" if existed else "initialized"
     print(f"{action} empty index database at {path}")
     return 0
@@ -139,8 +150,7 @@ def cmd_add_source(args) -> int:
     root = git_root(path) if use_git else None
     if root is not None:
         path = root
-    name = args.name or (repo_name(path) if use_git
-                         else os.path.basename(path))
+    name = args.name or (repo_name(path) if use_git else os.path.basename(path))
     with Storage(args.index) as db:
         cid = db.add_component(name, path, kind=args.kind)
     print(f"component #{cid}: {name} ({args.kind}) at {path}")
@@ -150,9 +160,11 @@ def cmd_add_source(args) -> int:
 def cmd_import(args) -> int:
     try:
         commands = compiledb.load_commands(args.db)
-    except Exception as e:                          # cindex raises a plain error
-        print(f"error: cannot load compilation database from {args.db}: {e}",
-              file=sys.stderr)
+    except Exception as e:  # cindex raises a plain error
+        print(
+            f"error: cannot load compilation database from {args.db}: {e}",
+            file=sys.stderr,
+        )
         return 1
     if not commands:
         print("error: compilation database is empty", file=sys.stderr)
@@ -165,8 +177,7 @@ def cmd_import(args) -> int:
     first_src = compiledb.source_path(commands[0])
     groot = git_root(first_src)
     root = groot or compiledb.db_directory(args.db)
-    name = args.name or (repo_name(root) if groot
-                         else os.path.basename(root))
+    name = args.name or (repo_name(root) if groot else os.path.basename(root))
 
     imported, skipped = 0, 0
     with Storage(args.index) as db:
@@ -174,16 +185,17 @@ def cmd_import(args) -> int:
             existing = db.get_component(root)
             if existing is not None:
                 db.delete_component(existing.id)
-                print(f"force: removed existing component #{existing.id} "
-                      f"at {root} (files and indexed symbols)")
+                print(
+                    f"force: removed existing component #{existing.id} "
+                    f"at {root} (files and indexed symbols)"
+                )
         cid = db.add_component(name, root)
         print(f"component #{cid}: {name} at {root}")
         with db.transaction():
             for cmd in commands:
                 src = compiledb.source_path(cmd)
                 if db.component_for_path(src) is None:
-                    print(f"  skip (outside any component): {src}",
-                          file=sys.stderr)
+                    print(f"  skip (outside any component): {src}", file=sys.stderr)
                     skipped += 1
                     continue
                 mtime = os.path.getmtime(src) if os.path.exists(src) else None
@@ -217,29 +229,36 @@ def _source_root(db: Storage, name: str | None) -> str | None:
     return comp.path if comp else None
 
 
-def _index_one(db: Storage, rec: File, path: str,
-               no_graph: bool = False) -> int:
+def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int:
     """Parse + index one pending file (main TU + its headers); returns 0/1."""
     if rec.id is None:
         return 1
     try:
-        result = index_source(db, path,
-                              compiledb.sanitize(rec.compile_options or []),
-                              rec.id, driver=rec.driver, no_graph=no_graph)
+        result = index_source(
+            db,
+            path,
+            compiledb.sanitize(rec.compile_options or []),
+            rec.id,
+            driver=rec.driver,
+            no_graph=no_graph,
+        )
     except ClangParseError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     mtime = os.path.getmtime(path) if os.path.exists(path) else None
     db.mark_file_indexed(rec.id, mtime=mtime)
     h = result["headers"]
-    print(f"  -> {result['symbols']} symbols; headers: {h['indexed']} indexed "
-          f"(+{h['symbols']} symbols), {h['already']} already, "
-          f"{h['system']} system, {h['unowned']} unowned")
+    print(
+        f"  -> {result['symbols']} symbols; headers: {h['indexed']} indexed "
+        f"(+{h['symbols']} symbols), {h['already']} already, "
+        f"{h['system']} system, {h['unowned']} unowned"
+    )
     return 0
 
 
-def _index_files(db: Storage, files: list[str], root: str | None,
-                 no_graph: bool = False) -> int:
+def _index_files(
+    db: Storage, files: list[str], root: str | None, no_graph: bool = False
+) -> int:
     """index FILE...: look each file up and index it unless already indexed."""
     rc = 0
     for f in files:
@@ -281,8 +300,7 @@ def _index_pending(db: Storage, no_graph: bool = False) -> int:
         else:
             failed += 1
     tail = f", {deferred} headers via TUs" if deferred else ""
-    print(f"index: {done} indexed, {failed} failed, "
-          f"{skipped} already indexed{tail}")
+    print(f"index: {done} indexed, {failed} failed, {skipped} already indexed{tail}")
     return 1 if failed else 0
 
 
@@ -294,8 +312,11 @@ def cmd_index(args) -> int:
         except LookupError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
-        rc = (_index_files(db, args.files, root, no_graph=no_graph) if args.files
-              else _index_pending(db, no_graph=no_graph))
+        rc = (
+            _index_files(db, args.files, root, no_graph=no_graph)
+            if args.files
+            else _index_pending(db, no_graph=no_graph)
+        )
     if _warnings.count:
         print(f"{_warnings.count} warning(s)/error(s) logged to {log_path()}")
     return rc
@@ -358,8 +379,11 @@ def cmd_set(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     if key not in _SET_FIELDS:
-        print(f"error: unknown field {key!r}; supported: "
-              f"{', '.join(sorted(_SET_FIELDS))}", file=sys.stderr)
+        print(
+            f"error: unknown field {key!r}; supported: "
+            f"{', '.join(sorted(_SET_FIELDS))}",
+            file=sys.stderr,
+        )
         return 1
     try:
         bval = _parse_set_bool(raw_val)
@@ -378,11 +402,12 @@ def cmd_set(args) -> int:
         if args.file is not None:
             ap = resolve_file_arg(args.file, comp.path if comp else None)
             rec = db.get_file(ap)
-            matches = ([(rec.id, ap)]
-                       if rec and _under_component(ap, comp) else [])
+            matches = [(rec.id, ap)] if rec and _under_component(ap, comp) else []
         else:
-            matches = [(f.id, ap) for f, ap in
-                       db.list_files(component_id=comp.id if comp else None)]
+            matches = [
+                (f.id, ap)
+                for f, ap in db.list_files(component_id=comp.id if comp else None)
+            ]
         if not matches:
             print("error: no files match the given selector", file=sys.stderr)
             return 1
@@ -392,8 +417,10 @@ def cmd_set(args) -> int:
             for fid, _ in matches:
                 db.set_file_indexed(fid, indexed_value)
         verb = "would set" if args.dry_run else "set"
-        print(f"{verb} {key}={bval} on {len(matches)} "
-              f"{_plural(len(matches), 'file', 'files')}")
+        print(
+            f"{verb} {key}={bval} on {len(matches)} "
+            f"{_plural(len(matches), 'file', 'files')}"
+        )
     return 0
 
 
@@ -412,8 +439,8 @@ def _parse_file_target(db: Storage, target: str):
     comp_name, found, rel = target.partition(sep)
     if not found or not comp_name or not rel:
         raise ValueError(
-            f"expected COMPONENT://PATH (e.g. 'mylib://src/foo.c'), "
-            f"got {target!r}")
+            f"expected COMPONENT://PATH (e.g. 'mylib://src/foo.c'), got {target!r}"
+        )
     comp = db.get_component_by_name(comp_name)
     if comp is None:
         raise LookupError(f"no component named {comp_name!r}")
@@ -430,8 +457,10 @@ def cmd_file(args) -> int:
         op = ["-dump-args"]
     action, rest = op[0], op[1:]
     if action not in _FILE_OPS:
-        print(f"error: unknown operation {action!r}; supported: "
-              f"{', '.join(_FILE_OPS)}", file=sys.stderr)
+        print(
+            f"error: unknown operation {action!r}; supported: {', '.join(_FILE_OPS)}",
+            file=sys.stderr,
+        )
         return 2
 
     with Storage(args.index) as db:
@@ -452,8 +481,7 @@ def cmd_file(args) -> int:
 
         if action in ("-set-flag", "-unset-flag"):
             if len(rest) != 1:
-                print(f"error: {action} takes exactly one FLAG",
-                      file=sys.stderr)
+                print(f"error: {action} takes exactly one FLAG", file=sys.stderr)
                 return 2
             flag = rest[0]
             if action == "-set-flag":
@@ -470,14 +498,18 @@ def cmd_file(args) -> int:
                 return 0
             opts = [o for o in opts if o != flag]
             db.set_file_compile_options(rec.id, opts)
-            print(f"removed flag from {ap}: {flag} "
-                  f"({n} {_plural(n, 'occurrence', 'occurrences')})")
+            print(
+                f"removed flag from {ap}: {flag} "
+                f"({n} {_plural(n, 'occurrence', 'occurrences')})"
+            )
             return 0
 
         # -import-args
         if len(rest) != 1:
-            print("error: -import-args takes exactly one JSON entry (or @FILE)",
-                  file=sys.stderr)
+            print(
+                "error: -import-args takes exactly one JSON entry (or @FILE)",
+                file=sys.stderr,
+            )
             return 2
         raw = rest[0]
         if raw.startswith("@"):
@@ -489,19 +521,24 @@ def cmd_file(args) -> int:
                 return 1
         try:
             commands = compiledb.commands_from_text(raw)
-        except Exception as e:                          # cindex raises a plain error
-            print(f"error: -import-args: cannot parse compile command: {e}",
-                  file=sys.stderr)
+        except Exception as e:  # cindex raises a plain error
+            print(
+                f"error: -import-args: cannot parse compile command: {e}",
+                file=sys.stderr,
+            )
             return 1
         if not commands:
-            print("error: -import-args: no compile command found (need "
-                  "directory, file, and arguments/command)", file=sys.stderr)
+            print(
+                "error: -import-args: no compile command found (need "
+                "directory, file, and arguments/command)",
+                file=sys.stderr,
+            )
             return 1
         cmd = commands[0]
         new_opts = compiledb.strip_for_libclang(cmd)
-        db.set_file_compile_options(rec.id, new_opts,
-                                    driver=compiledb.driver(cmd),
-                                    update_driver=True)
+        db.set_file_compile_options(
+            rec.id, new_opts, driver=compiledb.driver(cmd), update_driver=True
+        )
         print(f"imported {len(new_opts)} arg(s) for {ap}")
         return 0
 
@@ -520,11 +557,13 @@ def cmd_dump_compile_commands(args) -> int:
             if not f.compile_options:
                 continue
             driver = f.driver or "cc"
-            entries.append({
-                "directory": comp.path if comp else os.path.dirname(ap),
-                "file": ap,
-                "arguments": [driver] + list(f.compile_options) + [ap],
-            })
+            entries.append(
+                {
+                    "directory": comp.path if comp else os.path.dirname(ap),
+                    "file": ap,
+                    "arguments": [driver] + list(f.compile_options) + [ap],
+                }
+            )
     print(json.dumps(entries, indent=2))
     return 0
 
@@ -554,6 +593,7 @@ def cmd_search(args) -> int:
 
 # -- list ---------------------------------------------------------------------
 
+
 def cmd_list_components(args) -> int:
     with Storage(args.index) as db:
         comps = db.list_components(name=args.pattern, kind=args.kind)
@@ -572,7 +612,8 @@ def cmd_list_dirs(args) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         rows = db.list_directories(
-            component_id=comp.id if comp else None, name=args.pattern)
+            component_id=comp.id if comp else None, name=args.pattern
+        )
         width = max((len(cname) for _, cname in rows), default=0)
         for d, cname in rows:
             print(f"{d.id:>4}  {cname:<{width}}  {d.path or '.'}")
@@ -582,8 +623,11 @@ def cmd_list_dirs(args) -> int:
 
 def cmd_list_files(args) -> int:
     if args.dir is not None and not args.component:
-        print("error: --dir requires --component (directory paths are "
-              "relative to a component root)", file=sys.stderr)
+        print(
+            "error: --dir requires --component (directory paths are "
+            "relative to a component root)",
+            file=sys.stderr,
+        )
         return 1
     with Storage(args.index) as db:
         try:
@@ -594,7 +638,10 @@ def cmd_list_files(args) -> int:
         indexed = True if args.indexed else False if args.pending else None
         rows = db.list_files(
             component_id=comp.id if comp else None,
-            dir_path=args.dir, name=args.pattern, indexed=indexed)
+            dir_path=args.dir,
+            name=args.pattern,
+            indexed=indexed,
+        )
         for rec, path in rows:
             mark = "idx " if rec.indexed else "pend"
             print(f"{rec.id:>4}  {mark}  {path}")
@@ -604,8 +651,11 @@ def cmd_list_files(args) -> int:
 
 def cmd_list_symbols(args) -> int:
     if args.dir is not None and not args.component:
-        print("error: --dir requires --component (directory paths are "
-              "relative to a component root)", file=sys.stderr)
+        print(
+            "error: --dir requires --component (directory paths are "
+            "relative to a component root)",
+            file=sys.stderr,
+        )
         return 1
     with Storage(args.index) as db:
         try:
@@ -623,8 +673,11 @@ def cmd_list_symbols(args) -> int:
             file_id = rec.id
         hits = db.list_symbols(
             component_id=comp.id if comp else None,
-            dir_path=args.dir, file_id=file_id,
-            name=args.pattern, kind=args.kind)
+            dir_path=args.dir,
+            file_id=file_id,
+            name=args.pattern,
+            kind=args.kind,
+        )
         _print_symbols(db, hits, args.limit)
     return 0 if hits else 1
 
@@ -632,8 +685,7 @@ def cmd_list_symbols(args) -> int:
 def cmd_show_symbol(args) -> int:
     with Storage(args.index) as db:
         ref = args.symbol
-        s = db.lookup_symbol_by_id(int(ref)) if ref.isdigit() \
-            else db.lookup_symbol(ref)
+        s = db.lookup_symbol_by_id(int(ref)) if ref.isdigit() else db.lookup_symbol(ref)
         if s is None:
             print(f"error: no symbol with id/USR {ref!r}", file=sys.stderr)
             return 1
@@ -652,24 +704,40 @@ def cmd_show_symbol(args) -> int:
             ("display", s.display_name),
             ("kind", s.kind),
             ("type", s.type_info),
-            ("visibility", {"external": "program-wide (usable from any .cpp)",
-                            "internal": "file-local (static / anonymous namespace)",
-                            "no-linkage": "local scope only",
-                            }.get(s.linkage or "", s.linkage)),
+            (
+                "visibility",
+                {
+                    "external": "program-wide (usable from any .cpp)",
+                    "internal": "file-local (static / anonymous namespace)",
+                    "no-linkage": "local scope only",
+                }.get(s.linkage or "", s.linkage),
+            ),
             ("access", s.access),
-            ("parent", f"{parent.qual_name}  [{s.parent_usr}]"
-                       if parent else s.parent_usr),
-            ("pure", "yes (pure virtual; implemented by overriders)"
-                     if s.is_pure else None),
-            ("definition", loc(s.file_id, s.line, s.col)
-                           if s.is_definition else None),
-            ("declaration", loc(s.decl_file_id, s.decl_line, s.decl_col)
-                            # external/unregistered (system/stdlib) decl: raw path
-                            or (f"{s.decl_path}:{s.decl_line}:{s.decl_col}"
-                                if s.decl_path else None)),
-            ("resolved", "yes" if s.resolved else
-                         "n/a (pure virtual)" if s.is_pure else
-                         "no (definition not seen)"),
+            (
+                "parent",
+                f"{parent.qual_name}  [{s.parent_usr}]" if parent else s.parent_usr,
+            ),
+            (
+                "pure",
+                "yes (pure virtual; implemented by overriders)" if s.is_pure else None,
+            ),
+            ("definition", loc(s.file_id, s.line, s.col) if s.is_definition else None),
+            (
+                "declaration",
+                loc(s.decl_file_id, s.decl_line, s.decl_col)
+                # external/unregistered (system/stdlib) decl: raw path
+                or (
+                    f"{s.decl_path}:{s.decl_line}:{s.decl_col}" if s.decl_path else None
+                ),
+            ),
+            (
+                "resolved",
+                "yes"
+                if s.resolved
+                else "n/a (pure virtual)"
+                if s.is_pure
+                else "no (definition not seen)",
+            ),
         ]
         for key, value in fields:
             if value is not None:
@@ -685,7 +753,7 @@ def cmd_show_file(args) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         ref = args.file
-        if ref.isdigit():                       # first column of 'list files'
+        if ref.isdigit():  # first column of 'list files'
             rec = db.get_file_by_id(int(ref))
             path = db.file_abs_path(rec.id) if rec and rec.id else None
         else:
@@ -698,8 +766,7 @@ def cmd_show_file(args) -> int:
         d = db.get_directory_by_id(rec.directory_id)
         owner = db.get_component_by_id(d.component_id) if d else None
         syms = db.list_symbols(file_id=rec.id)
-        defined = sum(1 for s in syms
-                      if s.file_id == rec.id and s.is_definition)
+        defined = sum(1 for s in syms if s.file_id == rec.id and s.is_definition)
         declared = sum(1 for s in syms if s.decl_file_id == rec.id)
         by_kind = {}
         for s in syms:
@@ -713,22 +780,32 @@ def cmd_show_file(args) -> int:
         fields = [
             ("id", rec.id),
             ("path", path),
-            ("component", f"{owner.name} ({owner.kind})  {owner.path}"
-                          if owner else None),
+            (
+                "component",
+                f"{owner.name} ({owner.kind})  {owner.path}" if owner else None,
+            ),
             ("directory", (d.path or ".") if d else None),
             ("mtime", ts(rec.mtime)),
             ("md5", rec.md5),
             ("driver", rec.driver),
-            ("options", " ".join(rec.compile_options)
-                        if rec.compile_options else
-                        "(none -- header indexed via an including TU)"),
+            (
+                "options",
+                " ".join(rec.compile_options)
+                if rec.compile_options
+                else "(none -- header indexed via an including TU)",
+            ),
             ("indexed", index_status(rec, path)[1]),
             ("indexed at", f"{rec.indexed_at} UTC" if rec.indexed_at else None),
-            ("symbols", f"{len(syms)} ({defined} defined here, "
-                        f"{declared} declared here)"),
-            ("by kind", ", ".join(f"{k}: {n}"
-                                  for k, n in sorted(by_kind.items()))
-                        if by_kind else None),
+            (
+                "symbols",
+                f"{len(syms)} ({defined} defined here, {declared} declared here)",
+            ),
+            (
+                "by kind",
+                ", ".join(f"{k}: {n}" for k, n in sorted(by_kind.items()))
+                if by_kind
+                else None,
+            ),
         ]
         for key, value in fields:
             if value is not None:
@@ -737,6 +814,7 @@ def cmd_show_file(args) -> int:
 
 
 # -- delete -------------------------------------------------------------------
+
 
 def _plural(n: int, singular: str, plural: str) -> str:
     return singular if n == 1 else plural
@@ -784,12 +862,17 @@ def cmd_delete_component(args) -> int:
         else:
             matches = [c for c in db.list_components() if c.name == args.name]
         if not matches:
-            print(f"error: no component matches {_selector_str(args)}",
-                  file=sys.stderr)
+            print(f"error: no component matches {_selector_str(args)}", file=sys.stderr)
             return 1
         lines = [f"  #{c.id}  {c.name} ({c.kind})  {c.path}" for c in matches]
-        return _finish_delete(args, [c.id for c in matches], lines,
-                              db.delete_component, "component", "components")
+        return _finish_delete(
+            args,
+            [c.id for c in matches],
+            lines,
+            db.delete_component,
+            "component",
+            "components",
+        )
 
 
 def cmd_delete_dir(args) -> int:
@@ -801,20 +884,30 @@ def cmd_delete_dir(args) -> int:
             return 1
         if args.id is not None:
             d = db.get_directory_by_id(args.id)
-            matches = [d] if d and _under_component(
-                db.directory_abs_path(d.id), comp) else []
+            matches = (
+                [d] if d and _under_component(db.directory_abs_path(d.id), comp) else []
+            )
         else:
             target = os.path.abspath(args.path)
-            matches = [d for d, _cn in db.list_directories(
-                          component_id=comp.id if comp else None)
-                       if db.directory_abs_path(d.id) == target]
+            matches = [
+                d
+                for d, _cn in db.list_directories(
+                    component_id=comp.id if comp else None
+                )
+                if db.directory_abs_path(d.id) == target
+            ]
         if not matches:
-            print(f"error: no directory matches {_selector_str(args)}",
-                  file=sys.stderr)
+            print(f"error: no directory matches {_selector_str(args)}", file=sys.stderr)
             return 1
         lines = [f"  #{d.id}  {db.directory_abs_path(d.id)}" for d in matches]
-        return _finish_delete(args, [d.id for d in matches], lines,
-                              db.delete_directory, "directory", "directories")
+        return _finish_delete(
+            args,
+            [d.id for d in matches],
+            lines,
+            db.delete_directory,
+            "directory",
+            "directories",
+        )
 
 
 def cmd_delete_file(args) -> int:
@@ -836,16 +929,18 @@ def cmd_delete_file(args) -> int:
             if rec and _under_component(ap, comp):
                 matches = [(rec.id, ap)]
         else:
-            matches = [(f.id, ap) for f, ap in db.files()
-                       if os.path.basename(ap) == args.name
-                       and _under_component(ap, comp)]
+            matches = [
+                (f.id, ap)
+                for f, ap in db.files()
+                if os.path.basename(ap) == args.name and _under_component(ap, comp)
+            ]
         if not matches:
-            print(f"error: no file matches {_selector_str(args)}",
-                  file=sys.stderr)
+            print(f"error: no file matches {_selector_str(args)}", file=sys.stderr)
             return 1
         lines = [f"  #{fid}  {ap}" for fid, ap in matches]
-        return _finish_delete(args, [fid for fid, _ in matches], lines,
-                              db.delete_file, "file", "files")
+        return _finish_delete(
+            args, [fid for fid, _ in matches], lines, db.delete_file, "file", "files"
+        )
 
 
 def cmd_delete_symbol(args) -> int:
@@ -864,20 +959,22 @@ def cmd_delete_symbol(args) -> int:
         else:
             matches = db.lookup_symbols_by_name(args.name)
         if comp is not None:
+
             def in_comp(s):
                 here = db.file_abs_path(s.file_id) if s.file_id else None
                 decl = db.file_abs_path(s.decl_file_id) if s.decl_file_id else None
-                return (here is not None and _under_component(here, comp)) or \
-                       (decl is not None and _under_component(decl, comp))
+                return (here is not None and _under_component(here, comp)) or (
+                    decl is not None and _under_component(decl, comp)
+                )
+
             matches = [s for s in matches if in_comp(s)]
         if not matches:
-            print(f"error: no symbol matches {_selector_str(args)}",
-                  file=sys.stderr)
+            print(f"error: no symbol matches {_selector_str(args)}", file=sys.stderr)
             return 1
-        lines = [f"  #{s.id}  {s.kind}  {s.qual_name or s.spelling}"
-                 for s in matches]
-        return _finish_delete(args, [s.id for s in matches], lines,
-                              db.delete_symbol, "symbol", "symbols")
+        lines = [f"  #{s.id}  {s.kind}  {s.qual_name or s.spelling}" for s in matches]
+        return _finish_delete(
+            args, [s.id for s in matches], lines, db.delete_symbol, "symbol", "symbols"
+        )
 
 
 # -- graph --------------------------------------------------------------------
@@ -885,6 +982,7 @@ def cmd_delete_symbol(args) -> int:
 # Query the relationship graph built by `index`/`resolve`. Every graph command
 # operates on the standard index (cache_dir()/index.db) unless --db overrides it,
 # and refuses to run against a missing or edge-less DB (no silent substitution).
+
 
 def _open_graph(args) -> "GraphQuery | None":
     """Open the standard index read-only, enforcing the no-edges rule.
@@ -925,15 +1023,23 @@ def _select_one(g: "GraphQuery", usr, sym_id, name, kind, first):
         return s, 0
     hits = g.find(name, kind=kind)
     if not hits:
-        print(f"error: no symbol matches --name {name!r}"
-              + (f" (kind {kind})" if kind else ""), file=sys.stderr)
+        print(
+            f"error: no symbol matches --name {name!r}"
+            + (f" (kind {kind})" if kind else ""),
+            file=sys.stderr,
+        )
         return None, 1
     if len(hits) > 1 and not first:
-        print(f"error: --name {name!r} matches {len(hits)} symbols; "
-              f"disambiguate with --usr/--id (or pass --first):", file=sys.stderr)
+        print(
+            f"error: --name {name!r} matches {len(hits)} symbols; "
+            f"disambiguate with --usr/--id (or pass --first):",
+            file=sys.stderr,
+        )
         for s in hits[:25]:
-            print(f"  #{s.id}  {s.kind:<14} {s.name}  @{s.loc}  [{s.usr}]",
-                  file=sys.stderr)
+            print(
+                f"  #{s.id}  {s.kind:<14} {s.name}  @{s.loc}  [{s.usr}]",
+                file=sys.stderr,
+            )
         if len(hits) > 25:
             print(f"  ... and {len(hits) - 25} more", file=sys.stderr)
         return None, 2
@@ -1034,9 +1140,12 @@ def cmd_graph_neighbors(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     kinds = args.edge or "all"
-    _emit_edges(g, edges, args,
-                f"{args.direction}-neighbors of {sym.name} "
-                f"(@{sym.loc}) over {kinds}:")
+    _emit_edges(
+        g,
+        edges,
+        args,
+        f"{args.direction}-neighbors of {sym.name} (@{sym.loc}) over {kinds}:",
+    )
     return 0
 
 
@@ -1049,16 +1158,20 @@ def cmd_graph_walk(args) -> int:
         return rc
     kinds = _edge_kinds(args.edge) or ("calls",)
     try:
-        tr = g.walk(sym, kinds, direction=args.direction,
-                    depth=args.depth, max_nodes=args.limit)
+        tr = g.walk(
+            sym, kinds, direction=args.direction, depth=args.depth, max_nodes=args.limit
+        )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    nodes = [n for n in tr.nodes if n.id != sym.id]   # exclude the start node
-    _emit_syms(nodes, args,
-               f"reachable from {sym.name} (@{sym.loc}) over "
-               f"{','.join(kinds)} {args.direction}, depth<={args.depth}:",
-               depths=tr.depth_by_id)
+    nodes = [n for n in tr.nodes if n.id != sym.id]  # exclude the start node
+    _emit_syms(
+        nodes,
+        args,
+        f"reachable from {sym.name} (@{sym.loc}) over "
+        f"{','.join(kinds)} {args.direction}, depth<={args.depth}:",
+        depths=tr.depth_by_id,
+    )
     return 0
 
 
@@ -1069,14 +1182,16 @@ def cmd_graph_path(args) -> int:
     src, rc = _select_symbol(g, args)
     if src is None:
         return rc
-    dst, rc = _select_one(g, args.to_usr, args.to_id, args.to_name,
-                          args.to_kind, args.first)
+    dst, rc = _select_one(
+        g, args.to_usr, args.to_id, args.to_name, args.to_kind, args.first
+    )
     if dst is None:
         return rc
     kinds = _edge_kinds(args.edge) or ("calls",)
     try:
-        chain = g.reaches(src, dst, kinds=kinds, direction=args.direction,
-                          max_depth=args.depth)
+        chain = g.reaches(
+            src, dst, kinds=kinds, direction=args.direction, max_depth=args.depth
+        )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -1084,11 +1199,12 @@ def cmd_graph_path(args) -> int:
         if args.json:
             print("null")
         else:
-            print(f"no path from {src.name} to {dst.name} over "
-                  f"{','.join(kinds)} {args.direction} within depth {args.depth}")
+            print(
+                f"no path from {src.name} to {dst.name} over "
+                f"{','.join(kinds)} {args.direction} within depth {args.depth}"
+            )
         return 1
-    _emit_syms(chain, args,
-               f"path {src.name} -> {dst.name} ({len(chain) - 1} hop(s)):")
+    _emit_syms(chain, args, f"path {src.name} -> {dst.name} ({len(chain) - 1} hop(s)):")
     return 0
 
 
@@ -1109,12 +1225,17 @@ def cmd_graph_hierarchy(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps({
-            "symbol": sym.to_dict(),
-            "bases": [s.to_dict() for s in bases],
-            "subclasses": [s.to_dict() for s in subs],
-            "members": [s.to_dict() for s in mems],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "symbol": sym.to_dict(),
+                    "bases": [s.to_dict() for s in bases],
+                    "subclasses": [s.to_dict() for s in subs],
+                    "members": [s.to_dict() for s in mems],
+                },
+                indent=2,
+            )
+        )
         return 0
     scope = "all" if args.transitive else "direct"
     print(f"hierarchy of {sym.name} (@{sym.loc}):")
@@ -1134,183 +1255,285 @@ def cmd_graph_dispatch(args) -> int:
     targets = g.dispatch_targets(sym)
     virtual = g.is_virtual_method(sym)
     if args.json:
-        print(json.dumps({
-            "method": sym.to_dict(),
-            "is_virtual": virtual,
-            "targets": [s.to_dict() for s in targets],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "method": sym.to_dict(),
+                    "is_virtual": virtual,
+                    "targets": [s.to_dict() for s in targets],
+                },
+                indent=2,
+            )
+        )
         return 0
     note = "" if virtual else "  (not a virtual method -- only itself)"
-    _emit_syms(targets, args,
-               f"run-time dispatch targets of {sym.name} (@{sym.loc}){note}:")
+    _emit_syms(
+        targets, args, f"run-time dispatch targets of {sym.name} (@{sym.loc}){note}:"
+    )
     return 0
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="cidx",
-                                 description="cidx command-line skeleton")
+    ap = argparse.ArgumentParser(prog="cidx", description="cidx command-line skeleton")
     ap.add_argument("--version", action="version", version=f"cidx {VERSION}")
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="create a blank index database")
-    p.add_argument("--force", action="store_true",
-                   help="overwrite an existing index database")
+    p.add_argument(
+        "--force", action="store_true", help="overwrite an existing index database"
+    )
     p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser("add-source", help="register a component")
     p.add_argument("--path", required=True, help="repo root or library header dir")
     p.add_argument("--name", help="component name (default: from .git/config)")
     p.add_argument("--kind", choices=("repo", "external"), default="repo")
-    p.add_argument("--no-git", action="store_true",
-                   help="use --path as-is; do not promote to the enclosing git root")
+    p.add_argument(
+        "--no-git",
+        action="store_true",
+        help="use --path as-is; do not promote to the enclosing git root",
+    )
     p.set_defaults(fn=cmd_add_source)
 
     p = sub.add_parser("import", help="import a compile_commands.json")
-    p.add_argument("--db", required=True,
-                   help="compile_commands.json (or the directory holding it)")
+    p.add_argument(
+        "--db",
+        required=True,
+        help="compile_commands.json (or the directory holding it)",
+    )
     p.add_argument("--name", help="component name override")
-    p.add_argument("--force", action="store_true",
-                   help="reimport: delete the existing component (its files "
-                        "and indexed symbols) before importing")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="reimport: delete the existing component (its files "
+        "and indexed symbols) before importing",
+    )
     p.set_defaults(fn=cmd_import)
 
     p = sub.add_parser("index", help="index imported C/C++ files")
-    p.add_argument("files", nargs="*", help="restrict to these files (default: all pending)")
-    p.add_argument("--source", metavar="COMPONENT",
-                   help="resolve relative FILE paths against this component's root")
-    p.add_argument("--no-graph", dest="no_graph", action="store_true",
-                   help="skip relationship-graph extraction (calls, inherits, …)")
+    p.add_argument(
+        "files", nargs="*", help="restrict to these files (default: all pending)"
+    )
+    p.add_argument(
+        "--source",
+        metavar="COMPONENT",
+        help="resolve relative FILE paths against this component's root",
+    )
+    p.add_argument(
+        "--no-graph",
+        dest="no_graph",
+        action="store_true",
+        help="skip relationship-graph extraction (calls, inherits, …)",
+    )
     p.set_defaults(fn=cmd_index)
 
-    p = sub.add_parser("resolve",
-                       help="finalize cross-repo edges and roll up edge counts")
-    p.add_argument("--rebuild", action="store_true",
-                   help="clear all edges before resolving (forces full re-extract)")
+    p = sub.add_parser(
+        "resolve", help="finalize cross-repo edges and roll up edge counts"
+    )
+    p.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="clear all edges before resolving (forces full re-extract)",
+    )
     p.set_defaults(fn=cmd_resolve)
 
-    p = sub.add_parser("set",
-                       help="set a mutable file attribute (e.g. pending status)")
-    p.add_argument("assignment", nargs="+", metavar="FIELD=VALUE",
-                   help="attribute assignment, e.g. 'pending=False' "
-                        "(fields: pending, indexed)")
-    p.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict to this component's files")
-    p.add_argument("--file", metavar="REL_PATH",
-                   help="restrict to one file (path relative to component root)")
-    p.add_argument("--db", dest="graph_db", metavar="PATH",
-                   help="operate on this index DB (default: the standard index)")
-    p.add_argument("--dry-run", action="store_true",
-                   help="preview the matches without changing anything")
+    p = sub.add_parser("set", help="set a mutable file attribute (e.g. pending status)")
+    p.add_argument(
+        "assignment",
+        nargs="+",
+        metavar="FIELD=VALUE",
+        help="attribute assignment, e.g. 'pending=False' (fields: pending, indexed)",
+    )
+    p.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict to this component's files"
+    )
+    p.add_argument(
+        "--file",
+        metavar="REL_PATH",
+        help="restrict to one file (path relative to component root)",
+    )
+    p.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="operate on this index DB (default: the standard index)",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview the matches without changing anything",
+    )
     p.set_defaults(fn=cmd_set)
 
-    p = sub.add_parser("file",
-                       help="inspect or edit one file's stored compile flags")
-    p.add_argument("target", metavar="COMPONENT://PATH",
-                   help="file address, e.g. 'mylib://src/foo.c'")
-    p.add_argument("op", nargs=argparse.REMAINDER, metavar="OP",
-                   help="-set-flag FLAG | -unset-flag FLAG | -import-args JSON "
-                        "| -dump-args (default when omitted)")
-    p.add_argument("--db", dest="graph_db", metavar="PATH",
-                   help="operate on this index DB (default: the standard index)")
+    p = sub.add_parser("file", help="inspect or edit one file's stored compile flags")
+    p.add_argument(
+        "target",
+        metavar="COMPONENT://PATH",
+        help="file address, e.g. 'mylib://src/foo.c'",
+    )
+    p.add_argument(
+        "op",
+        nargs=argparse.REMAINDER,
+        metavar="OP",
+        help="-set-flag FLAG | -unset-flag FLAG | -import-args JSON "
+        "| -dump-args (default when omitted)",
+    )
+    p.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="operate on this index DB (default: the standard index)",
+    )
     p.set_defaults(fn=cmd_file)
 
-    p = sub.add_parser("dump-compile-commands",
-                       help="emit a compile_commands.json for a component")
-    p.add_argument("component", metavar="COMPONENT",
-                   help="component whose files to emit")
-    p.add_argument("--db", dest="graph_db", metavar="PATH",
-                   help="operate on this index DB (default: the standard index)")
+    p = sub.add_parser(
+        "dump-compile-commands", help="emit a compile_commands.json for a component"
+    )
+    p.add_argument(
+        "component", metavar="COMPONENT", help="component whose files to emit"
+    )
+    p.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="operate on this index DB (default: the standard index)",
+    )
     p.set_defaults(fn=cmd_dump_compile_commands)
 
     p = sub.add_parser("search", help="fuzzy-search symbols by qualified name")
-    p.add_argument("pattern",
-                   help="'::'-separated substrings matched in order, "
-                        "e.g. 'conf::set' hits RdKafka::Conf::set")
-    p.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
-                   help="restrict to one symbol kind")
-    p.add_argument("--limit", type=int, default=25, metavar="N",
-                   help="show at most N matches (0 = all; default 25)")
+    p.add_argument(
+        "pattern",
+        help="'::'-separated substrings matched in order, "
+        "e.g. 'conf::set' hits RdKafka::Conf::set",
+    )
+    p.add_argument(
+        "--kind", choices=sorted(SYMBOL_KINDS), help="restrict to one symbol kind"
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        metavar="N",
+        help="show at most N matches (0 = all; default 25)",
+    )
     p.set_defaults(fn=cmd_search)
 
     p = sub.add_parser("show", help="show full details of one symbol or file")
     ssub = p.add_subparsers(dest="what", required=True)
 
     q = ssub.add_parser("symbol", help="one symbol, by id or USR")
-    q.add_argument("symbol",
-                   help="numeric id (first column of 'search') or a clang USR; "
-                        "USRs contain $ and * so single-quote them in the shell")
+    q.add_argument(
+        "symbol",
+        help="numeric id (first column of 'search') or a clang USR; "
+        "USRs contain $ and * so single-quote them in the shell",
+    )
     q.set_defaults(fn=cmd_show_symbol)
 
     q = ssub.add_parser("file", help="one file, by id or path")
-    q.add_argument("file",
-                   help="numeric id (first column of 'list files') or a path; "
-                        "relative paths resolve against the --component root "
-                        "(else the current directory)")
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="component root for resolving a relative path")
+    q.add_argument(
+        "file",
+        help="numeric id (first column of 'list files') or a path; "
+        "relative paths resolve against the --component root "
+        "(else the current directory)",
+    )
+    q.add_argument(
+        "--component",
+        "-c",
+        metavar="NAME",
+        help="component root for resolving a relative path",
+    )
     q.set_defaults(fn=cmd_show_file)
 
-    p = sub.add_parser("list", aliases=["ls"],
-                       help="browse the index: components, dirs, files, symbols")
+    p = sub.add_parser(
+        "list",
+        aliases=["ls"],
+        help="browse the index: components, dirs, files, symbols",
+    )
     lsub = p.add_subparsers(dest="what", required=True)
-    fuzzy = ("optional free-text fuzzy filter: characters must appear "
-             "in order, e.g. 'shp' matches shapes.c")
+    fuzzy = (
+        "optional free-text fuzzy filter: characters must appear "
+        "in order, e.g. 'shp' matches shapes.c"
+    )
 
     q = lsub.add_parser("components", help="list registered components")
     q.add_argument("pattern", nargs="?", help=fuzzy)
-    q.add_argument("--kind", choices=("repo", "external"),
-                   help="restrict to one component kind")
+    q.add_argument(
+        "--kind", choices=("repo", "external"), help="restrict to one component kind"
+    )
     q.set_defaults(fn=cmd_list_components)
 
     q = lsub.add_parser("dirs", help="list directories (all, or one component's)")
     q.add_argument("pattern", nargs="?", help=fuzzy)
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict to this component")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict to this component"
+    )
     q.set_defaults(fn=cmd_list_dirs)
 
-    q = lsub.add_parser("files",
-                        help="list files for a component or a directory in it")
+    q = lsub.add_parser("files", help="list files for a component or a directory in it")
     q.add_argument("pattern", nargs="?", help=fuzzy)
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict to this component")
-    q.add_argument("--dir", "-d", metavar="PATH",
-                   help="directory (relative to the component root) "
-                        "including its subtree; needs --component")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict to this component"
+    )
+    q.add_argument(
+        "--dir",
+        "-d",
+        metavar="PATH",
+        help="directory (relative to the component root) "
+        "including its subtree; needs --component",
+    )
     g = q.add_mutually_exclusive_group()
-    g.add_argument("--indexed", action="store_true",
-                   help="only files already indexed")
-    g.add_argument("--pending", action="store_true",
-                   help="only files not yet indexed")
+    g.add_argument("--indexed", action="store_true", help="only files already indexed")
+    g.add_argument("--pending", action="store_true", help="only files not yet indexed")
     q.set_defaults(fn=cmd_list_files)
 
-    q = lsub.add_parser("symbols",
-                        help="list symbols for a component, directory, or file")
-    q.add_argument("pattern", nargs="?",
-                   help=fuzzy + " (matched against the qualified name)")
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict to this component")
-    q.add_argument("--dir", "-d", metavar="PATH",
-                   help="directory (relative to the component root) "
-                        "including its subtree; needs --component")
-    q.add_argument("--file", "-f", metavar="FILE",
-                   help="one file; relative paths resolve against the "
-                        "--component root (else the current directory)")
-    q.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
-                   help="restrict to one symbol kind")
-    q.add_argument("--limit", type=int, default=50, metavar="N",
-                   help="show at most N matches (0 = all; default 50)")
+    q = lsub.add_parser(
+        "symbols", help="list symbols for a component, directory, or file"
+    )
+    q.add_argument(
+        "pattern", nargs="?", help=fuzzy + " (matched against the qualified name)"
+    )
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict to this component"
+    )
+    q.add_argument(
+        "--dir",
+        "-d",
+        metavar="PATH",
+        help="directory (relative to the component root) "
+        "including its subtree; needs --component",
+    )
+    q.add_argument(
+        "--file",
+        "-f",
+        metavar="FILE",
+        help="one file; relative paths resolve against the "
+        "--component root (else the current directory)",
+    )
+    q.add_argument(
+        "--kind", choices=sorted(SYMBOL_KINDS), help="restrict to one symbol kind"
+    )
+    q.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        metavar="N",
+        help="show at most N matches (0 = all; default 50)",
+    )
     q.set_defaults(fn=cmd_list_symbols)
 
-    p = sub.add_parser("delete",
-                       help="delete a component, directory, file, or symbol")
+    p = sub.add_parser("delete", help="delete a component, directory, file, or symbol")
     dsub = p.add_subparsers(dest="what", required=True)
 
     def _dry_run(q):
-        q.add_argument("--dry-run", action="store_true",
-                       help="preview the matches without deleting anything")
+        q.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="preview the matches without deleting anything",
+        )
 
-    q = dsub.add_parser("component",
-                        help="delete a component and everything indexed from it")
+    q = dsub.add_parser(
+        "component", help="delete a component and everything indexed from it"
+    )
     g = q.add_mutually_exclusive_group(required=True)
     g.add_argument("--id", type=int, metavar="ID", help="component id")
     g.add_argument("--name", metavar="NAME", help="component name")
@@ -1318,13 +1541,13 @@ def main(argv=None) -> int:
     _dry_run(q)
     q.set_defaults(fn=cmd_delete_component)
 
-    q = dsub.add_parser("dir",
-                        help="delete a directory, its files, and their symbols")
+    q = dsub.add_parser("dir", help="delete a directory, its files, and their symbols")
     g = q.add_mutually_exclusive_group(required=True)
     g.add_argument("--id", type=int, metavar="ID", help="directory id")
     g.add_argument("--path", metavar="PATH", help="directory path")
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict the match to this component")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict the match to this component"
+    )
     _dry_run(q)
     q.set_defaults(fn=cmd_delete_dir)
 
@@ -1333,8 +1556,9 @@ def main(argv=None) -> int:
     g.add_argument("--id", type=int, metavar="ID", help="file id")
     g.add_argument("--name", metavar="NAME", help="file basename")
     g.add_argument("--path", metavar="PATH", help="file path")
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict the match to this component")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict the match to this component"
+    )
     _dry_run(q)
     q.set_defaults(fn=cmd_delete_file)
 
@@ -1343,37 +1567,55 @@ def main(argv=None) -> int:
     g.add_argument("--id", type=int, metavar="ID", help="symbol id")
     g.add_argument("--name", metavar="NAME", help="symbol spelling")
     g.add_argument("--usr", metavar="USR", help="clang USR")
-    q.add_argument("--component", "-c", metavar="NAME",
-                   help="restrict the match to this component")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict the match to this component"
+    )
     _dry_run(q)
     q.set_defaults(fn=cmd_delete_symbol)
 
     # -- graph: query the relationship graph ----------------------------------
-    p = sub.add_parser("graph",
-                       help="query the relationship graph (callers, callees, "
-                            "refs, neighbors, walk, path, hierarchy, dispatch)")
+    p = sub.add_parser(
+        "graph",
+        help="query the relationship graph (callers, callees, "
+        "refs, neighbors, walk, path, hierarchy, dispatch)",
+    )
     gsub = p.add_subparsers(dest="what", required=True)
-    edge_help = ("comma-separated edge kinds (" + ", ".join(sorted(EDGE_KINDS))
-                 + ")")
+    edge_help = "comma-separated edge kinds (" + ", ".join(sorted(EDGE_KINDS)) + ")"
 
     def _selector(q):
         """Shared subject selector + common output flags for a graph command."""
         sel = q.add_mutually_exclusive_group(required=True)
         sel.add_argument("--usr", metavar="USR", help="exact clang USR")
         sel.add_argument("--id", type=int, metavar="N", help="numeric symbol id")
-        sel.add_argument("--name", metavar="FUZZY",
-                         help="fuzzy qualified-name match ('conf::set')")
-        q.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
-                       help="restrict a --name match to one symbol kind")
-        q.add_argument("--first", action="store_true",
-                       help="if --name is ambiguous, take the closest match")
-        q.add_argument("--db", dest="graph_db", metavar="PATH",
-                       help="index database to query (default: the standard "
-                            "cache index)")
-        q.add_argument("--json", action="store_true",
-                       help="emit stable machine-readable JSON")
-        q.add_argument("--limit", type=int, default=50, metavar="N",
-                       help="cap the number of results (default 50)")
+        sel.add_argument(
+            "--name", metavar="FUZZY", help="fuzzy qualified-name match ('conf::set')"
+        )
+        q.add_argument(
+            "--kind",
+            choices=sorted(SYMBOL_KINDS),
+            help="restrict a --name match to one symbol kind",
+        )
+        q.add_argument(
+            "--first",
+            action="store_true",
+            help="if --name is ambiguous, take the closest match",
+        )
+        q.add_argument(
+            "--db",
+            dest="graph_db",
+            metavar="PATH",
+            help="index database to query (default: the standard cache index)",
+        )
+        q.add_argument(
+            "--json", action="store_true", help="emit stable machine-readable JSON"
+        )
+        q.add_argument(
+            "--limit",
+            type=int,
+            default=50,
+            metavar="N",
+            help="cap the number of results (default 50)",
+        )
 
     q = gsub.add_parser("callers", help="functions that call the symbol")
     _selector(q)
@@ -1383,61 +1625,79 @@ def main(argv=None) -> int:
     _selector(q)
     q.set_defaults(fn=cmd_graph_callees)
 
-    q = gsub.add_parser("refs",
-                        help="incoming references (calls + uses) to the symbol")
+    q = gsub.add_parser("refs", help="incoming references (calls + uses) to the symbol")
     _selector(q)
     q.set_defaults(fn=cmd_graph_refs)
 
     q = gsub.add_parser("neighbors", help="one-hop typed neighbors")
     _selector(q)
     q.add_argument("--edge", metavar="KINDS", help=edge_help + " (default: all)")
-    q.add_argument("--direction", choices=("in", "out"), default="out",
-                   help="edge direction (default out)")
+    q.add_argument(
+        "--direction",
+        choices=("in", "out"),
+        default="out",
+        help="edge direction (default out)",
+    )
     q.set_defaults(fn=cmd_graph_neighbors)
 
     q = gsub.add_parser("walk", help="bounded BFS over typed edges")
     _selector(q)
     q.add_argument("--edge", metavar="KINDS", help=edge_help + " (default: calls)")
-    q.add_argument("--direction", choices=("in", "out"), default="out",
-                   help="edge direction (default out)")
-    q.add_argument("--depth", type=int, default=3, metavar="N",
-                   help="max BFS depth (default 3)")
+    q.add_argument(
+        "--direction",
+        choices=("in", "out"),
+        default="out",
+        help="edge direction (default out)",
+    )
+    q.add_argument(
+        "--depth", type=int, default=3, metavar="N", help="max BFS depth (default 3)"
+    )
     q.set_defaults(fn=cmd_graph_walk)
 
-    q = gsub.add_parser("path",
-                        help="shortest path between two symbols, or none")
+    q = gsub.add_parser("path", help="shortest path between two symbols, or none")
     _selector(q)
     dst = q.add_mutually_exclusive_group(required=True)
     dst.add_argument("--to-usr", metavar="USR", help="destination by USR")
     dst.add_argument("--to-id", type=int, metavar="N", help="destination by id")
     dst.add_argument("--to-name", metavar="FUZZY", help="destination by name")
-    q.add_argument("--to-kind", choices=sorted(SYMBOL_KINDS),
-                   help="restrict a --to-name match to one symbol kind")
+    q.add_argument(
+        "--to-kind",
+        choices=sorted(SYMBOL_KINDS),
+        help="restrict a --to-name match to one symbol kind",
+    )
     q.add_argument("--edge", metavar="KINDS", help=edge_help + " (default: calls)")
-    q.add_argument("--direction", choices=("in", "out"), default="out",
-                   help="edge direction (default out)")
-    q.add_argument("--depth", type=int, default=8, metavar="N",
-                   help="max search depth (default 8)")
+    q.add_argument(
+        "--direction",
+        choices=("in", "out"),
+        default="out",
+        help="edge direction (default out)",
+    )
+    q.add_argument(
+        "--depth", type=int, default=8, metavar="N", help="max search depth (default 8)"
+    )
     q.set_defaults(fn=cmd_graph_path)
 
-    q = gsub.add_parser("hierarchy",
-                        help="class bases, subclasses, and members")
+    q = gsub.add_parser("hierarchy", help="class bases, subclasses, and members")
     _selector(q)
-    q.add_argument("--transitive", action="store_true",
-                   help="walk the whole inheritance tree, not just direct edges")
-    q.add_argument("--access", choices=("public", "protected", "private", "all"),
-                   default="all",
-                   help="filter members by C++ access specifier (default all)")
+    q.add_argument(
+        "--transitive",
+        action="store_true",
+        help="walk the whole inheritance tree, not just direct edges",
+    )
+    q.add_argument(
+        "--access",
+        choices=("public", "protected", "private", "all"),
+        default="all",
+        help="filter members by C++ access specifier (default all)",
+    )
     q.set_defaults(fn=cmd_graph_hierarchy)
 
-    q = gsub.add_parser("dispatch",
-                        help="run-time targets of a virtual-method call")
+    q = gsub.add_parser("dispatch", help="run-time targets of a virtual-method call")
     _selector(q)
     q.set_defaults(fn=cmd_graph_dispatch)
 
     # -- ast (on-demand AST analysis; reads only the symbol/file tables) --------
-    p = sub.add_parser("ast",
-                       help="on-demand AST analysis (dump, locals, conditions)")
+    p = sub.add_parser("ast", help="on-demand AST analysis (dump, locals, conditions)")
     asub = p.add_subparsers(dest="what", required=True)
 
     def _ast_common(q):
@@ -1445,43 +1705,111 @@ def main(argv=None) -> int:
         compile flags go after '--' (like the `file` subcommand)."""
         q.add_argument("--usr", metavar="USR", help="exact clang USR")
         q.add_argument("--id", type=int, metavar="N", help="numeric symbol id")
-        q.add_argument("--name", metavar="FUZZY",
-                       help="fuzzy qualified-name match (indexed), or an exact "
-                            "spelling to find in an ad-hoc file")
-        q.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
-                       help="restrict a --name match to one symbol kind")
-        q.add_argument("--first", action="store_true",
-                       help="if --name is ambiguous, take the closest match")
-        q.add_argument("--db", dest="graph_db", metavar="PATH",
-                       help="index database to read (default: the standard index)")
-        q.add_argument("--json", action="store_true",
-                       help="emit machine-readable JSON")
-        q.add_argument("target", nargs="?", metavar="FILE|COMPONENT://PATH",
-                       help="a source file, an indexed COMPONENT://PATH, or "
-                            "(with '-- <flags>') an ad-hoc file")
-        q.add_argument("rest", nargs=argparse.REMAINDER, metavar="-- FLAGS",
-                       help="ad-hoc compile flags after '--' for un-imported files")
+        q.add_argument(
+            "--name",
+            metavar="FUZZY",
+            help="fuzzy qualified-name match (indexed), or an exact "
+            "spelling to find in an ad-hoc file",
+        )
+        q.add_argument(
+            "--kind",
+            choices=sorted(SYMBOL_KINDS),
+            help="restrict a --name match to one symbol kind",
+        )
+        q.add_argument(
+            "--first",
+            action="store_true",
+            help="if --name is ambiguous, take the closest match",
+        )
+        q.add_argument(
+            "--db",
+            dest="graph_db",
+            metavar="PATH",
+            help="index database to read (default: the standard index)",
+        )
+        q.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+        q.add_argument(
+            "target",
+            nargs="?",
+            metavar="FILE|COMPONENT://PATH",
+            help="a source file, an indexed COMPONENT://PATH, or "
+            "(with '-- <flags>') an ad-hoc file",
+        )
+        q.add_argument(
+            "rest",
+            nargs=argparse.REMAINDER,
+            metavar="-- FLAGS",
+            help="ad-hoc compile flags after '--' for un-imported files",
+        )
+
+    def _cache_toggle(q):
+        """Add mutually-exclusive --cache / --no-cache (default: cache ON).
+
+        Added to dump/locals/conditions only -- NOT to ``cache build|status|clear``
+        (those operate on the cache itself and do not carry the toggle).
+        """
+        g = q.add_mutually_exclusive_group()
+        g.add_argument(
+            "--cache",
+            dest="cache",
+            action="store_true",
+            default=True,
+            help="use the on-disk AST cache (default)",
+        )
+        g.add_argument(
+            "--no-cache",
+            dest="cache",
+            action="store_false",
+            help="ignore the cache: always reparse (and refresh it)",
+        )
 
     q = asub.add_parser("dump", help="dump the AST subtree of a symbol or file")
-    q.add_argument("--depth", type=int, default=0, metavar="N",
-                   help="limit the dump to N levels (0 = unlimited)")
+    q.add_argument(
+        "--depth",
+        type=int,
+        default=0,
+        metavar="N",
+        help="limit the dump to N levels (0 = unlimited)",
+    )
     q.add_argument("--tokens", action="store_true", help="show each node's tokens")
     q.add_argument("--types", action="store_true", help="annotate cursor types")
     _ast_common(q)
+    _cache_toggle(q)
     q.set_defaults(fn=astcmd.cmd_dump)
 
     q = asub.add_parser("locals", help="list a function's local variables")
-    q.add_argument("--params", action="store_true",
-                   help="include parameters, not just body locals")
+    q.add_argument(
+        "--params", action="store_true", help="include parameters, not just body locals"
+    )
     _ast_common(q)
+    _cache_toggle(q)
     q.set_defaults(fn=astcmd.cmd_locals)
 
-    q = asub.add_parser("conditions",
-                        help="conditionals guarding a call, with their condition")
-    q.add_argument("--ast", action="store_true",
-                   help="also emit the condition's AST subtree")
+    q = asub.add_parser(
+        "conditions", help="conditionals guarding a call, with their condition"
+    )
+    q.add_argument(
+        "--ast", action="store_true", help="also emit the condition's AST subtree"
+    )
     _ast_common(q)
+    _cache_toggle(q)
     q.set_defaults(fn=astcmd.cmd_conditions)
+
+    # -- ast cache subcommands -------------------------------------------------
+    qc = asub.add_parser("cache", help="manage the on-disk AST cache")
+    csub = qc.add_subparsers(dest="cache_action", required=True)
+
+    cb = csub.add_parser("build", help="parse + cache the target's AST (force-reparse)")
+    _ast_common(cb)
+    cb.set_defaults(fn=astcmd.cmd_cache)
+
+    cstat = csub.add_parser("status", help="list cache entries, sizes, validity")
+    _ast_common(cstat)
+    cstat.set_defaults(fn=astcmd.cmd_cache)
+
+    cclr = csub.add_parser("clear", help="remove cached AST(s) for a target, or all")
+    _ast_common(cclr)
+    cclr.set_defaults(fn=astcmd.cmd_cache)
 
     args = ap.parse_args(argv)
     # The standard index path, unless a graph command overrides it with --db.
