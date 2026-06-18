@@ -45,7 +45,7 @@ if __package__ in (None, ""):                       # direct execution
     )
 else:
     from .storage import SYMBOL_KINDS, File, Storage
-    from . import compiledb
+    from . import astcmd, compiledb
     from .clang import ClangParseError, index_source
     from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
     from .utils import git_root, index_status, md5_of, repo_name, resolve_file_arg
@@ -1434,6 +1434,54 @@ def main(argv=None) -> int:
                         help="run-time targets of a virtual-method call")
     _selector(q)
     q.set_defaults(fn=cmd_graph_dispatch)
+
+    # -- ast (on-demand AST analysis; reads only the symbol/file tables) --------
+    p = sub.add_parser("ast",
+                       help="on-demand AST analysis (dump, locals, conditions)")
+    asub = p.add_subparsers(dest="what", required=True)
+
+    def _ast_common(q):
+        """Shared target/selector flags. Put options BEFORE the target; ad-hoc
+        compile flags go after '--' (like the `file` subcommand)."""
+        q.add_argument("--usr", metavar="USR", help="exact clang USR")
+        q.add_argument("--id", type=int, metavar="N", help="numeric symbol id")
+        q.add_argument("--name", metavar="FUZZY",
+                       help="fuzzy qualified-name match (indexed), or an exact "
+                            "spelling to find in an ad-hoc file")
+        q.add_argument("--kind", choices=sorted(SYMBOL_KINDS),
+                       help="restrict a --name match to one symbol kind")
+        q.add_argument("--first", action="store_true",
+                       help="if --name is ambiguous, take the closest match")
+        q.add_argument("--db", dest="graph_db", metavar="PATH",
+                       help="index database to read (default: the standard index)")
+        q.add_argument("--json", action="store_true",
+                       help="emit machine-readable JSON")
+        q.add_argument("target", nargs="?", metavar="FILE|COMPONENT://PATH",
+                       help="a source file, an indexed COMPONENT://PATH, or "
+                            "(with '-- <flags>') an ad-hoc file")
+        q.add_argument("rest", nargs=argparse.REMAINDER, metavar="-- FLAGS",
+                       help="ad-hoc compile flags after '--' for un-imported files")
+
+    q = asub.add_parser("dump", help="dump the AST subtree of a symbol or file")
+    q.add_argument("--depth", type=int, default=0, metavar="N",
+                   help="limit the dump to N levels (0 = unlimited)")
+    q.add_argument("--tokens", action="store_true", help="show each node's tokens")
+    q.add_argument("--types", action="store_true", help="annotate cursor types")
+    _ast_common(q)
+    q.set_defaults(fn=astcmd.cmd_dump)
+
+    q = asub.add_parser("locals", help="list a function's local variables")
+    q.add_argument("--params", action="store_true",
+                   help="include parameters, not just body locals")
+    _ast_common(q)
+    q.set_defaults(fn=astcmd.cmd_locals)
+
+    q = asub.add_parser("conditions",
+                        help="conditionals guarding a call, with their condition")
+    q.add_argument("--ast", action="store_true",
+                   help="also emit the condition's AST subtree")
+    _ast_common(q)
+    q.set_defaults(fn=astcmd.cmd_conditions)
 
     args = ap.parse_args(argv)
     # The standard index path, unless a graph command overrides it with --db.
