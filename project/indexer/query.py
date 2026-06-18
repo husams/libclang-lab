@@ -129,6 +129,8 @@ class Sym:
     # location in any indexed file -- see is_stub
     is_static: bool = False  # C++ static member function (free functions are
     # False; a file-scope `static` free function is reflected by linkage)
+    is_instantiation: bool = False  # v13: implicit template-instantiation node
+    # (X<int> type node or X<int>::member); definition via instantiates edge
 
     @property
     def loc(self) -> str:
@@ -165,6 +167,7 @@ class Sym:
             "is_definition": self.is_definition,
             "is_pure": self.is_pure,
             "is_static": self.is_static,
+            "is_instantiation": self.is_instantiation,
             "is_stub": self.is_stub,
         }
 
@@ -390,6 +393,47 @@ class Selection:
 
 
 @dataclass(frozen=True)
+class CallerWithContext:
+    """A caller (or callee) reached via a template instantiation rollup.
+
+    Returned by ``GraphQuery.callers(sym, include_instantiations=True)`` and the
+    matching ``callees`` overload when the opt-in path is active.
+
+    Attributes:
+        sym                 The caller/callee symbol.
+        via_instantiation   The instantiation node (``X<int>::print``) through
+                            which this peer was reached.  ``None`` for direct
+                            callers/callees (not reached via any instantiation).
+        via_template_args   The concrete template arguments of the instantiation
+                            TYPE node that owns ``via_instantiation`` (e.g.
+                            ``[TemplateArg(0, type, 'int')]`` for ``X<int>``).
+                            Empty list for direct callers/callees or when the
+                            instantiation type node carries no stored arguments.
+
+    Usage example::
+
+        for r in g.callers(x_print, include_instantiations=True):
+            args = [a.literal for a in r.via_template_args]
+            print(r.sym.name, "via", args or "direct")
+            # -> caller_int via ['int']
+            # -> caller_double via ['double']
+    """
+
+    sym: Sym
+    via_instantiation: Optional[Sym]
+    via_template_args: list[TemplateArg]
+
+    def __repr__(self) -> str:
+        targs = (
+            "<" + ", ".join(a.literal or "?" for a in self.via_template_args) + ">"
+            if self.via_template_args
+            else ""
+        )
+        tag = f" via{targs}" if self.via_instantiation else ""
+        return f"CallerWithContext({self.sym!r}{tag})"
+
+
+@dataclass(frozen=True)
 class DispatchSite:
     """The Phase-1 over-approximation of one virtual call.
 
@@ -445,8 +489,8 @@ class DispatchSite:
 _SYM_COLS = (
     "s.id, s.usr, s.spelling, s.qual_name, s.kind, s.type_info, "
     "s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, s.decl_col, "
-    "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.access, "
-    "s.parent_usr, s.resolved"
+    "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
+    "s.access, s.parent_usr, s.resolved"
 )
 
 
@@ -583,6 +627,7 @@ class GraphQuery:
             is_definition=bool(r["is_definition"]),
             is_pure=bool(r["is_pure"]),
             is_static=bool(r["is_static"]),
+            is_instantiation=bool(r["is_instantiation"]),
             access=r["access"],
             parent_usr=r["parent_usr"],
             resolved=bool(r["resolved"]),
@@ -829,14 +874,6 @@ class GraphQuery:
         Each Edge.peer is the referrer; Edge.count is how many times; follow with
         sites() for exact file:line locations."""
         return self.edges_in(sym, kinds=("calls", "uses"), limit=limit)
-
-    def callers(self, sym, limit: int = 500) -> list[Sym]:
-        """Symbols that call `sym` (incoming `calls`)."""
-        return self._peers(sym, ("calls",), "in", limit)
-
-    def callees(self, sym, limit: int = 500) -> list[Sym]:
-        """Symbols that `sym` calls (outgoing `calls`)."""
-        return self._peers(sym, ("calls",), "out", limit)
 
     def sites(self, edge, limit: int = 200) -> list[Site]:
         """Concrete source locations for an edge (the file:line grounding).
@@ -1099,6 +1136,210 @@ class GraphQuery:
             TemplateArg(r["position"], r["arg_kind"], r["ref_id"], r["literal"])
             for r in rows
         ]
+
+    def instantiations(self, sym, limit: int = 500) -> list[Sym]:
+        """Implicit instantiation nodes for a template -- incoming `instantiates`
+        edges whose source has ``is_instantiation=1``.
+
+        Distinguishes ADR-004 implicit-instantiation nodes (``X<int>``,
+        ``X<int>::print``) from the pre-existing explicit-instantiation records
+        (``template class Foo<int>;``, stored by the declaration handler at
+        ``ast.py:1330``) and from the ``instantiation_sites`` caller→primary
+        edges (``ast.py:961``).  Those earlier forms may also have outgoing
+        ``instantiates`` edges, but their source is a function or an explicit
+        instantiation record -- not an implicit-instantiation node.
+
+        Returns only sources with ``is_instantiation=1`` so the result is
+        precisely the set of implicit-instantiation type and member nodes."""
+        sid = self._resolve_id(sym)
+        rows = self._c.execute(
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            "JOIN edge e ON e.src_id = s.id "
+            "WHERE e.dst_id = ? AND e.kind = 5 AND s.is_instantiation = 1 "
+            "ORDER BY s.id LIMIT ?",
+            (sid, limit),
+        ).fetchall()
+        return [self._sym(r) for r in rows]
+
+    def template_of(self, sym) -> Optional[Sym]:
+        """The primary template that `sym` is an instantiation of -- the outgoing
+        ``instantiates`` target of an implicit-instantiation node.
+
+        Returns ``None`` when ``sym`` is not an instantiation node or has no
+        outgoing ``instantiates`` edge (e.g. is a template itself)."""
+        sym_obj = self.get(sym)
+        if sym_obj is None or not sym_obj.is_instantiation:
+            return None
+        sid = sym_obj.id
+        row = self._c.execute(
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            "JOIN edge e ON e.dst_id = s.id "
+            "WHERE e.src_id = ? AND e.kind = 5 "
+            "ORDER BY s.id LIMIT 1",
+            (sid,),
+        ).fetchone()
+        return self._sym(row) if row else None
+
+    def template_of_member(self, inst_member) -> Optional[Sym]:
+        """The instantiation TYPE node that owns ``inst_member`` via
+        ``method_of`` (kind=9) or ``field_of`` (kind=8).
+
+        For an implicit-instantiation member such as ``X<int>::print``, returns
+        the corresponding ``X<int>`` TYPE node.  Used to retrieve the concrete
+        template arguments of the instantiation.  Returns ``None`` when no such
+        edge exists (e.g. free-function instantiation or member without a
+        method_of edge)."""
+        sid = self._resolve_id(inst_member)
+        # Prefer method_of (9) then field_of (8); pick the first hit.
+        row = self._c.execute(
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            "JOIN edge e ON e.dst_id = s.id "
+            "WHERE e.src_id = ? AND e.kind IN (9, 8) AND s.is_instantiation = 1 "
+            "ORDER BY e.kind LIMIT 1",
+            (sid,),
+        ).fetchone()
+        return self._sym(row) if row else None
+
+    @overload
+    def callers(
+        self,
+        sym,
+        limit: int = ...,
+        include_instantiations: Literal[False] = ...,
+    ) -> list[Sym]: ...
+
+    @overload
+    def callers(
+        self,
+        sym,
+        limit: int = ...,
+        *,
+        include_instantiations: Literal[True],
+    ) -> list[CallerWithContext]: ...
+
+    def callers(
+        self,
+        sym,
+        limit: int = 500,
+        include_instantiations: bool = False,
+    ) -> "list[Sym] | list[CallerWithContext]":
+        """Symbols that call ``sym`` (incoming ``calls``).
+
+        ``include_instantiations=False`` (default) — returns only direct callers
+        of the literal node ``sym``, byte-identical to the v12 behaviour.
+        Return type: ``list[Sym]``.
+
+        ``include_instantiations=True`` — when ``sym`` is a template method/
+        function, rolls up callers of all implicit-instantiation members
+        (``is_instantiation=1`` nodes reached via ``instantiates`` edges).
+        Return type: ``list[CallerWithContext]``.
+
+        Each :class:`CallerWithContext` carries:
+          * ``.sym`` — the caller symbol.
+          * ``.via_instantiation`` — the instantiation member node that was
+            the intermediate step (``X<int>::print``); ``None`` for direct
+            callers of the primary.
+          * ``.via_template_args`` — concrete template arguments from the
+            instantiation TYPE node (e.g. ``[int]`` for ``X<int>``); empty
+            for direct callers or when the type node has no stored args.
+
+        A caller that calls ``X<int>::print`` **and** a different caller that
+        calls ``X<double>::print`` both appear, each tagged with their own
+        concrete type.  A caller that reaches the *same* instantiation member
+        via multiple sites is deduplicated (appears once per instance).
+        """
+        direct = self._peers(sym, ("calls",), "in", limit)
+        if not include_instantiations:
+            return direct
+        # Opt-in path: build CallerWithContext entries.
+        # Direct callers of the primary get via_instantiation=None, targs=[].
+        result: list[CallerWithContext] = [
+            CallerWithContext(sym=s, via_instantiation=None, via_template_args=[])
+            for s in direct
+        ]
+        # Track (caller_id, inst_member_id) so a caller reaching the same
+        # instance member via multiple sites appears exactly once per instance.
+        seen_pairs: set[tuple[int, int]] = {(s.id, -1) for s in direct}
+        for inst_member in self.instantiations(sym, limit=limit):
+            # Resolve the template args from the instantiation TYPE node.
+            inst_type = self.template_of_member(inst_member)
+            targs: list[TemplateArg] = (
+                self.template_args(inst_type) if inst_type is not None else []
+            )
+            for caller in self._peers(inst_member, ("calls",), "in", limit):
+                pair = (caller.id, inst_member.id)
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    result.append(
+                        CallerWithContext(
+                            sym=caller,
+                            via_instantiation=inst_member,
+                            via_template_args=targs,
+                        )
+                    )
+        return result
+
+    @overload
+    def callees(
+        self,
+        sym,
+        limit: int = ...,
+        include_instantiations: Literal[False] = ...,
+    ) -> list[Sym]: ...
+
+    @overload
+    def callees(
+        self,
+        sym,
+        limit: int = ...,
+        *,
+        include_instantiations: Literal[True],
+    ) -> list[CallerWithContext]: ...
+
+    def callees(
+        self,
+        sym,
+        limit: int = 500,
+        include_instantiations: bool = False,
+    ) -> "list[Sym] | list[CallerWithContext]":
+        """Symbols that ``sym`` calls (outgoing ``calls``).
+
+        ``include_instantiations=False`` (default) — returns only direct callees
+        of the literal node ``sym``, byte-identical to the v12 behaviour.
+        Return type: ``list[Sym]``.
+
+        ``include_instantiations=True`` — rolls up callees of all
+        implicit-instantiation members of ``sym``.
+        Return type: ``list[CallerWithContext]``.
+
+        See :meth:`callers` for a description of the
+        :class:`CallerWithContext` fields.
+        """
+        direct = self._peers(sym, ("calls",), "out", limit)
+        if not include_instantiations:
+            return direct
+        result: list[CallerWithContext] = [
+            CallerWithContext(sym=s, via_instantiation=None, via_template_args=[])
+            for s in direct
+        ]
+        seen_pairs: set[tuple[int, int]] = {(s.id, -1) for s in direct}
+        for inst_member in self.instantiations(sym, limit=limit):
+            inst_type = self.template_of_member(inst_member)
+            targs: list[TemplateArg] = (
+                self.template_args(inst_type) if inst_type is not None else []
+            )
+            for callee in self._peers(inst_member, ("calls",), "out", limit):
+                pair = (callee.id, inst_member.id)
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    result.append(
+                        CallerWithContext(
+                            sym=callee,
+                            via_instantiation=inst_member,
+                            via_template_args=targs,
+                        )
+                    )
+        return result
 
     # ===================================================================== #
     # 4. DYNAMIC DISPATCH

@@ -9,13 +9,19 @@ from __future__ import annotations
 import pytest
 
 from indexer.query import (
-    GraphQuery, Sym, Site, NoIndexError, NoEdgesError, default_db_path,
+    GraphQuery,
+    Sym,
+    Site,
+    NoIndexError,
+    NoEdgesError,
+    default_db_path,
 )
 
 
 # --------------------------------------------------------------------------- #
 # Lookup symbols
 # --------------------------------------------------------------------------- #
+
 
 def test_find_fuzzy_qualified_name(g):
     hits = g.find("Base::draw")
@@ -33,8 +39,7 @@ def test_find_kind_filter(g):
 def test_by_name_exact(g):
     # three classes define a method spelled 'draw'
     draws = g.by_name("draw")
-    assert {s.name for s in draws} == {"Base::draw", "Derived::draw",
-                                       "Derived2::draw"}
+    assert {s.name for s in draws} == {"Base::draw", "Derived::draw", "Derived2::draw"}
     assert g.by_name("draw", kind="class") == []
 
 
@@ -43,7 +48,7 @@ def test_get_by_id_usr_and_passthrough(g):
     assert s is not None and s.spelling == "main"
     again = g.get(s.id)
     assert again is not None and again.usr == s.usr
-    assert g.get(s) is s                          # Sym pass-through
+    assert g.get(s) is s  # Sym pass-through
     assert g.get("c:@F@does_not_exist") is None
 
 
@@ -63,6 +68,7 @@ def test_sym_carries_grounding(g):
 # --------------------------------------------------------------------------- #
 # Lookup references
 # --------------------------------------------------------------------------- #
+
 
 def test_callers_and_callees(g):
     helper = g.get("c:@F@helper")
@@ -93,8 +99,7 @@ def test_edges_in_out_typed(g):
 
 def test_sites_grounding(g):
     helper = g.get("c:@F@helper")
-    edge = [e for e in g.edges_out(helper, ("calls",))
-            if e.peer.name == "compute"][0]
+    edge = [e for e in g.edges_out(helper, ("calls",)) if e.peer.name == "compute"][0]
     sites = g.sites(edge)
     assert len(sites) == 2
     assert all(isinstance(s, Site) and s.file.endswith("lib.c") for s in sites)
@@ -103,23 +108,24 @@ def test_sites_grounding(g):
 
 def test_count_multiplicity_resolved(g):
     helper = g.get("c:@F@helper")
-    edge = [e for e in g.edges_out(helper, ("calls",))
-            if e.peer.name == "compute"][0]
-    assert edge.count == 2                        # two call sites
+    edge = [e for e in g.edges_out(helper, ("calls",)) if e.peer.name == "compute"][0]
+    assert edge.count == 2  # two call sites
 
 
 def test_count_falls_back_to_site_count_when_unresolved(index_db):
     # index_db is NOT resolved -> count must come from COUNT(edge_site)
     with GraphQuery(index_db) as q:
         helper = q.get("c:@F@helper")
-        edge = [e for e in q.edges_out(helper, ("calls",))
-                if e.peer.name == "compute"][0]
+        edge = [e for e in q.edges_out(helper, ("calls",)) if e.peer.name == "compute"][
+            0
+        ]
         assert edge.count == 2
 
 
 # --------------------------------------------------------------------------- #
 # Navigation
 # --------------------------------------------------------------------------- #
+
 
 def test_neighbors_direction(g):
     base = g.get("c:@S@Base")
@@ -137,8 +143,7 @@ def test_neighbors_with_kind_returns_relation_type(g):
     assert tagged == [(plain[0], "inherits")]
     # spanning multiple kinds annotates each peer with how it was reached
     main = g.get("c:@F@main")
-    kinds = {kind for _s, kind in
-             g.neighbors(main, None, "out", with_kind=True)}
+    kinds = {kind for _s, kind in g.neighbors(main, None, "out", with_kind=True)}
     assert "calls" in kinds
 
 
@@ -177,6 +182,7 @@ def test_reaches_none_when_unreachable(g):
 # Hierarchy (direction gotchas)
 # --------------------------------------------------------------------------- #
 
+
 def test_bases_direct_and_transitive(g):
     d2 = g.get("c:@S@Derived2")
     assert {s.name for s in g.bases(d2, direct=True)} == {"Derived"}
@@ -186,8 +192,7 @@ def test_bases_direct_and_transitive(g):
 def test_subclasses_direct_and_transitive(g):
     base = g.get("c:@S@Base")
     assert {s.name for s in g.subclasses(base, direct=True)} == {"Derived"}
-    assert {s.name for s in g.subclasses(base, direct=False)} == {"Derived",
-                                                                  "Derived2"}
+    assert {s.name for s in g.subclasses(base, direct=False)} == {"Derived", "Derived2"}
 
 
 def test_members_unions_in_and_out_edges(g):
@@ -201,14 +206,18 @@ def test_members_access_filter(g):
     base = g.get("c:@S@Base")
     # seed: Base::draw public (method), Base::Nested public (struct),
     #       Base::x private (member)
-    assert {s.name for s in g.members(base, access="public")} == \
-        {"Base::draw", "Base::Nested"}
+    assert {s.name for s in g.members(base, access="public")} == {
+        "Base::draw",
+        "Base::Nested",
+    }
     assert {s.name for s in g.members(base, access="private")} == {"Base::x"}
     assert g.members(base, access="protected") == []
     # None and 'all' both mean "every member"
-    assert {s.name for s in g.members(base)} == \
-        {s.name for s in g.members(base, access="all")} == \
-        {"Base::x", "Base::draw", "Base::Nested"}
+    assert (
+        {s.name for s in g.members(base)}
+        == {s.name for s in g.members(base, access="all")}
+        == {"Base::x", "Base::draw", "Base::Nested"}
+    )
 
 
 def test_members_access_invalid_raises(g):
@@ -221,6 +230,7 @@ def test_members_access_invalid_raises(g):
 # Dynamic dispatch
 # --------------------------------------------------------------------------- #
 
+
 def test_overrides_and_overridden_by(g):
     bdraw = g.get("c:@S@Base@F@draw#")
     assert {s.name for s in g.overridden_by(bdraw)} == {"Derived::draw"}
@@ -229,8 +239,8 @@ def test_overrides_and_overridden_by(g):
 
 
 def test_is_virtual_method(g):
-    assert g.is_virtual_method("c:@S@Base@F@draw#") is True       # pure
-    assert g.is_virtual_method("c:@S@Derived2@F@draw#") is True   # overrides
+    assert g.is_virtual_method("c:@S@Base@F@draw#") is True  # pure
+    assert g.is_virtual_method("c:@S@Derived2@F@draw#") is True  # overrides
     assert g.is_virtual_method("c:@F@main") is False
 
 
@@ -255,6 +265,7 @@ def test_virtual_callees(g):
 # --------------------------------------------------------------------------- #
 # Error paths / guards
 # --------------------------------------------------------------------------- #
+
 
 def test_no_index_raises(tmp_path):
     with pytest.raises(NoIndexError):
@@ -290,17 +301,30 @@ def test_default_db_path_uses_env(monkeypatch, tmp_path):
 # Dataclass / repr sanity
 # --------------------------------------------------------------------------- #
 
+
 def test_sym_to_dict_schema(g):
     d = g.get("c:@F@main").to_dict()
-    assert set(d) == {"id", "usr", "spelling", "qual_name", "kind", "type_info",
-                      "file", "line", "col", "is_definition", "is_pure",
-                      "is_static", "is_stub"}
+    assert set(d) == {
+        "id",
+        "usr",
+        "spelling",
+        "qual_name",
+        "kind",
+        "type_info",
+        "file",
+        "line",
+        "col",
+        "is_definition",
+        "is_pure",
+        "is_static",
+        "is_instantiation",
+        "is_stub",
+    }
 
 
 def test_edge_to_dict_carries_peer_and_sites(g):
     helper = g.get("c:@F@helper")
-    edge = [e for e in g.edges_out(helper, ("calls",))
-            if e.peer.name == "compute"][0]
+    edge = [e for e in g.edges_out(helper, ("calls",)) if e.peer.name == "compute"][0]
     d = edge.to_dict(sites=g.sites(edge))
     assert d["qual_name"] == "compute"
     assert d["edge_kind"] == "calls"
@@ -313,11 +337,10 @@ def test_edge_to_dict_auto_populates_sites(g):
     """Regression: edges_out/edges_in eager-load sites, so to_dict() returns the
     reference location (WHERE the edge occurs) WITHOUT an explicit sites= arg."""
     helper = g.get("c:@F@helper")
-    edge = [e for e in g.edges_out(helper, ("calls",))
-            if e.peer.name == "compute"][0]
+    edge = [e for e in g.edges_out(helper, ("calls",)) if e.peer.name == "compute"][0]
     # eager-loaded on the edge itself, not just via g.sites()
     assert {s.line for s in edge.sites} == {22, 25}
-    d = edge.to_dict()                       # no sites= passed
+    d = edge.to_dict()  # no sites= passed
     assert {s["line"] for s in d["sites"]} == {22, 25}
     # the peer's own decl line is distinct from the reference sites
     assert d["line"] not in {s["line"] for s in d["sites"]} or len(d["sites"]) > 0

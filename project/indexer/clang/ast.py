@@ -782,6 +782,116 @@ def _recover_overloaded_callee(call_cursor: cx.Cursor) -> Optional[cx.Cursor]:
     return None
 
 
+def _mint_instantiation_nodes(
+    db: Storage,
+    ref: cx.Cursor,
+    member_id: int,
+    prim_member_id: int,
+) -> None:
+    """ADR-004: mint the X<int> type node, write its template_arg rows, and add
+    instantiates + method_of edges for an implicit template instantiation.
+
+    Called from _body_descent when the callee `ref` is an instantiation member
+    (clang_getSpecializedCursorTemplate returned a valid primary method).
+
+    `member_id`      -- already-minted symbol id for X<int>::method (dst_id).
+    `prim_member_id` -- symbol id of the primary template method X::method.
+
+    Steps:
+      (b) add instantiates(5) edge:  member_id -> prim_member_id
+      (c) mint the X<int> TYPE node from ref.semantic_parent
+      (d) add method_of(9) edge:     member_id -> type_id
+      (e) add instantiates(5) edge:  type_id   -> class_primary_id
+          (guarded: class primary must already be indexed)
+      (f) write template_arg rows on the TYPE node from
+          parent.type.get_template_argument_type(i)
+          (TYPE args only via the type API; INTEGRAL/other are skipped here
+           since clang.Type has no get_template_argument_kind/value; see
+           ADR-004 §1b known limitation for method-template targs)
+    """
+    # (b) member instantiates -> primary method
+    db.add_edge(member_id, prim_member_id, 5)
+
+    # (c) mint X<int> TYPE node
+    parent = ref.semantic_parent
+    if parent is None:
+        return
+    type_usr = parent.get_usr()
+    if not type_usr:
+        return
+    parent_kind = _KIND_MAP.get(parent.kind, "struct")
+    _tdfid, _tdln, _tdcol, _tdpath = _ref_decl_loc(db, parent)
+    type_id = db.mint_symbol_id(
+        type_usr,
+        parent.spelling,
+        _qualified_name(parent),
+        parent.displayname,
+        parent_kind,
+        decl_file_id=_tdfid,
+        decl_line=_tdln,
+        decl_col=_tdcol,
+        decl_path=_tdpath,
+        is_instantiation=True,
+    )
+
+    # (d) method_of(9): member_id -> type_id
+    db.add_edge(member_id, type_id, 9)
+
+    # (e) instantiates(5): type_id -> class primary, guarded by primary indexed
+    class_primary = _lib.clang_getSpecializedCursorTemplate(parent)
+    if (
+        class_primary is not None
+        and class_primary.kind.value > 0
+        and class_primary.kind
+        not in (
+            cx.CursorKind.NO_DECL_FOUND,
+            cx.CursorKind.INVALID_FILE,
+        )
+    ):
+        class_prim_usr = class_primary.get_usr()
+        if class_prim_usr and class_prim_usr != type_usr:
+            class_prim_sym = db.lookup_symbol(class_prim_usr)
+            if class_prim_sym is not None:
+                db.add_edge(type_id, class_prim_sym.id, 5)
+
+    # (f) template_arg rows on the TYPE node (TYPE args only via type API)
+    # clang.Type has get_template_argument_type(i) but no
+    # get_template_argument_kind — we can only extract TYPE args here.
+    # For a method template, get_num_template_arguments on the type returns < 0
+    # (the type is not itself specialized); log once and skip.
+    parent_type = parent.type
+    nargs = parent_type.get_num_template_arguments() if parent_type is not None else -1
+    if nargs < 0:
+        # Method-template or type API returned nothing; node+edges already
+        # emitted above. Log the gap per ADR-004 §1b.
+        import logging as _logging
+
+        _logging.getLogger("cidx").debug(
+            "template-instantiation-nodes: no type-level targs for %s "
+            "(method-template or unavailable from clang.Type API)",
+            type_usr,
+        )
+        return
+    for ai in range(nargs):
+        arg_type = parent_type.get_template_argument_type(ai)
+        if arg_type is None:
+            continue
+        arg_spelling = arg_type.spelling or None
+        ref_id: Optional[int] = None
+        arg_decl = arg_type.get_declaration()
+        if arg_decl is not None and arg_decl.kind not in (
+            cx.CursorKind.NO_DECL_FOUND,
+            cx.CursorKind.INVALID_FILE,
+        ):
+            arg_usr = arg_decl.get_usr()
+            if arg_usr:
+                rsym = db.lookup_symbol(arg_usr)
+                if rsym is not None:
+                    ref_id = rsym.id
+        # All args from the type API are TYPE args (arg_kind=1)
+        db.add_template_arg(type_id, ai, 1, ref_id=ref_id, literal=arg_spelling)
+
+
 def _body_descent(
     db: Storage, fn_cursor: cx.Cursor, src_id: int, file_id: int, cond_depth: int = 0
 ) -> None:
@@ -817,6 +927,28 @@ def _body_descent(
                         dst_id = _dst.id if _dst is not None else None
                     else:
                         _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
+                        # Pre-check: is this an instantiation member? We set
+                        # is_instantiation=1 on the mint if the callee has a
+                        # specialized parent (clang_getSpecializedCursorTemplate
+                        # returns a valid non-null cursor with a non-trivial kind).
+                        _pre_primary = _lib.clang_getSpecializedCursorTemplate(ref)
+                        _is_inst_member = (
+                            _pre_primary is not None
+                            and _pre_primary.kind.value > 0
+                            and _pre_primary.kind
+                            not in (
+                                cx.CursorKind.NO_DECL_FOUND,
+                                cx.CursorKind.INVALID_FILE,
+                            )
+                        )
+                        _pre_prim_usr = (
+                            _pre_primary.get_usr() if _is_inst_member else ""
+                        )
+                        _is_inst_member = (
+                            _is_inst_member
+                            and bool(_pre_prim_usr)
+                            and _pre_prim_usr != callee_usr
+                        )
                         dst_id = db.mint_symbol_id(
                             callee_usr,
                             ref.spelling,
@@ -827,6 +959,7 @@ def _body_descent(
                             decl_line=_dln,
                             decl_col=_dcol,
                             decl_path=_dpath,
+                            is_instantiation=_is_inst_member,
                         )
                     if dst_id is not None:
                         edge_id = db.add_edge(src_id, dst_id, 1)  # calls
@@ -959,6 +1092,17 @@ def _body_descent(
                                 prim_sym = db.lookup_symbol(prim_usr)
                                 if prim_sym is not None:
                                     db.add_edge(src_id, prim_sym.id, 5)  # instantiates
+                                    # ADR-004 instantiation-member promotion block.
+                                    # Runs alongside the existing caller→primary
+                                    # edge above; does NOT replace it.
+                                    # (a) member node already minted as dst_id with
+                                    #     is_instantiation=1 (handled at call-site
+                                    #     mint below via _mint_instantiation_nodes).
+                                    # Delegate to helper to keep this loop concise.
+                                    if dst_id is not None:
+                                        _mint_instantiation_nodes(
+                                            db, ref, dst_id, prim_sym.id
+                                        )
         elif kind in (cx.CursorKind.DECL_REF_EXPR, cx.CursorKind.MEMBER_REF_EXPR):
             # B2 uses: non-function indexed symbols referenced in function body.
             # Only emit for symbols already in the DB (lookup, no stub) —

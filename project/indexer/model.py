@@ -46,10 +46,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Optional, Sequence
+from typing import Iterable, Iterator, Literal, Optional, Sequence, overload
 
 from .query import (
     CallArg,
+    CallerWithContext,
     DispatchSite,
     Edge,
     GraphQuery,
@@ -69,6 +70,8 @@ __all__ = [
     "Reference",
     "TemplateParam",
     "TemplateArg",
+    "CallerWithContext",
+    "CallerWithContextModel",
     "SelectionModel",
     "DispatchSiteModel",
     "CallStep",
@@ -95,7 +98,6 @@ __all__ = [
 _TYPE_DECL_KINDS = frozenset(
     {"class", "struct", "union", "enum", "typedef", "type-alias", "class-template"}
 )
-
 
 # --------------------------------------------------------------------------- #
 # Plain value types
@@ -210,6 +212,47 @@ class SelectionModel:
 
 
 @dataclass(frozen=True)
+class CallerWithContextModel:
+    """Entity-typed view of a :class:`indexer.query.CallerWithContext`.
+
+    Returned by :meth:`Callable.callers` / :meth:`Callable.callees` when
+    ``include_instantiations=True``.
+
+    Attributes:
+        entity              The caller/callee as a typed :class:`Entity`.
+        via_instantiation   The instantiation member node (``X<int>::print``)
+                            through which this entity was reached, as an
+                            :class:`Entity`; ``None`` for direct callers of
+                            the primary.
+        via_template_args   Concrete template arguments from the instantiation
+                            TYPE node (e.g. ``[TemplateArg(0, type, 'int')]``
+                            for ``X<int>``).  Empty for direct callers or when
+                            no args are stored.
+
+    Usage example::
+
+        for r in fn.callers(include_instantiations=True):
+            args = [a.literal for a in r.via_template_args]
+            print(r.entity.name, "via", args or "direct")
+            # -> caller_int via ['int']
+            # -> caller_double via ['double']
+    """
+
+    entity: "Entity"
+    via_instantiation: "Optional[Entity]"
+    via_template_args: list[TemplateArg]
+
+    def __repr__(self) -> str:
+        targs = (
+            "<" + ", ".join(a.literal or "?" for a in self.via_template_args) + ">"
+            if self.via_template_args
+            else ""
+        )
+        tag = f" via{targs}" if self.via_instantiation else ""
+        return f"CallerWithContextModel({self.entity!r}{tag})"
+
+
+@dataclass(frozen=True)
 class DispatchSiteModel:
     """Entity-typed view of a :class:`indexer.query.DispatchSite` -- the Phase-1
     over-approximation of one virtual call: the full ``selections`` map plus a
@@ -312,6 +355,27 @@ class CodeBase:
             e = self.wrap(s)
             if e is not None:
                 out.append(e)
+        return out
+
+    def _wrap_cwc(
+        self, cwcs: "Iterable[CallerWithContext]"
+    ) -> "list[CallerWithContextModel]":
+        """Wrap a sequence of :class:`CallerWithContext` into entity-typed
+        :class:`CallerWithContextModel` values.  Entries whose ``sym``
+        resolves to ``None`` are silently dropped (same policy as
+        ``_wrap_all``)."""
+        out: list[CallerWithContextModel] = []
+        for r in cwcs:
+            e = self.wrap(r.sym)
+            if e is None:
+                continue
+            out.append(
+                CallerWithContextModel(
+                    entity=e,
+                    via_instantiation=self.wrap(r.via_instantiation),
+                    via_template_args=r.via_template_args,
+                )
+            )
         return out
 
     def _wrap_dispatch_site(self, ds: DispatchSite) -> DispatchSiteModel:
@@ -417,6 +481,24 @@ class Entity:
     @property
     def is_definition(self) -> bool:
         return self.sym.is_definition
+
+    @property
+    def is_instantiation(self) -> bool:
+        """True for implicit template-instantiation nodes (``X<int>`` type
+        node or ``X<int>::print`` member node) created by ADR-004."""
+        return self.sym.is_instantiation
+
+    def template_of(self) -> "Optional[Entity]":
+        """The primary template this node is an instantiation of, or ``None``.
+
+        Returns ``None`` when this entity is not an implicit-instantiation node
+        (``is_instantiation`` is False) or has no outgoing ``instantiates`` edge.
+
+        For an ``X<int>`` type node: returns the ``X`` class template.
+        For an ``X<int>::print`` member node: returns the ``X::print`` template
+        method. For the template itself, returns ``None``."""
+        tpl = self._cb.graph.template_of(self.sym)
+        return self._cb.wrap(tpl)
 
     @property
     def is_stub(self) -> bool:
@@ -913,17 +995,84 @@ class Callable(Entity):
         _, args = _parse_signature(self.sym.type_info)
         return [Type(a, self._cb) for a in (args or [])]
 
-    def callers(self, limit: int = 500) -> list["Entity"]:
-        """Entities that call this one."""
-        return self._cb._wrap_all(self._cb.graph.callers(self.sym, limit=limit))
+    @overload
+    def callers(
+        self, limit: int = ..., include_instantiations: Literal[False] = ...
+    ) -> list["Entity"]: ...
 
-    def callees(self, limit: int = 500) -> list["Entity"]:
-        """Entities this one calls, **in source order** -- ordered by the first
-        call site (line, col) of each call, so the list reflects the sequence in
-        which the calls appear in this callable's body rather than by call count.
+    @overload
+    def callers(
+        self, limit: int = ..., *, include_instantiations: Literal[True]
+    ) -> list[CallerWithContextModel]: ...
 
-        Callees whose call sites carry no location (e.g. some resolved edges)
-        sort last, keeping a stable relative order."""
+    def callers(
+        self, limit: int = 500, include_instantiations: bool = False
+    ) -> "list[Entity] | list[CallerWithContextModel]":
+        """Entities that call this one.
+
+        ``include_instantiations=False`` (default) — direct callers only;
+        byte-identical to the v12 behaviour.  Return type: ``list[Entity]``.
+
+        ``include_instantiations=True`` — when this is a template
+        method/function, rolls up callers of all implicit-instantiation
+        members (ADR-004).  Return type: ``list[CallerWithContextModel]``.
+
+        Each :class:`CallerWithContextModel` carries:
+          * ``.entity`` — the caller as a typed :class:`Entity`.
+          * ``.via_instantiation`` — the instantiation member (``X<int>::print``)
+            as an :class:`Entity`, or ``None`` for direct callers.
+          * ``.via_template_args`` — concrete template arguments of the
+            instantiation TYPE node (e.g. ``[TemplateArg(0, type, 'int')]``
+            for ``X<int>``); empty for direct callers.
+
+        A caller reaching ``X<int>::print`` and a *different* caller reaching
+        ``X<double>::print`` both appear, each tagged with its own type."""
+        if include_instantiations:
+            return self._cb._wrap_cwc(
+                self._cb.graph.callers(
+                    self.sym,
+                    limit=limit,
+                    include_instantiations=True,
+                )
+            )
+        return self._cb._wrap_all(
+            self._cb.graph.callers(self.sym, limit=limit, include_instantiations=False)
+        )
+
+    @overload
+    def callees(
+        self, limit: int = ..., include_instantiations: Literal[False] = ...
+    ) -> list["Entity"]: ...
+
+    @overload
+    def callees(
+        self, limit: int = ..., *, include_instantiations: Literal[True]
+    ) -> list[CallerWithContextModel]: ...
+
+    def callees(
+        self, limit: int = 500, include_instantiations: bool = False
+    ) -> "list[Entity] | list[CallerWithContextModel]":
+        """Entities this one calls, **in source order** when ``include_instantiations``
+        is ``False`` — ordered by the first call site (line, col).
+
+        ``include_instantiations=False`` (default) — direct callees only;
+        byte-identical to the v12 behaviour.  Return type: ``list[Entity]``.
+
+        ``include_instantiations=True`` — rolls up callees of all
+        implicit-instantiation members.  Return type:
+        ``list[CallerWithContextModel]``.  Source-order is NOT applied in the
+        opt-in path (rolled-up callee sets span multiple instantiation bodies).
+
+        See :meth:`callers` for a description of the
+        :class:`CallerWithContextModel` fields."""
+        if include_instantiations:
+            return self._cb._wrap_cwc(
+                self._cb.graph.callees(
+                    self.sym,
+                    limit=limit,
+                    include_instantiations=True,
+                )
+            )
         edges = self._cb.graph.edges_out(self.sym, kinds=("calls",), limit=limit)
         edges.sort(key=_call_site_order)
         return self._cb._wrap_all(e.peer for e in edges)
@@ -1458,13 +1607,17 @@ class _TemplateMixin:
     def instantiations(self: Entity) -> list[Entity]:  # type: ignore[misc]
         """Concrete instantiations of this template -- the instance *types*
         (e.g. ``template class Wrapper<int>;`` yields the ``Wrapper<int>``
-        record), NOT the functions that trigger an instantiation.
+        record) -- NOT the functions that trigger an instantiation.
 
-        Incoming ``instantiates`` edges have two kinds of source: an explicit
-        instantiation's instance record, and a function that instantiates the
-        template by using it (``Wrapper<int> w;`` inside a body). This returns
-        only the former; use :meth:`instantiation_sites` for the latter. Each
-        instance is a :class:`Record` whose ``template_arguments`` give the
+        Incoming ``instantiates`` edges have multiple kinds of source:
+        explicit-instantiation records (``template class Foo<int>;``), ADR-004
+        implicit-instantiation type nodes (``X<int>`` with ``is_instantiation=1``
+        from call-site minting), and functions that use the template (the
+        ``instantiation_sites`` set). This returns only *type-like* sources:
+        any incoming ``instantiates`` source that is a Record (not a Callable).
+        Use :meth:`instantiation_sites` for the callable sources.
+
+        Each instance is a :class:`Record` whose ``template_arguments`` give the
         concrete bindings."""
         return [
             e
@@ -1479,7 +1632,7 @@ class _TemplateMixin:
     def instantiation_sites(self: Entity) -> list[Entity]:  # type: ignore[misc]
         """Functions that instantiate this template by using it in their body
         (incoming ``instantiates`` whose source is a callable). Pair with
-        :meth:`instantiations` for the concrete instance types."""
+        :meth:`instantiations` for the concrete instance nodes."""
         return [
             e
             for e in self._cb._wrap_all(
@@ -1492,7 +1645,7 @@ class _TemplateMixin:
 
 
 class FunctionTemplate(Callable, _TemplateMixin):
-    """A function template."""
+    """A free (non-member) function template."""
 
 
 class ClassTemplate(Record, _TemplateMixin):

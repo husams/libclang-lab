@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -125,6 +125,9 @@ CREATE TABLE IF NOT EXISTS symbol (
                                               -- functions/non-methods are 0; a
                                               -- file-scope `static` free function
                                               -- is captured by linkage='internal'
+    is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
+                                              -- instantiation node (own USR,
+                                              -- definition via `instantiates` edge)
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
@@ -262,6 +265,7 @@ class Symbol:
     is_definition: bool = False
     is_pure: bool = False
     is_static: bool = False
+    is_instantiation: bool = False  # v13: implicit template-instantiation node
     linkage: Optional[str] = None
     access: Optional[str] = None
     parent_usr: Optional[str] = None
@@ -277,6 +281,7 @@ def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
         kwargs["is_definition"] = bool(kwargs["is_definition"])
         kwargs["is_pure"] = bool(kwargs["is_pure"])
         kwargs["is_static"] = bool(kwargs["is_static"])
+        kwargs["is_instantiation"] = bool(kwargs["is_instantiation"])
         kwargs["resolved"] = bool(kwargs["resolved"])
     if cls is File:
         kwargs["indexed"] = bool(kwargs["indexed"])
@@ -368,6 +373,13 @@ class Storage:
             # from stored data -- reindex to populate; old rows read as 0.
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN is_static INTEGER NOT NULL DEFAULT 0"
+            )
+            changed = True
+        if "is_instantiation" not in cols:
+            # v12 -> v13: implicit template-instantiation node marker. No backfill
+            # possible from stored data -- reindex to populate; old rows read as 0.
+            self._conn.execute(
+                "ALTER TABLE symbol ADD COLUMN is_instantiation INTEGER NOT NULL DEFAULT 0"
             )
             changed = True
         if "decl_path" not in cols:
@@ -912,6 +924,7 @@ class Storage:
         "is_definition",
         "is_pure",
         "is_static",
+        "is_instantiation",
         "linkage",
         "access",
         "parent_usr",
@@ -945,9 +958,10 @@ class Storage:
             "  decl_file_id  = COALESCE(excluded.decl_file_id, symbol.decl_file_id), "
             "  decl_line     = COALESCE(excluded.decl_line, symbol.decl_line), "
             "  decl_col      = COALESCE(excluded.decl_col, symbol.decl_col), "
-            "  is_definition = MAX(excluded.is_definition, symbol.is_definition), "
-            "  is_pure       = MAX(excluded.is_pure, symbol.is_pure), "
-            "  is_static     = MAX(excluded.is_static, symbol.is_static), "
+            "  is_definition    = MAX(excluded.is_definition, symbol.is_definition), "
+            "  is_pure          = MAX(excluded.is_pure, symbol.is_pure), "
+            "  is_static        = MAX(excluded.is_static, symbol.is_static), "
+            "  is_instantiation = MAX(excluded.is_instantiation, symbol.is_instantiation), "
             "  linkage       = COALESCE(excluded.linkage, symbol.linkage), "
             "  access        = COALESCE(excluded.access, symbol.access), "
             "  parent_usr    = COALESCE(excluded.parent_usr, symbol.parent_usr), "
@@ -1100,6 +1114,7 @@ class Storage:
         decl_line: Optional[int] = None,
         decl_col: Optional[int] = None,
         decl_path: Optional[str] = None,
+        is_instantiation: bool = False,
     ) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
@@ -1126,23 +1141,29 @@ class Storage:
         -- name and kind together -- never clobber a real symbol's; the decl
         location (registered or raw path) is filled in only when still absent
         (COALESCE).
+
+        `is_instantiation=True` marks implicit template-instantiation nodes
+        (v13: both the X<int> type node and each X<int>::member node). The flag
+        is set via MAX() so a later stub->instantiation promotion always upgrades
+        but never downgrades.
         """
         self._conn.execute(
             "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
             "                    decl_file_id, decl_line, decl_col, decl_path, "
-            "                    resolved) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+            "                    is_instantiation, resolved) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
             "ON CONFLICT(usr) DO UPDATE SET "
-            "  kind         = CASE WHEN symbol.spelling = '' "
-            "                      THEN excluded.kind ELSE symbol.kind END, "
-            "  spelling     = CASE WHEN symbol.spelling = '' "
-            "                      THEN excluded.spelling ELSE symbol.spelling END, "
-            "  qual_name    = COALESCE(symbol.qual_name, excluded.qual_name), "
-            "  display_name = COALESCE(symbol.display_name, excluded.display_name), "
-            "  decl_file_id = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
-            "  decl_line    = COALESCE(symbol.decl_line, excluded.decl_line), "
-            "  decl_col     = COALESCE(symbol.decl_col, excluded.decl_col), "
-            "  decl_path    = COALESCE(symbol.decl_path, excluded.decl_path)",
+            "  kind             = CASE WHEN symbol.spelling = '' "
+            "                          THEN excluded.kind ELSE symbol.kind END, "
+            "  spelling         = CASE WHEN symbol.spelling = '' "
+            "                          THEN excluded.spelling ELSE symbol.spelling END, "
+            "  qual_name        = COALESCE(symbol.qual_name, excluded.qual_name), "
+            "  display_name     = COALESCE(symbol.display_name, excluded.display_name), "
+            "  decl_file_id     = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
+            "  decl_line        = COALESCE(symbol.decl_line, excluded.decl_line), "
+            "  decl_col         = COALESCE(symbol.decl_col, excluded.decl_col), "
+            "  decl_path        = COALESCE(symbol.decl_path, excluded.decl_path), "
+            "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation)",
             (
                 usr,
                 spelling,
@@ -1153,6 +1174,7 @@ class Storage:
                 decl_line,
                 decl_col,
                 decl_path or None,
+                1 if is_instantiation else 0,
             ),
         )
         row = self._conn.execute(
