@@ -153,6 +153,45 @@ run_one() {
   } >>"$transcript"
 }
 
+# run_one_ast — like run_one but also masks .ast file sizes.
+# .ast files produced by Python and C++ clang_saveTranslationUnit differ by a
+# small fixed delta (format-header metadata varies by TU origin) even when both
+# link the same libclang.  Mask "(<N> bytes)" → "({SZ} bytes)" and size columns
+# in `ast cache status` output (the multi-digit size field before "valid").
+run_one_ast() {
+  local transcript=$1 cache=$2 is_py=$3; shift 3
+  local -a tool=() args=()
+  while [ "$1" != "--" ]; do tool+=("$1"); shift; done
+  shift
+  args=("$@")
+  {
+    echo "\$ cidx ${args[*]}"
+    local out err rc
+    out="$WORK/cmd.out"; err="$WORK/cmd.err"
+    if [ "$is_py" = "1" ]; then
+      INDEXER_CACHE="$cache" CIDX_LIBCLANG="$PY_LIBCLANG" \
+        "${tool[@]}" "${args[@]}" >"$out" 2>"$err"
+    else
+      INDEXER_CACHE="$cache" \
+        env -u CIDX_LIBCLANG "${tool[@]}" "${args[@]}" >"$out" 2>"$err"
+    fi
+    rc=$?
+    # Normalize: cache path, timestamp, and .ast byte sizes.
+    sed -e "s|$cache|{CACHE}|g" \
+        -e 's|^indexed at   .* UTC$|indexed at   {TS} UTC|' \
+        -e 's| ([0-9,]* bytes)| ({SZ} bytes)|g' \
+        -e 's|  [0-9,]\{5,\}  |  {SZ}  |g' \
+        -e 's|  [0-9,]\{5,\},  |  {SZ},  |g' \
+        -e 's|[0-9,]* bytes total|{SZ} bytes total|g' \
+        -e 's|, [0-9,]* bytes freed|, {SZ} bytes freed|g' \
+        "$out"
+    echo "--- stderr ---"
+    sed -e "s|$cache|{CACHE}|g" "$err"
+    echo "exit: $rc"
+    echo
+  } >>"$transcript"
+}
+
 # The S08 command script: import, index, second-run skip, FILE-arg skip,
 # unknown FILE, search, show symbol (id + USR), show file (path + id), every
 # list variant (+ ls alias). --name pins the component name so transcripts
@@ -274,6 +313,50 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete component --name parityproj
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols
+
+  # --- M5: ast dump / locals / conditions (text + --json + --tokens + --ast) --
+  # All ad-hoc targets (FILE + -- -std=c11) so this block is independent of the
+  # indexed fixture built above.  Options come BEFORE the positional; -- FLAGS last.
+  # $cache is the per-tool INDEXER_CACHE (PY_CACHE or CPP_CACHE) passed into
+  # run_script — ast cache files go there alongside index.db.
+  MAN="$LAB_ROOT/manifests"
+  # dump: text + JSON + tokens, single-function focus, whole-file
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --name leaf_a --depth 2 --types "$MAN/calls.c" -- -std=c11
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --name leaf_a --depth 2 --types --json "$MAN/calls.c" -- -std=c11
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --tokens "$MAN/calls.c" -- -std=c11
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --depth 1 --json "$MAN/shapes.c" -- -std=c11
+  # locals: text + JSON + --params
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast locals --name BadlyNamedFunction --params "$MAN/messy.c" -- -std=c11
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast locals --name BadlyNamedFunction --params --json "$MAN/messy.c" -- -std=c11
+  # conditions: text + JSON + --ast (the AST subtree of the condition)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast conditions --name shape_area "$MAN/shapes.c" -- -std=c11
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast conditions --name shape_area --json "$MAN/shapes.c" -- -std=c11
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast conditions --name shape_area --ast --json "$MAN/shapes.c" -- -std=c11
+  # conditions: empty-result case (recurse has no guarded calls)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast conditions --name recurse --json "$MAN/calls.c" -- -std=c11
+  # --- error paths: exit codes + stderr must match byte-for-byte
+  # missing focus (--name not found in file)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast locals --name nope "$MAN/messy.c" -- -std=c11
+  # --cache --no-cache mutex error (exit 2)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --cache --no-cache "$MAN/calls.c" -- -std=c11
+  # no subcommand (exit 2)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast
+  # REMAINDER without target (exit 1: target="-std=c11" → file-not-found)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump -- -std=c11
+  # bad --kind choice (exit 2)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --kind notakind "$MAN/calls.c" -- -std=c11
+  # help text for dump / cache group (exit 0; exact text pinned by diff)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache -h
+  # --- M5: ast cache lifecycle (build / status / clear) ----------------------
+  # .ast sizes differ between Python and C++ (56-byte delta observed: different
+  # sidecar mtime float formatting → different TU save header bytes). Sizes are
+  # masked with {SZ} by run_one_ast.  Keys (sha1 of abspath+flags) are identical.
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache status
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache build "$MAN/calls.c" -- -std=c11
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache status "$MAN/calls.c" -- -std=c11
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache clear "$MAN/calls.c" -- -std=c11
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache status
 }
 
 echo "parity_check: running Python cidx (cache: $PY_CACHE)"

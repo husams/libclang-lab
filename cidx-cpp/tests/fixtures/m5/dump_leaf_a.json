@@ -1,0 +1,74 @@
+[
+  {
+    "kind": "FUNCTION_DECL",
+    "spelling": "leaf_a",
+    "usr": "c:calls.c@F@leaf_a",
+    "extent": {
+      "file": "calls.c",
+      "start": [
+        3,
+        1
+      ],
+      "end": [
+        3,
+        43
+      ]
+    },
+    "type": "int (int)",
+    "children": [
+      {
+        "kind": "PARM_DECL",
+        "spelling": "x",
+        "usr": "c:calls.c@38@F@leaf_a@x",
+        "extent": {
+          "file": "calls.c",
+          "start": [
+            3,
+            19
+          ],
+          "end": [
+            3,
+            24
+          ]
+        },
+        "type": "int"
+      },
+      {
+        "kind": "COMPOUND_STMT",
+        "spelling": null,
+        "usr": null,
+        "extent": {
+          "file": "calls.c",
+          "start": [
+            3,
+            26
+          ],
+          "end": [
+            3,
+            43
+          ]
+        },
+        "type": null,
+        "children": [
+          {
+            "kind": "RETURN_STMT",
+            "spelling": null,
+            "usr": null,
+            "extent": {
+              "file": "calls.c",
+              "start": [
+                3,
+                28
+              ],
+              "end": [
+                3,
+                40
+              ]
+            },
+            "type": null
+          }
+        ]
+      }
+    ]
+  }
+]

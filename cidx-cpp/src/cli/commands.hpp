@@ -48,6 +48,15 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx);
 int cmd_file(const ParsedArgs &args, Context &ctx);
 int cmd_dump_compile_commands(const ParsedArgs &args, Context &ctx);
 
+// AST analysis commands (cidx ast dump|locals|conditions|cache …)
+int cmd_ast_dump(const ParsedArgs &args, Context &ctx);
+int cmd_ast_locals(const ParsedArgs &args, Context &ctx);
+int cmd_ast_conditions(const ParsedArgs &args, Context &ctx);
+int cmd_ast_cache(const ParsedArgs &args, Context &ctx);
+int cmd_ast_cache_build(const ParsedArgs &args, Context &ctx);
+int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx);
+int cmd_ast_cache_clear(const ParsedArgs &args, Context &ctx);
+
 // Dispatch on args.command/args.what (args.help_text handled by the caller).
 int run_command(const ParsedArgs &args, Context &ctx);
 

@@ -322,7 +322,7 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete} "
+    "search,show,list,ls,delete,ast} "
     "...\n";
 
 // Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
@@ -389,7 +389,7 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, add-source, import, index, resolve, set, file, "
-            "dump-compile-commands, search, show, list, ls, delete)\n");
+            "dump-compile-commands, search, show, list, ls, delete, ast)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -775,12 +775,12 @@ TEST_CASE("args: index collects FILE... and --source") {
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {
-  // $ python3 -m indexer --version   -> "cidx 0.1.0" on stdout, exit 0
+  // $ python3 -m indexer --version   -> "cidx 0.3.0" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.1.0");
+  CHECK(std::string(cli::kVersion) == "0.3.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -805,7 +805,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "positional arguments:\n"
           "  "
           "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-          "search,show,list,ls,delete}"
+          "search,show,list,ls,delete,ast}"
           "\n"
           "    init                create a blank index database\n"
           "    add-source          register a component\n"
@@ -827,6 +827,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "files, symbols\n"
           "    delete              delete a component, directory, file, or "
           "symbol\n"
+          "    ast                 on-demand AST analysis (dump, locals, "
+          "conditions, cache)\n"
           "\n"
           "options:\n"
           "  -h, --help            show this help message and exit\n"

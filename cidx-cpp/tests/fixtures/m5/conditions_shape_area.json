@@ -1,0 +1,10 @@
+[
+  {
+    "control": "CASE_STMT",
+    "loc": "shapes.c:14:9",
+    "condition": "SHAPE_CIRCLE",
+    "calls": [
+      "circle_area"
+    ]
+  }
+]

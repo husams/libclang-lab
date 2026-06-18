@@ -22,21 +22,21 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete} "
+    "search,show,list,ls,delete,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete} "
+    "search,show,list,ls,delete,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
     "  {init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete}\n"
+    "search,show,list,ls,delete,ast}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
@@ -52,6 +52,8 @@ const char kTopHelp[] =
     "    list (ls)           browse the index: components, dirs, files, "
     "symbols\n"
     "    delete              delete a component, directory, file, or symbol\n"
+    "    ast                 on-demand AST analysis (dump, locals, conditions, "
+    "cache)\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
@@ -435,6 +437,278 @@ const char kDeleteSymbolHelp[] =
     "  --dry-run             preview the matches without deleting anything\n";
 
 // ---------------------------------------------------------------------------
+// ast sub-command usage / help (ADR-006 M5)
+// ---------------------------------------------------------------------------
+
+const char kAstUsage[] =
+    "usage: cidx ast [-h] {dump,locals,conditions,cache} ...\n";
+
+const char kAstHelp[] =
+    "usage: cidx ast [-h] {dump,locals,conditions,cache} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {dump,locals,conditions,cache}\n"
+    "    dump        dump the AST subtree of a symbol or file\n"
+    "    locals      list a function's local variables\n"
+    "    conditions  conditionals guarding a call, with their condition\n"
+    "    cache       manage the on-disk AST cache\n"
+    "\n"
+    "options:\n"
+    "  -h, --help   show this help message and exit\n";
+
+const char kAstDumpUsage[] =
+    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
+    "                     [--id N] [--name FUZZY]\n"
+    "                     [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,"
+    "namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                     [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstDumpHelp[] =
+    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
+    "                     [--id N] [--name FUZZY]\n"
+    "                     [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,"
+    "namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                     [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --depth N             limit the dump to N levels (0 = unlimited)\n"
+    "  --tokens              show each node's tokens\n"
+    "  --types               annotate cursor types\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
+
+const char kAstLocalsUsage[] =
+    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                       [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,namespace,"
+    "struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                       [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstLocalsHelp[] =
+    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                       [--kind {class,class-template,constructor,destructor,"
+    "enum,enum-constant,function,function-template,macro,member,method,namespace,"
+    "struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                       [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --params              include parameters, not just body locals\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
+
+const char kAstConditionsUsage[] =
+    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--cache |\n"
+    "                           --no-cache]\n"
+    "                           [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstConditionsHelp[] =
+    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                           [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--cache |\n"
+    "                           --no-cache]\n"
+    "                           [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --ast                 also emit the condition's AST subtree\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
+
+const char kAstCacheUsage[] =
+    "usage: cidx ast cache [-h] {build,status,clear} ...\n";
+
+const char kAstCacheHelp[] =
+    "usage: cidx ast cache [-h] {build,status,clear} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {build,status,clear}\n"
+    "    build               parse + cache the target's AST (force-reparse)\n"
+    "    status              list cache entries, sizes, validity\n"
+    "    clear               remove cached AST(s) for a target, or all\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kAstCacheBuildUsage[] =
+    "usage: cidx ast cache build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstCacheBuildHelp[] =
+    "usage: cidx ast cache build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+// B6: per-action help constants so -h shows the correct subcommand name.
+const char kAstCacheStatusHelp[] =
+    "usage: cidx ast cache status [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                             [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                             [--first] [--db PATH] [--json]\n"
+    "                             [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+const char kAstCacheClearHelp[] =
+    "usage: cidx ast cache clear [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or "
+    "(with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
+    "files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
+    "function,function-template,macro,member,method,namespace,struct,type-alias,"
+    "typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard "
+    "index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+// ---------------------------------------------------------------------------
 // Choice sets
 // ---------------------------------------------------------------------------
 
@@ -449,7 +723,10 @@ const std::vector<std::string> kCommands = {
     "init",  "add-source", "import",                "index",
     "resolve", "set",      "file",                  "dump-compile-commands",
     "search",  "show",     "list",                  "ls",
-    "delete"};
+    "delete",  "ast"};
+const std::vector<std::string> kAstWhats = {"dump", "locals", "conditions",
+                                            "cache"};
+const std::vector<std::string> kAstCacheWhats = {"build", "status", "clear"};
 const std::vector<std::string> kShowWhats = {"symbol", "file"};
 const std::vector<std::string> kListWhats = {"components", "dirs", "files",
                                              "symbols"};
@@ -1113,6 +1390,101 @@ const Spec kDeleteSymbolSpec = {
     {1},
 };
 
+// -- ast leaf specs (ADR-006 M5) --------------------------------------------
+// Shared "common" options for all ast sub-commands (mirrors _ast_common).
+// mutex group 2: --cache (kNone/true by default) vs --no-cache (kNone/false).
+// Since both are kNone flags, we can't encode a default in the engine;
+// use_cache = !st.flags.count("--no-cache") (always starts true).
+#define AST_COMMON_OPTS                                                        \
+  {"--usr", '\0', ValueKind::kString, "--usr", nullptr, 0},                   \
+      {"--id", '\0', ValueKind::kInt, "--id", nullptr, 0},                    \
+      {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},             \
+      {"--kind", '\0', ValueKind::kString, "--kind", &kSymbolKinds, 0},       \
+      {"--first", '\0', ValueKind::kNone, "--first", nullptr, 0},             \
+      {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},                 \
+  {"--json", '\0', ValueKind::kNone, "--json", nullptr, 0}
+
+#define AST_CACHE_OPTS                                                         \
+  {"--cache", '\0', ValueKind::kNone, "--cache", nullptr, 2},                 \
+      {"--no-cache", '\0', ValueKind::kNone, "--no-cache", nullptr, 2}
+
+const Spec kAstDumpSpec = {
+    "cidx ast dump",
+    kAstDumpUsage,
+    kAstDumpHelp,
+    {
+        {"--depth", '\0', ValueKind::kInt, "--depth", nullptr, 0},
+        {"--tokens", '\0', ValueKind::kNone, "--tokens", nullptr, 0},
+        {"--types", '\0', ValueKind::kNone, "--types", nullptr, 0},
+        AST_COMMON_OPTS,
+        AST_CACHE_OPTS,
+    },
+    {"target"}, // optional positional (nargs=?)
+    false,
+    {}, // none required
+    {}, // no required mutex
+    true, // REMAINDER: captures -- and flags after target
+};
+
+const Spec kAstLocalsSpec = {
+    "cidx ast locals",
+    kAstLocalsUsage,
+    kAstLocalsHelp,
+    {
+        {"--params", '\0', ValueKind::kNone, "--params", nullptr, 0},
+        AST_COMMON_OPTS,
+        AST_CACHE_OPTS,
+    },
+    {"target"},
+    false,
+    {},
+    {},
+    true,
+};
+
+const Spec kAstConditionsSpec = {
+    "cidx ast conditions",
+    kAstConditionsUsage,
+    kAstConditionsHelp,
+    {
+        {"--ast", '\0', ValueKind::kNone, "--ast", nullptr, 0},
+        AST_COMMON_OPTS,
+        AST_CACHE_OPTS,
+    },
+    {"target"},
+    false,
+    {},
+    {},
+    true,
+};
+
+const Spec kAstCacheBuildSpec = {
+    "cidx ast cache build",
+    kAstCacheBuildUsage,
+    kAstCacheBuildHelp,
+    {AST_COMMON_OPTS},
+    {"target"},
+    false,
+    {},
+    {},
+    true,
+};
+
+// status and clear have identical shape to build.
+const Spec kAstCacheStatusSpec = {
+    "cidx ast cache status", kAstCacheBuildUsage, kAstCacheBuildHelp,
+    {AST_COMMON_OPTS},       {"target"},          false,
+    {},                      {},                  true,
+};
+const Spec kAstCacheClearSpec = {
+    "cidx ast cache clear", kAstCacheBuildUsage, kAstCacheBuildHelp,
+    {AST_COMMON_OPTS},      {"target"},          false,
+    {},                     {},                  true,
+};
+
+#undef AST_COMMON_OPTS
+#undef AST_CACHE_OPTS
+
 } // namespace
 
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
@@ -1321,7 +1693,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.kind = opt_value(st, "--kind");
       pa.limit = int_value(st, "--limit", 50);
     }
-  } else { // delete
+  } else if (pa.command == "delete") {
     CommandScan what = scan_command(argv, i, extras);
     if (what.help) {
       pa.help_text = kDeleteHelp;
@@ -1367,6 +1739,112 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.usr = opt_value(st, "--usr");
     pa.component = opt_value(st, "--component");
     pa.dry_run = st.flags.count("--dry-run") != 0;
+  } else if (pa.command == "ast") {
+    // -- ast sub-command -------------------------------------------------------
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kAstHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kAstUsage, "cidx ast",
+           "the following arguments are required: what");
+    }
+    if (!contains(kAstWhats, *what.command)) {
+      fail(kAstUsage, "cidx ast",
+           "argument what: invalid choice: '" + *what.command +
+               "' (choose from " + join(kAstWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+
+    // Shared lambda to populate the common ast fields from a ParseState.
+    auto fill_ast_common = [&](const ParseState &st) {
+      pa.ast_usr = opt_value(st, "--usr");
+      if (const auto v = opt_value(st, "--id")) {
+        long parsed = 0;
+        parse_py_int(*v, parsed);
+        pa.ast_id = static_cast<int64_t>(parsed);
+      }
+      pa.name = opt_value(st, "--name");
+      pa.kind = opt_value(st, "--kind");
+      pa.first = st.flags.count("--first") != 0;
+      pa.index_db = opt_value(st, "--db");
+      pa.ast_json = st.flags.count("--json") != 0;
+      // target: first positional (optional).
+      if (!st.positionals.empty()) {
+        pa.target = st.positionals[0];
+      }
+      // rest: REMAINDER captures "-- flags..." verbatim.
+      pa.rest = st.rest;
+    };
+
+    if (pa.what == "dump") {
+      ParseState st = parse_leaf(kAstDumpSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kAstDumpHelp;
+        return pa;
+      }
+      fill_ast_common(st);
+      pa.depth = int_value(st, "--depth", 0);
+      pa.tokens = st.flags.count("--tokens") != 0;
+      pa.types = st.flags.count("--types") != 0;
+      // --cache/--no-cache: default true; --no-cache overrides.
+      pa.use_cache = st.flags.count("--no-cache") == 0;
+    } else if (pa.what == "locals") {
+      ParseState st = parse_leaf(kAstLocalsSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kAstLocalsHelp;
+        return pa;
+      }
+      fill_ast_common(st);
+      pa.params = st.flags.count("--params") != 0;
+      pa.use_cache = st.flags.count("--no-cache") == 0;
+    } else if (pa.what == "conditions") {
+      ParseState st = parse_leaf(kAstConditionsSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kAstConditionsHelp;
+        return pa;
+      }
+      fill_ast_common(st);
+      pa.cond_ast = st.flags.count("--ast") != 0;
+      pa.use_cache = st.flags.count("--no-cache") == 0;
+    } else { // cache
+      CommandScan csub = scan_command(argv, what.next, extras);
+      if (csub.help) {
+        pa.help_text = kAstCacheHelp;
+        return pa;
+      }
+      if (!csub.command) {
+        // B5: Python dest="cache_action" so the required-arg error says
+        // "cache_action", not "what".
+        fail(kAstCacheUsage, "cidx ast cache",
+             "the following arguments are required: cache_action");
+      }
+      if (!contains(kAstCacheWhats, *csub.command)) {
+        // B5: same dest name in the invalid-choice message.
+        fail(kAstCacheUsage, "cidx ast cache",
+             "argument cache_action: invalid choice: '" + *csub.command +
+                 "' (choose from " + join(kAstCacheWhats, ", ") + ")");
+      }
+      pa.cache_action = *csub.command;
+      const Spec &spec = (pa.cache_action == "build")    ? kAstCacheBuildSpec
+                         : (pa.cache_action == "status") ? kAstCacheStatusSpec
+                                                         : kAstCacheClearSpec;
+      ParseState st = parse_leaf(spec, argv, csub.next, extras);
+      if (st.help) {
+        // B6: route help by action so `-h` shows the correct subcommand's usage.
+        if (pa.cache_action == "status") {
+          pa.help_text = kAstCacheStatusHelp;
+        } else if (pa.cache_action == "clear") {
+          pa.help_text = kAstCacheClearHelp;
+        } else {
+          pa.help_text = kAstCacheBuildHelp;
+        }
+        return pa;
+      }
+      fill_ast_common(st);
+      // cache sub-commands have no --cache/--no-cache toggle (Python design).
+    }
   }
 
   // argparse parse_args: anything parse_known_args left over is reported by

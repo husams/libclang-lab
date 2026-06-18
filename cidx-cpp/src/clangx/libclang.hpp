@@ -342,6 +342,47 @@ public:
     return ::clang_equalCursors(a, b);
   }
 
+  // -- M5: ast command group additions (ADR-006 §5.4) ----------------------
+
+  // Cursor hash (stable within a TU; mirrors Python c.hash / CXCursor.hash).
+  // Used to key the conditions parent-map.
+  unsigned clang_hashCursor(CXCursor c) const { return ::clang_hashCursor(c); }
+
+  // Range start/end (for extent_dict and condition tokenization).
+  CXSourceLocation clang_getRangeStart(CXSourceRange r) const {
+    return ::clang_getRangeStart(r);
+  }
+  CXSourceLocation clang_getRangeEnd(CXSourceRange r) const {
+    return ::clang_getRangeEnd(r);
+  }
+
+  // Expression check: true when kind is in 100..199 (mirrors
+  // CursorKind.is_expression(), clang_isExpression C-API).
+  unsigned clang_isExpression(CXCursorKind k) const {
+    return ::clang_isExpression(k);
+  }
+
+  // TU save/load (PCH-format AST cache, ADR-005).
+  int clang_saveTranslationUnit(CXTranslationUnit tu, const char *path,
+                                unsigned options) const {
+    return ::clang_saveTranslationUnit(tu, path, options);
+  }
+  CXTranslationUnit clang_createTranslationUnit(CXIndex idx,
+                                                const char *ast_path) const {
+    return ::clang_createTranslationUnit(idx, ast_path);
+  }
+
+  // Spelling of the TU source file (mirrors tu.spelling in Python).
+  CXString clang_getTranslationUnitSpelling(CXTranslationUnit tu) const {
+    return ::clang_getTranslationUnitSpelling(tu);
+  }
+
+  // Spelling of a CXCursorKind (different casing from Python names —
+  // NOT used for JSON output; available for diagnostics only).
+  CXString clang_getCursorKindSpelling(CXCursorKind k) const {
+    return ::clang_getCursorKindSpelling(k);
+  }
+
   // CompilationDatabase
   CXCompilationDatabase
   clang_CompilationDatabase_fromDirectory(const char *dir,

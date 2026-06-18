@@ -61,8 +61,22 @@ struct ParsedArgs {
   bool rebuild = false;                   // resolve --rebuild
   std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
   std::optional<std::string> index_db;    // set/file/dump-cc --db (index override)
-  std::string target;                     // file COMPONENT://PATH
+  std::string target;                     // file/ast: target path or COMPONENT://PATH
   std::vector<std::string> op;            // file OP ... (REMAINDER tail)
+  std::vector<std::string> rest;          // ast -- FLAGS... (REMAINDER tail)
+
+  // -- ast sub-command fields (cidx ast dump|locals|conditions|cache) --------
+  std::optional<std::string> ast_usr;    // --usr  (ast: exact clang USR)
+  std::optional<int64_t> ast_id;         // --id   (ast: numeric symbol id)
+  bool first = false;                    // --first (take closest --name match)
+  bool ast_json = false;                 // --json  (emit machine-readable JSON)
+  bool use_cache = true;                 // --cache/--no-cache (default: on)
+  int depth = 0;                         // dump --depth N (0 = unlimited)
+  bool tokens = false;                   // dump --tokens
+  bool types = false;                    // dump --types
+  bool params = false;                   // locals --params
+  bool cond_ast = false;                 // conditions --ast
+  std::string cache_action;              // ast cache build|status|clear
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.
