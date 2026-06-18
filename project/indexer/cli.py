@@ -57,7 +57,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def cache_dir() -> str:
