@@ -1,18 +1,28 @@
-# versioned — component version-detection example
+# versioned — component version-detection examples
 
-A tiny library whose sources live under a **version-named trailing directory**
-(`lib/1.2.0/`). It exercises cidx's trailing-segment version detection
-(`pathx.split_base_version`, regex `^v?[0-9]+([._-][0-9]+)*$`) and confirms
+Two tiny libraries whose sources live under a **version-named trailing
+directory**. They exercise cidx's trailing-segment version detection
+(`pathx.split_base_version`, regex `^v?[0-9]+([._-][0-9]+)*$`) and confirm
 `import` records the **right information**: the version is stored on the
 component, the component's `path` is the base *without* the version, and the
 version is not duplicated into `directory.path`.
 
+- **`lib/1.2.0/`** — a plain C library (numeric version `1.2.0`).
+- **`cpplib/v1.4.0/`** — a real C++ library (namespace, virtual base + override,
+  template) with a `v`-prefixed version, exercising C++ symbol/graph extraction
+  on a versioned directory.
+
 ```
 manifests/versioned/
-└── lib/
-    └── 1.2.0/            ← trailing segment is a version string
-        ├── mathx.h
-        ├── mathx.c
+├── lib/
+│   └── 1.2.0/            ← trailing segment is a version string (C)
+│       ├── mathx.h
+│       ├── mathx.c
+│       └── compile_commands.json
+└── cpplib/
+    └── v1.4.0/           ← "v"-prefixed version (C++)
+        ├── widget.hpp
+        ├── widget.cpp
         └── compile_commands.json
 ```
 
@@ -61,3 +71,21 @@ the C++ binary print `component show` byte-identically for this component.
 
 To override or disable detection: `--version V` forces a version,
 `--no-detect-version` keeps the trailing segment as a plain directory.
+
+## C++ example: `cpplib/v1.4.0`
+
+```bash
+export INDEXER_CACHE=/tmp/cidx_cpplib
+cidx add-source --no-git --name cpplib --path manifests/versioned/cpplib/v1.4.0
+cidx import     --db                          manifests/versioned/cpplib/v1.4.0
+cidx index
+cidx component show cpplib          # version -> v1.4.0
+cidx graph hierarchy --name ui::Widget --first   # subclass: ui::Button
+```
+
+Verified identical between the Python and C++ binaries (each building its own
+index from the same libclang): `component show`, `list symbols` (13 symbols:
+`ui::Widget`/`ui::Button` with the inheritance edge, methods, ctors, destructor,
+members, the `ui::clamp` template), and `graph hierarchy` (text + `--json`).
+The stored rows show `component.version = v1.4.0`, empty `directory.path`, and
+basenames in `file` — same shape as the C example.
