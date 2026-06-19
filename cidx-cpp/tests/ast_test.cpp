@@ -1257,7 +1257,7 @@ TEST_SUITE("clang") {
 
   TEST_CASE("dependent calls inside a template body are recovered: a template "
             "method calling a function template earns a calls edge to the "
-            "primary; ambiguous overload sets are NOT linked") {
+            "primary; ambiguous overload sets link to ALL indexed candidates") {
     if (require_libclang() == nullptr) {
       return;
     }
@@ -1304,8 +1304,59 @@ TEST_SUITE("clang") {
     CHECK(summary_callees.count("nn::combine") == 1);  // recovered fn template
     CHECK(summary_callees.count("nn::describe") == 1); // recovered fn template
 
-    // `over(v)` in caller<T> is an overload SET (int/double) -> no guess.
-    CHECK(callees_of("nn::caller").count("nn::over") == 0);
+    // `over(v)` in caller<T> is a dependent overload SET (int/double). libclang
+    // can't say which overload is selected, so the site links to EVERY indexed
+    // overload of that name (both share qual_name nn::over) rather than dropping
+    // the call -- a sound over-approximation for find-references. Mirror of
+    // Python test_ambiguous_overload_links_all_candidates.
+    CHECK(callees_of("nn::caller").count("nn::over") == 1);
+  }
+
+  TEST_CASE("overloaded member function template called from another template "
+            "body links to the member template (regression for the "
+            "BzRuleValueCache::set/get no-references report)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/membovl.cpp";
+    write_file(path,
+               "namespace mm {\n"
+               "struct Cache {\n"
+               "  template <class V> void set(int k, V v) {}\n"
+               "  template <class V> void set(int k, V v, int ttl) {}\n"
+               "  template <class T> T get(int k) { return T{}; }\n"
+               "};\n"
+               "template <class T>\n"
+               "void useBoth(Cache& c, int k, T v) {\n"
+               "  c.set(k, v);\n"            // 2-candidate dependent overload set
+               "  c.set(k, v, 5);\n"         // 2-candidate dependent overload set
+               "  T a = c.template get<T>(k);\n" // single candidate
+               "}\n"
+               "}\n");
+
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    auto callees_of = [&](const std::string &src_qual) {
+      std::unordered_set<std::string> out;
+      auto &raw = f.db.raw_db();
+      auto st = raw.prepare("SELECT b.qual_name FROM edge e "
+                            "JOIN symbol a ON a.id = e.src_id "
+                            "JOIN symbol b ON b.id = e.dst_id "
+                            "WHERE e.kind = 1 AND a.qual_name = ?");
+      st.bind(1, std::string_view{src_qual});
+      while (st.step()) {
+        out.insert(st.col_text(0));
+      }
+      return out;
+    };
+
+    const auto cs = callees_of("mm::useBoth");
+    CHECK(cs.count("mm::Cache::set") == 1); // overloaded member template linked
+    CHECK(cs.count("mm::Cache::get") == 1); // single-overload member template
   }
 
 } // TEST_SUITE("clang") — S06
