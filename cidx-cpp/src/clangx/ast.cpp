@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <exception>
+#include <set>
 #include <unordered_set>
 #include <vector>
 
@@ -1069,15 +1070,16 @@ CXChildVisitResult overload_ref_visitor(CXCursor c, CXCursor /*parent*/,
   return CXChildVisit_Recurse;
 }
 
-// Returns the unique overloaded declaration, or a null cursor when the callee
-// cannot be unambiguously recovered. Only the FIRST child (the callee position)
-// is searched, so an argument that is itself an overloaded name is not mistaken
-// for the callee.
-CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
+// All candidate declarations of a dependent/overloaded callee, or empty when
+// the CALL_EXPR's first child carries no OverloadedDeclRef. Only the FIRST child
+// (the callee position) is searched, so an argument that is itself an overloaded
+// name is not mistaken for the callee. Mirror of Python
+// _overload_set_candidates().
+std::vector<CXCursor> overload_set_candidates(LibClang &lib, CXCursor call) {
   FirstChildCtx fc{};
   lib.clang_visitChildren(call, &first_child_visitor, &fc);
   if (!fc.found) {
-    return lib.clang_getNullCursor();
+    return {};
   }
   CXCursor odr = lib.clang_getNullCursor();
   if (lib.clang_getCursorKind(fc.out) == CXCursor_OverloadedDeclRef) {
@@ -1090,12 +1092,85 @@ CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
     }
   }
   if (lib.clang_Cursor_isNull(odr)) {
-    return lib.clang_getNullCursor();
+    return {};
   }
-  if (lib.clang_getNumOverloadedDecls(odr) == 1) {
-    return lib.clang_getOverloadedDecl(odr, 0);
+  const unsigned n = lib.clang_getNumOverloadedDecls(odr);
+  std::vector<CXCursor> out;
+  out.reserve(n);
+  for (unsigned i = 0; i < n; ++i) {
+    out.push_back(lib.clang_getOverloadedDecl(odr, i));
   }
-  return lib.clang_getNullCursor();
+  return out;
+}
+
+// Returns the unique overloaded declaration, or a null cursor when the callee
+// cannot be unambiguously recovered (ambiguous sets are handled by
+// emit_overloaded_calls instead). Mirror of Python _recover_overloaded_callee().
+CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
+  const auto cands = overload_set_candidates(lib, call);
+  return cands.size() == 1 ? cands[0] : lib.clang_getNullCursor();
+}
+
+// Emit `calls` edges for a dependent call whose overload set has MORE THAN one
+// candidate (e.g. an overloaded member function template `cache.set(...)`
+// invoked inside another template body). libclang cannot say which overload is
+// selected, so the site is linked to every ALREADY-INDEXED overload of that
+// name -- a sound over-approximation for find-references / call-graph
+// navigation. Lookup-only (never mints stubs), so unrelated ADL overload sets
+// that name no indexed symbol produce nothing. No receiver/argument provenance
+// is recorded: that feeds virtual-dispatch devirt, and a function-template call
+// is never a virtual dispatch. Mirror of Python _emit_overloaded_calls().
+void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
+  const auto cands = overload_set_candidates(lib, call);
+  if (cands.size() < 2) {
+    return;
+  }
+  std::set<int64_t> dst_ids; // ordered + deduped
+  for (const CXCursor &cand : cands) {
+    const std::string usr = CxString(lib, lib.clang_getCursorUSR(cand)).str();
+    if (!usr.empty()) {
+      if (const auto s = ctx->db->lookup_symbol(usr)) {
+        dst_ids.insert(s->id);
+      }
+    }
+  }
+  if (dst_ids.empty()) {
+    // libclang's dependent-context USRs collapse parameter types and may match
+    // nothing stored; fall back to the shared qualified name + kind, which
+    // returns the whole overload set.
+    const CXCursor first = cands[0];
+    const std::string qn = qualified_name(lib, first);
+    if (!qn.empty()) {
+      const std::string sk = stub_kind(lib, first);
+      for (const auto &s : ctx->db->lookup_symbols_by_qual_name(qn, sk)) {
+        dst_ids.insert(s.id);
+      }
+    }
+  }
+  if (dst_ids.empty()) {
+    return;
+  }
+  unsigned line = 0;
+  unsigned col = 0;
+  unsigned offset = 0;
+  CXFile file_handle = nullptr;
+  lib.clang_getExpansionLocation(lib.clang_getCursorLocation(call), &file_handle,
+                                 &line, &col, &offset);
+  for (const int64_t dst_id : dst_ids) {
+    Edge e;
+    e.src_id = ctx->src_id;
+    e.dst_id = dst_id;
+    e.kind = 1; // calls
+    e.count = 1;
+    const int64_t edge_id = ctx->db->add_edge(e);
+    EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = ctx->file_id;
+    site.line = static_cast<int64_t>(line);
+    site.col = static_cast<int64_t>(col);
+    site.conditional = ctx->cond_depth > 0 ? 1 : 0;
+    ctx->db->add_edge_site(site);
+  }
 }
 
 // ADR-004: mint the X<int> type node, write its template_arg rows, and add
@@ -1234,6 +1309,13 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
         // single-overload OverloadedDeclRef. See recover_overloaded_callee.
         ref = recover_overloaded_callee(lib, cursor);
         recovered = !lib.clang_Cursor_isNull(ref);
+        if (lib.clang_Cursor_isNull(ref)) {
+          // Multi-candidate dependent overload set (e.g. an overloaded member
+          // function template `cache.set(...)` called from another template
+          // body): the single-overload recovery above declines it. Link the
+          // site to every indexed overload. See emit_overloaded_calls.
+          emit_overloaded_calls(ctx, lib, cursor);
+        }
       }
       if (!lib.clang_Cursor_isNull(ref)) {
         const std::string callee_usr =

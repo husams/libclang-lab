@@ -764,32 +764,100 @@ def _parm_position(recv_expr: cx.Cursor) -> Optional[int]:
     return None
 
 
-def _recover_overloaded_callee(call_cursor: cx.Cursor) -> Optional[cx.Cursor]:
-    """Recover the callee of a CALL_EXPR whose ``referenced`` is None.
+def _overload_set_candidates(call_cursor: cx.Cursor) -> list[cx.Cursor]:
+    """The candidate declarations of a CALL_EXPR's dependent/overloaded callee.
 
     Inside a template body, a call to a dependent/overloaded name (e.g.
-    ``combine(a, b)`` in ``Stack<T>::summary``) has ``CALL_EXPR.referenced is
-    None``, even though the call IS present in the AST. The callee sub-expression
-    still carries an ``OVERLOADED_DECL_REF`` listing the candidate declarations.
-    When that set names exactly ONE declaration, return it; otherwise return None
-    (ambiguous overload sets such as stdlib ``to_string`` are left unresolved, so
-    we never guess a wrong target).
+    ``combine(a, b)`` in ``Stack<T>::summary``, or an overloaded member function
+    template ``cache.set(...)``) has ``CALL_EXPR.referenced is None``, even
+    though the call IS present in the AST. The callee sub-expression still
+    carries an ``OVERLOADED_DECL_REF`` listing the candidate declarations; this
+    returns all of them (empty when there is no such node).
 
     Only the FIRST child (the callee position) is searched -- an argument that is
     itself an overloaded name must not be mistaken for the callee.
     """
     children = list(call_cursor.get_children())
     if not children:
-        return None
+        return []
     stack = [children[0]]
     while stack:
         cur = stack.pop()
         if cur.kind == cx.CursorKind.OVERLOADED_DECL_REF:
-            if _lib.clang_getNumOverloadedDecls(cur) == 1:
-                return _lib.clang_getOverloadedDecl(cur, 0)
-            return None
+            n = _lib.clang_getNumOverloadedDecls(cur)
+            return [_lib.clang_getOverloadedDecl(cur, i) for i in range(n)]
         stack.extend(cur.get_children())
-    return None
+    return []
+
+
+def _recover_overloaded_callee(call_cursor: cx.Cursor) -> Optional[cx.Cursor]:
+    """Recover the callee of a CALL_EXPR whose ``referenced`` is None, when the
+    dependent overload set names exactly ONE declaration; otherwise None.
+
+    A single-candidate set is resolved precisely (one target). Multi-candidate
+    sets are handled separately by :func:`_emit_overloaded_calls`, which links
+    the call site to every indexed overload of that name rather than guessing
+    one (or dropping it). Unrelated ADL sets such as stdlib ``to_string`` resolve
+    to no indexed symbol there, so they create neither edges nor stubs.
+    """
+    cands = _overload_set_candidates(call_cursor)
+    return cands[0] if len(cands) == 1 else None
+
+
+def _emit_overloaded_calls(
+    db: Storage,
+    call_cursor: cx.Cursor,
+    src_id: int,
+    file_id: int,
+    cond_depth: int,
+) -> None:
+    """Emit ``calls`` edges for a dependent call whose overload set has MORE THAN
+    one candidate (e.g. an overloaded member function template ``cache.set(...)``
+    invoked inside another template body).
+
+    libclang cannot say which overload a dependent call selects, so rather than
+    drop the call entirely (leaving the symbol with no references) we link the
+    site to every *already-indexed* overload of that name -- a faithful, sound
+    over-approximation for find-references / call-graph navigation: the site does
+    call one of them. Lookup-only (never mints stubs), so unrelated ADL overload
+    sets that name no indexed symbol produce nothing.
+
+    No receiver/argument provenance is recorded: that feeds virtual-dispatch
+    devirtualization, and a function-template call is never a virtual dispatch.
+    """
+    cands = _overload_set_candidates(call_cursor)
+    if len(cands) < 2:
+        return
+    # Prefer exact per-candidate USR resolution; fall back to the shared
+    # qualified name + kind when libclang's dependent-context USRs don't match
+    # any stored symbol (they collapse parameter types -- see _body_descent).
+    dsts: dict[int, Any] = {}
+    for cand in cands:
+        usr = cand.get_usr()
+        if usr:
+            s = db.lookup_symbol(usr)
+            if s is not None:
+                dsts[s.id] = s
+    if not dsts:
+        first = cands[0]
+        qn = _qualified_name(first)
+        if qn:
+            for s in db.lookup_symbols_by_qual_name(
+                qn, _KIND_MAP.get(first.kind, "function")
+            ):
+                dsts[s.id] = s
+    if not dsts:
+        return
+    loc = call_cursor.location
+    for dst in dsts.values():
+        edge_id = db.add_edge(src_id, dst.id, 1)  # calls
+        db.add_edge_site(
+            edge_id,
+            file_id,
+            loc.line,
+            loc.column,
+            conditional=1 if cond_depth > 0 else 0,
+        )
 
 
 def _mint_instantiation_nodes(
@@ -925,6 +993,13 @@ def _body_descent(
                 # _recover_overloaded_callee.
                 ref = _recover_overloaded_callee(child)
                 recovered = ref is not None
+                if ref is None:
+                    # Multi-candidate dependent overload set (e.g. an overloaded
+                    # member function template `cache.set(...)` called from
+                    # another template body): the single-overload recovery above
+                    # declines it. Link the site to every indexed overload so the
+                    # references are complete. See _emit_overloaded_calls.
+                    _emit_overloaded_calls(db, child, src_id, file_id, cond_depth)
             if ref is not None:
                 callee_usr: str = ref.get_usr()
                 if callee_usr:
