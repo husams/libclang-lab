@@ -420,12 +420,16 @@ class CodeBase:
 
     # convenience single-kind lookups -------------------------------------- #
 
-    def function(self, name: str) -> "Optional[Function]":
-        """The first free function matching `name`, or None."""
+    def function(self, name: str) -> "Optional[Function | FunctionTemplate]":
+        """The first free function matching `name`, or None.
+
+        Includes free function templates (FunctionTemplate), which are a sibling
+        of Function -- not a subclass -- so they must be admitted explicitly."""
         hits = [
             e
             for e in self.find(name)
-            if isinstance(e, Function) and not isinstance(e, Method)
+            if isinstance(e, (Function, FunctionTemplate))
+            and not isinstance(e, Method)
         ]
         return hits[0] if hits else None
 
@@ -1441,9 +1445,19 @@ class Record(Entity):
         return [e for e in self._members() if isinstance(e, Field)]
 
     @property
-    def methods(self) -> list[Method]:
-        """Member functions, including constructors/destructors."""
-        return [e for e in self._members() if isinstance(e, Method)]
+    def methods(self) -> "list[Method | FunctionTemplate]":
+        """Member functions, including constructors/destructors and member
+        function templates.
+
+        A member function template (e.g. ``Cache::set<T>``) is wrapped as
+        FunctionTemplate, a sibling of Method rather than a subclass, so it has
+        to be admitted explicitly. Every FunctionTemplate reachable here arrived
+        via a ``method_of`` edge, so it is by definition a member template."""
+        return [
+            e
+            for e in self._members()
+            if isinstance(e, (Method, FunctionTemplate))
+        ]
 
     def members(self, access: Optional[str] = None) -> list[Entity]:
         """All members; `access` filters to public/protected/private."""
@@ -1482,14 +1496,17 @@ class Record(Entity):
         virtual method, or inherits one it does not override.
 
         Heuristic (thin layer): a class is abstract if any of its own methods is
-        pure, or any ancestor's pure method has no same-spelling override here."""
-        own = self.methods
+        pure, or any ancestor's pure method has no same-spelling override here.
+
+        Only plain Methods participate -- a function template can never be pure
+        virtual, and `.methods` now also yields FunctionTemplate members."""
+        own = [m for m in self.methods if isinstance(m, Method)]
         if any(m.is_pure for m in own):
             return True
         overridden = {m.spelling for m in own if not m.is_pure}
         for anc in self.ancestors:
             for m in anc.methods:
-                if m.is_pure and m.spelling not in overridden:
+                if isinstance(m, Method) and m.is_pure and m.spelling not in overridden:
                     return True
         return False
 
@@ -1555,11 +1572,14 @@ class Namespace(Entity):
         return self._cb._wrap_all(self._cb.graph.members(self.sym))
 
     @property
-    def functions(self) -> list[Function]:
+    def functions(self) -> "list[Function | FunctionTemplate]":
+        """Free functions in this namespace, including free function templates
+        (FunctionTemplate is a sibling of Function, not a subclass)."""
         return [
             e
             for e in self.members()
-            if isinstance(e, Function) and not isinstance(e, Method)
+            if isinstance(e, (Function, FunctionTemplate))
+            and not isinstance(e, Method)
         ]
 
     @property
