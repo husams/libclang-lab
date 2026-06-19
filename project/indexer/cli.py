@@ -265,9 +265,10 @@ def cmd_realias(args) -> int:
             return 1
         cid = None
         if args.component:
-            comp = _lookup_component(db, args.component)
-            if comp is None:
-                print(f"error: no component named '{args.component}'", file=sys.stderr)
+            try:
+                comp = _lookup_component(db, args.component)
+            except LookupError as e:
+                print(f"error: {e}", file=sys.stderr)
                 return 1
             cid = comp.id
         changed, scanned = 0, 0
