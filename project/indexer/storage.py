@@ -581,6 +581,37 @@ class Storage:
             for r in self._conn.execute("SELECT name, path FROM label ORDER BY name")
         ]
 
+    def list_alias_pairs(self) -> list[tuple[str, str]]:
+        """Encode registry for include-path aliasing: explicit labels PLUS
+        every UNIQUELY-named component (value = its stored effective root).
+
+        Component names are not UNIQUE in the schema, so only names that occur
+        exactly once are eligible — a duplicated name has no deterministic
+        decode and is skipped. Explicit labels win on a name collision. The
+        decode side of this same registry is `get_alias`. Returned sorted by
+        name; `build_label_map` re-sorts by resolved length for longest-match.
+        """
+        pairs: dict[str, str] = dict(self.list_labels())  # labels win
+        comps = self.list_components()
+        counts: dict[str, int] = {}
+        for c in comps:
+            counts[c.name] = counts.get(c.name, 0) + 1
+        for c in comps:
+            if counts[c.name] == 1 and c.name not in pairs:
+                pairs[c.name] = Storage.effective_root(c)
+        return sorted(pairs.items())
+
+    def get_alias(self, name: str) -> Optional[str]:
+        """Decode an alias name: explicit label first, then a UNIQUELY-named
+        component (-> its stored effective root). None if neither applies (a
+        duplicated component name is ambiguous and resolves to None). Mirror of
+        the `list_alias_pairs` encode registry."""
+        path = self.get_label(name)
+        if path is not None:
+            return path
+        matches = [c for c in self.list_components() if c.name == name]
+        return Storage.effective_root(matches[0]) if len(matches) == 1 else None
+
     def get_component_by_name(self, name: str) -> Optional[Component]:
         row = self._conn.execute(
             "SELECT * FROM component WHERE name = ?", (name,)

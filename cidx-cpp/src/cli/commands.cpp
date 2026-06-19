@@ -133,12 +133,13 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
   try {
     // Stored options are re-sanitize()d at index time (G11) — heals DBs
     // imported by an older cidx whose drop list was shorter.
-    // Then decode <label>/$VAR tokens via resolve_options (v0.6.0).
+    // Then decode <label>/$VAR tokens via resolve_options (v0.6.0). get_alias
+    // resolves both explicit labels and uniquely-named components (v0.8.0).
     const std::vector<std::string> opts =
         CompileDb::resolve_options(
             CompileDb::sanitize(rec.compile_options ? *rec.compile_options
                                                     : std::vector<std::string>{}),
-            [&db](const std::string &n) { return db.get_label(n); });
+            [&db](const std::string &n) { return db.get_alias(n); });
     // parse() receives the reconstructed absolute path (G24) and assembles
     // opts + toolchain_flags(is_cpp, driver) + -ferror-limit=0 itself.
     const ParsedTu tu = parser.parse(path, opts, rec.driver);
@@ -406,16 +407,18 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   int skipped = 0;
   Storage db(ctx.index_path);
 
-  // Encode include paths against the label registry unless --no-alias.
-  // Labels must be pre-registered (cidx label add) before import.
-  // Mirrors Python cmd_import: build_label_map(db.list_labels(), lookup=db.get_label).
+  // Encode include paths against the alias registry unless --no-alias. The
+  // registry is explicit labels PLUS uniquely-named components, so an -I under
+  // a component root auto-aliases to <component-name> with no `cidx label add`
+  // needed; decode (get_alias) mirrors this same registry.
+  // Mirrors Python cmd_import: build_label_map(db.list_alias_pairs(), db.get_alias).
   std::vector<std::pair<std::string, std::string>> label_map;
   if (!args.no_alias) {
-    const auto labels = db.list_labels();
-    if (!labels.empty()) {
+    const auto pairs = db.list_alias_pairs();
+    if (!pairs.empty()) {
       label_map = CompileDb::build_label_map(
-          labels,
-          [&db](const std::string &n) { return db.get_label(n); });
+          pairs,
+          [&db](const std::string &n) { return db.get_alias(n); });
     }
   }
 
@@ -2654,10 +2657,11 @@ int cmd_label_resolve(const ParsedArgs &args, Context &ctx) {
     token = "<" + token + ">";
   }
   Storage db(ctx.index_path);
-  // Build a LabelResolver backed by the DB.
+  // Build a LabelResolver backed by the DB. get_alias resolves explicit labels
+  // and uniquely-named components, matching parse-time decode (v0.8.0).
   const bool autoderive = !args.no_autoderive_labels;
   pathutil::LabelResolver resolver(
-      [&db](const std::string &n) { return db.get_label(n); }, autoderive);
+      [&db](const std::string &n) { return db.get_alias(n); }, autoderive);
   const std::string raw = pathutil::resolve_fs_path(token, resolver);
   // Apply abspath only for bare paths (not compound tokens like -I<...>).
   // resolve_fs_path contract: abspath is the caller's responsibility.
@@ -2672,11 +2676,12 @@ int cmd_label_resolve(const ParsedArgs &args, Context &ctx) {
 // Port of Python cmd_realias, byte-identical output strings.
 int cmd_realias(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path);
-  const auto labels = db.list_labels();
+  const auto pairs = db.list_alias_pairs();
   const auto label_map = CompileDb::build_label_map(
-      labels, [&db](const std::string &n) { return db.get_label(n); });
+      pairs, [&db](const std::string &n) { return db.get_alias(n); });
   if (label_map.empty()) {
-    *ctx.err << "error: no labels registered (use 'cidx label add')\n";
+    *ctx.err << "error: no aliases available (register a label with "
+                "'cidx label add', or add a component)\n";
     return 1;
   }
   std::optional<int64_t> cid;

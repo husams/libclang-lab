@@ -319,6 +319,15 @@ public:
   std::optional<std::string> get_label(const std::string &name);
   // Sorted by name; returns (name, stored path) pairs.
   std::vector<std::pair<std::string, std::string>> list_labels();
+  // Encode registry for include-path aliasing: explicit labels PLUS every
+  // UNIQUELY-named component (value = its stored effective root). Labels win
+  // on a name collision; a duplicated component name is skipped. Decode mirror
+  // = get_alias. Sorted by name. (Python Storage.list_alias_pairs.)
+  std::vector<std::pair<std::string, std::string>> list_alias_pairs();
+  // Decode an alias name: explicit label first, then a UNIQUELY-named
+  // component (-> its stored effective root); nullopt otherwise (a duplicated
+  // component name is ambiguous). (Python Storage.get_alias.)
+  std::optional<std::string> get_alias(const std::string &name);
 
   // Raw connection — exposed for tests (schema assertions on :memory: DBs)
   // and future maintenance commands. Not part of the indexing flow.
