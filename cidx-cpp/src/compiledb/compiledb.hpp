@@ -7,6 +7,8 @@
 // byte-identical to the Python path (D20).
 #pragma once
 
+#include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +64,42 @@ public:
   // The empty-string second element signals "no version detected".
   static std::pair<std::string, std::string>
   split_base_version(const std::string &root);
+
+  // ---------------------------------------------------------------------------
+  // Include-path aliasing (v0.6.0): encode absolute -I dirs <-> <label> tokens
+  // (compiledb.py alias_options / resolve_options / build_label_map).
+  // ---------------------------------------------------------------------------
+
+  // DECODE: resolve <label>/$VAR/~ in include-path values to absolute paths.
+  // Only values that look indirected (contain '<' or '$' or start with '~')
+  // are resolved via the full resolution chain + abspath; plain absolute paths
+  // are left untouched. Used at parse/index time so libclang sees real dirs.
+  // lookup: returns stored path for a label name, or nullopt on miss.
+  static std::vector<std::string>
+  resolve_options(const std::vector<std::string> &options,
+                  std::function<std::optional<std::string>(const std::string &)>
+                      lookup = nullptr,
+                  bool autoderive = true);
+
+  // Build the encode label map from (name, stored_path) pairs.
+  // Each stored path is resolved to an absolute directory (env-vars expanded,
+  // NO autoderive). Sorted longest-resolved-path first, then name, so the
+  // longest prefix wins deterministically.
+  // lookup: used to resolve labels within stored paths (rarely needed).
+  static std::vector<std::pair<std::string, std::string>>
+  build_label_map(
+      const std::vector<std::pair<std::string, std::string>> &labels,
+      std::function<std::optional<std::string>(const std::string &)> lookup =
+          nullptr);
+
+  // ENCODE: rewrite absolute include-path values to <label> tokens.
+  // label_map is the output of build_label_map (sorted longest-first).
+  // A value equal to or under a label's resolved directory becomes
+  // "<name>" + remainder (longest match wins).
+  // Values already indirected ('<' or '$') and relative values are unchanged.
+  static std::vector<std::string>
+  alias_options(const std::vector<std::string> &options,
+                const std::vector<std::pair<std::string, std::string>> &label_map);
 };
 
 } // namespace cidx

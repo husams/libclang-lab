@@ -133,9 +133,12 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
   try {
     // Stored options are re-sanitize()d at index time (G11) — heals DBs
     // imported by an older cidx whose drop list was shorter.
+    // Then decode <label>/$VAR tokens via resolve_options (v0.6.0).
     const std::vector<std::string> opts =
-        CompileDb::sanitize(rec.compile_options ? *rec.compile_options
-                                                : std::vector<std::string>{});
+        CompileDb::resolve_options(
+            CompileDb::sanitize(rec.compile_options ? *rec.compile_options
+                                                    : std::vector<std::string>{}),
+            [&db](const std::string &n) { return db.get_label(n); });
     // parse() receives the reconstructed absolute path (G24) and assembles
     // opts + toolchain_flags(is_cpp, driver) + -ferror-limit=0 itself.
     const ParsedTu tu = parser.parse(path, opts, rec.driver);
@@ -402,6 +405,20 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   int imported = 0;
   int skipped = 0;
   Storage db(ctx.index_path);
+
+  // Encode include paths against the label registry unless --no-alias.
+  // Labels must be pre-registered (cidx label add) before import.
+  // Mirrors Python cmd_import: build_label_map(db.list_labels(), lookup=db.get_label).
+  std::vector<std::pair<std::string, std::string>> label_map;
+  if (!args.no_alias) {
+    const auto labels = db.list_labels();
+    if (!labels.empty()) {
+      label_map = CompileDb::build_label_map(
+          labels,
+          [&db](const std::string &n) { return db.get_label(n); });
+    }
+  }
+
   if (args.force) {
     const std::optional<Component> existing = db.get_component(stored_root);
     if (existing) {
@@ -432,7 +449,12 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
           continue;
         }
       }
-      db.add_file_path(src, file_mtime(src), md5_of(src), cmd.args, cmd.driver);
+      // Apply alias_options after stripping (encode include paths).
+      std::vector<std::string> opts = cmd.args;
+      if (!label_map.empty()) {
+        opts = CompileDb::alias_options(opts, label_map);
+      }
+      db.add_file_path(src, file_mtime(src), md5_of(src), opts, cmd.driver);
       ++imported;
     }
     txn.commit(); // R2: explicit commit so a COMMIT failure is not swallowed
@@ -2615,6 +2637,48 @@ int cmd_label_resolve(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// cmd_realias (cli.py cmd_realias): rewrite stored include paths to <label>
+// tokens via the registry. Optional COMPONENT restricts to one component.
+// Port of Python cmd_realias, byte-identical output strings.
+int cmd_realias(const ParsedArgs &args, Context &ctx) {
+  Storage db(ctx.index_path);
+  const auto labels = db.list_labels();
+  const auto label_map = CompileDb::build_label_map(
+      labels, [&db](const std::string &n) { return db.get_label(n); });
+  if (label_map.empty()) {
+    *ctx.err << "error: no labels registered (use 'cidx label add')\n";
+    return 1;
+  }
+  std::optional<int64_t> cid;
+  if (args.component && !args.component->empty()) {
+    const std::optional<Component> comp =
+        db.get_component_by_name(*args.component);
+    if (!comp) {
+      *ctx.err << "error: no component named '" << *args.component << "'\n";
+      return 1;
+    }
+    cid = comp->id;
+  }
+  int64_t changed = 0;
+  int64_t scanned = 0;
+  for (const auto &row : db.list_files(cid)) {
+    const File &rec = row.first;
+    if (!rec.compile_options || rec.compile_options->empty() || rec.id == 0) {
+      continue;
+    }
+    ++scanned;
+    const std::vector<std::string> cur(*rec.compile_options);
+    const std::vector<std::string> nw = CompileDb::alias_options(cur, label_map);
+    if (nw != cur) {
+      db.update_file_compile_options(rec.id, nw);
+      ++changed;
+    }
+  }
+  *ctx.out << "realias: " << changed << " file(s) updated, " << scanned
+           << " scanned\n";
+  return 0;
+}
+
 int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "init") {
     return cmd_init(args, ctx);
@@ -2624,6 +2688,9 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   }
   if (args.command == "import") {
     return cmd_import(args, ctx);
+  }
+  if (args.command == "realias") {
+    return cmd_realias(args, ctx);
   }
   if (args.command == "index") {
     return cmd_index(args, ctx);

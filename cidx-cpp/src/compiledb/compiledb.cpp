@@ -1,6 +1,9 @@
 #include "compiledb/compiledb.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <functional>
+#include <optional>
 #include <regex>
 #include <set>
 #include <string>
@@ -224,6 +227,122 @@ CompileDb::split_base_version(const std::string &root) {
     return {base, seg};
   }
   return {normed, ""};
+}
+
+// ---------------------------------------------------------------------------
+// Include-path aliasing (v0.6.0) — port of compiledb.py:
+//   _map_include_values / resolve_options / build_label_map / alias_options
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The three include flags (compiledb.py _INCLUDE_FLAGS).
+const char *const kIncludeFlags[] = {"-I", "-isystem", "-iquote"};
+
+// Apply fn to each include-path value in options (both space and glued forms).
+// All other tokens are copied verbatim.
+// Mirrors compiledb.py:_map_include_values.
+template <typename Fn>
+std::vector<std::string>
+map_include_values(const std::vector<std::string> &options, Fn fn) {
+  std::vector<std::string> out;
+  out.reserve(options.size());
+  size_t i = 0;
+  while (i < options.size()) {
+    const std::string &tok = options[i++];
+    bool matched = false;
+    for (const char *flag : kIncludeFlags) {
+      const size_t flen = std::strlen(flag);
+      if (tok == flag) { // space form: -I path
+        out.push_back(tok);
+        if (i < options.size()) {
+          out.push_back(fn(options[i++]));
+        }
+        matched = true;
+        break;
+      }
+      if (tok.size() > flen && tok.starts_with(flag)) { // glued: -Ipath
+        out.push_back(std::string(flag) + fn(tok.substr(flen)));
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      out.push_back(tok);
+    }
+  }
+  return out;
+}
+
+} // namespace
+
+// DECODE: resolve <label>/$VAR/~ in include-path values to absolute paths.
+std::vector<std::string>
+CompileDb::resolve_options(
+    const std::vector<std::string> &options,
+    std::function<std::optional<std::string>(const std::string &)> lookup,
+    bool autoderive) {
+  pathutil::LabelResolver resolver(lookup ? std::move(lookup) : nullptr,
+                                   autoderive);
+  return map_include_values(options, [&](const std::string &val) -> std::string {
+    // Only resolve values that look indirected: contain '<', '$', or start
+    // with '~'. Plain absolute paths pass through unchanged.
+    if (val.find('<') == std::string::npos &&
+        val.find('$') == std::string::npos &&
+        (val.empty() || val[0] != '~')) {
+      return val;
+    }
+    return pathutil::abspath(pathutil::resolve_fs_path(val, resolver));
+  });
+}
+
+// Build the encode label map from (name, stored_path) pairs.
+std::vector<std::pair<std::string, std::string>>
+CompileDb::build_label_map(
+    const std::vector<std::pair<std::string, std::string>> &labels,
+    std::function<std::optional<std::string>(const std::string &)> lookup) {
+  // NO autoderive — a label's own stored value is taken literally.
+  pathutil::LabelResolver resolver(lookup ? std::move(lookup) : nullptr,
+                                   /*autoderive=*/false);
+  std::vector<std::pair<std::string, std::string>> out;
+  out.reserve(labels.size());
+  for (const auto &[name, stored] : labels) {
+    const std::string rp =
+        pathutil::abspath(pathutil::resolve_fs_path(stored, resolver));
+    out.emplace_back(name, rp);
+  }
+  // Sort: longest resolved path first; on tie, by name ascending.
+  std::sort(out.begin(), out.end(),
+            [](const std::pair<std::string, std::string> &a,
+               const std::pair<std::string, std::string> &b) {
+              if (a.second.size() != b.second.size()) {
+                return a.second.size() > b.second.size(); // longer first
+              }
+              return a.first < b.first; // then name ascending
+            });
+  return out;
+}
+
+// ENCODE: rewrite absolute include-path values to <label> tokens.
+std::vector<std::string>
+CompileDb::alias_options(
+    const std::vector<std::string> &options,
+    const std::vector<std::pair<std::string, std::string>> &label_map) {
+  return map_include_values(options, [&](const std::string &val) -> std::string {
+    // Already indirected, or relative: leave unchanged.
+    if (val.find('<') != std::string::npos ||
+        val.find('$') != std::string::npos ||
+        !pathutil::isabs(val)) {
+      return val;
+    }
+    const std::string absval = pathutil::normpath(val);
+    for (const auto &[name, rp] : label_map) {
+      if (absval == rp || absval.starts_with(rp + "/")) {
+        return "<" + name + ">" + absval.substr(rp.size());
+      }
+    }
+    return val;
+  });
 }
 
 } // namespace cidx

@@ -142,6 +142,14 @@ public:
       int64_t file_id, const std::vector<std::string> &options,
       const std::optional<std::string> &driver = std::nullopt,
       bool update_driver = false);
+
+  // Replace a file's stored compile flags WITHOUT setting args_overridden.
+  // Used by `cidx realias`, which rewrites include paths to <label> tokens as
+  // a portability transform (not a manual edit) — a later `import` should be
+  // free to re-strip + re-alias these files.
+  // Port of storage.py update_file_compile_options.
+  void update_file_compile_options(int64_t file_id,
+                                   const std::vector<std::string> &options);
   bool is_file_indexed(const std::string &abs_path,
                        const std::optional<double> &mtime = std::nullopt,
                        const std::optional<std::string> &md5 = std::nullopt);

@@ -23,25 +23,27 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,index,resolve,component,label,set,file,"
+    "{init,add-source,import,realias,index,resolve,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,index,resolve,component,label,set,file,"
+    "{init,add-source,import,realias,index,resolve,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,index,resolve,component,label,set,file,"
+    "  {init,add-source,import,realias,index,resolve,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
+    "    realias             rewrite stored include paths to <label> tokens via "
+    "the registry\n"
     "    index               index imported C/C++ files\n"
     "    resolve             finalize cross-repo edges and roll up edge counts\n"
     "    component           inspect or modify a component\n"
@@ -94,17 +96,32 @@ const char kAddSourceHelp[] =
     "                        root\n";
 
 const char kImportUsage[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force]\n";
+    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n";
 
 const char kImportHelp[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force]\n"
+    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
     "\n"
     "options:\n"
     "  -h, --help   show this help message and exit\n"
     "  --db DB      compile_commands.json (or the directory holding it)\n"
     "  --name NAME  component name override\n"
     "  --force      reimport: delete the existing component (its files and\n"
-    "               indexed symbols) before importing\n";
+    "               indexed symbols) before importing\n"
+    "  --no-alias   do not rewrite include paths to <label> tokens via the\n"
+    "               registry\n";
+
+const char kRealiasUsage[] =
+    "usage: cidx realias [-h] [--db PATH] [COMPONENT]\n";
+
+const char kRealiasHelp[] =
+    "usage: cidx realias [-h] [--db PATH] [COMPONENT]\n"
+    "\n"
+    "positional arguments:\n"
+    "  COMPONENT   restrict to one component (default: all files)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
 
 const char kIndexUsage[] =
     "usage: cidx index [-h] [--source COMPONENT] [--no-graph] [files ...]\n";
@@ -1082,10 +1099,10 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",      "add-source", "import",               "index",
-    "resolve",   "component",  "label",                "set",
-    "file",      "dump-compile-commands",
-    "search",    "show",       "list",                 "ls",
+    "init",      "add-source", "import",               "realias",
+    "index",     "resolve",    "component",             "label",
+    "set",       "file",       "dump-compile-commands",
+    "search",    "show",       "list",                  "ls",
     "delete",    "graph",      "ast"};
 const std::vector<std::string> kGraphWhats = {
     "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
@@ -1556,10 +1573,24 @@ const Spec kImportSpec = {
         {"--version", '\0', ValueKind::kString, "--version", nullptr, 0},
         {"--no-detect-version", '\0', ValueKind::kNone, "--no-detect-version",
          nullptr, 0},
+        // v0.6.0: aliasing
+        {"--no-alias", '\0', ValueKind::kNone, "--no-alias", nullptr, 0},
     },
     {},
     false,
     {"--db"},
+};
+
+const Spec kRealiasSpec = {
+    "cidx realias",
+    kRealiasUsage,
+    kRealiasHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {}, // COMPONENT is optional, collected as rest
+    true,  // rest=true: nargs="?" — collect surplus tokens as optional positional
+    {},    // nothing required
 };
 
 const Spec kIndexSpec = {
@@ -2148,6 +2179,18 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.force = st.flags.count("--force") != 0;
     pa.version_str = opt_value(st, "--version");
     pa.no_detect_version = st.flags.count("--no-detect-version") != 0;
+    pa.no_alias = st.flags.count("--no-alias") != 0;
+  } else if (pa.command == "realias") {
+    ParseState st = parse_leaf(kRealiasSpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kRealiasHelp;
+      return pa;
+    }
+    // Optional COMPONENT positional collected via rest.
+    if (!st.rest.empty()) {
+      pa.component = st.rest[0];
+    }
+    pa.index_db = opt_value(st, "--db");
   } else if (pa.command == "index") {
     ParseState st = parse_leaf(kIndexSpec, argv, i, extras);
     if (st.help) {

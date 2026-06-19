@@ -321,7 +321,7 @@ struct GoldFixture {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,index,resolve,component,label,set,file,"
+    "{init,add-source,import,realias,index,resolve,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
@@ -388,9 +388,9 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, add-source, import, index, resolve, component, label, "
-            "set, file, dump-compile-commands, search, show, list, ls, delete, "
-            "graph, ast)\n");
+            "from init, add-source, import, realias, index, resolve, component, "
+            "label, set, file, dump-compile-commands, search, show, list, ls, "
+            "delete, graph, ast)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -512,9 +512,10 @@ TEST_CASE("args: missing required option -> exit 2 (add-source, import)") {
   // $ python3 -m indexer import
   f = parse_fail({"import"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx import [-h] --db DB [--name NAME] [--force]\n"
-                 "cidx import: error: the following arguments are required: "
-                 "--db\n");
+  CHECK(f.msg ==
+        "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
+        "cidx import: error: the following arguments are required: "
+        "--db\n");
 }
 
 TEST_CASE("args: option missing its value -> expected one argument") {
@@ -777,12 +778,12 @@ TEST_CASE("args: index collects FILE... and --source") {
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {
-  // $ python3 -m indexer --version   -> "cidx 0.5.1" on stdout, exit 0
+  // $ python3 -m indexer --version   -> "cidx 0.6.0" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.5.1");
+  CHECK(std::string(cli::kVersion) == "0.6.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -806,12 +807,14 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "\n"
           "positional arguments:\n"
           "  "
-          "{init,add-source,import,index,resolve,component,label,set,file,"
+          "{init,add-source,import,realias,index,resolve,component,label,set,file,"
           "dump-compile-commands,search,show,list,ls,delete,graph,ast}"
           "\n"
           "    init                create a blank index database\n"
           "    add-source          register a component\n"
           "    import              import a compile_commands.json\n"
+          "    realias             rewrite stored include paths to <label> tokens via "
+          "the registry\n"
           "    index               index imported C/C++ files\n"
           "    resolve             finalize cross-repo edges and roll up edge "
           "counts\n"
