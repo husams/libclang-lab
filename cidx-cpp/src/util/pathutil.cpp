@@ -2,6 +2,8 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <regex>
+#include <string>
 #include <vector>
 
 #include <pwd.h>
@@ -187,6 +189,161 @@ void join_one(std::string &path, const std::string &part) {
 }
 
 } // namespace detail
+
+// ---------------------------------------------------------------------------
+// expandvars — exact port of CPython posixpath.expandvars (string branch)
+// Contract: portable_paths_contract.md §1.1
+// ---------------------------------------------------------------------------
+
+std::string expandvars(const std::string &path) {
+  // Fast-path: if no '$' present, return unchanged (CPython: 'if '$' not in
+  // path: return path'). No regex engine touched.
+  if (path.find('$') == std::string::npos) {
+    return path;
+  }
+
+  // Pattern: \$([A-Za-z0-9_]+|\{[^}]*\}?)
+  // \w written as explicit [A-Za-z0-9_] (never locale-tainted stdlib \w).
+  static const std::regex kVarRe(R"(\$([A-Za-z0-9_]+|\{[^}]*\}?))");
+
+  std::string out;
+  out.reserve(path.size());
+  std::size_t pos = 0;
+
+  // Hand-rolled sregex_iterator walk — see contract §1.1 why regex_replace
+  // cannot implement the "leave literal" branch correctly.
+  const auto begin =
+      std::sregex_iterator(path.begin(), path.end(), kVarRe);
+  const auto end = std::sregex_iterator();
+
+  for (auto it = begin; it != end; ++it) {
+    const std::smatch &m = *it;
+    // Append literal text before this match.
+    const auto match_pos = static_cast<std::size_t>(m.position());
+    out.append(path, pos, match_pos - pos);
+
+    // group(1) = the capture (either \w+ or \{[^}]*\}?)
+    const std::string name = m[1].str();
+    std::string lookup_name = name;
+    bool unterminated_brace = false;
+
+    if (!name.empty() && name[0] == '{') {
+      if (name.back() != '}') {
+        // Unterminated brace — e.g. "${FOO" — leave literal.
+        unterminated_brace = true;
+      } else {
+        // Strip braces: {FOO} -> FOO
+        lookup_name = name.substr(1, name.size() - 2);
+      }
+    }
+
+    if (unterminated_brace) {
+      // Leave the entire match text literal.
+      out += m[0].str();
+    } else {
+      const char *val = std::getenv(lookup_name.c_str());
+      if (val != nullptr) {
+        out += val; // defined: substitute value (empty string if "")
+      } else {
+        out += m[0].str(); // undefined: leave literal (KeyError parity)
+      }
+    }
+
+    pos = static_cast<std::size_t>(m.position()) +
+          static_cast<std::size_t>(m.length());
+  }
+
+  // Append tail after the last match.
+  out.append(path, pos, path.size() - pos);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// label_expand — §1.2
+// ---------------------------------------------------------------------------
+
+std::string label_expand(const std::string &token,
+                         const LabelResolver &labels) {
+  // Fast-path: no '<' means no placeholder.
+  if (token.find('<') == std::string::npos) {
+    return token;
+  }
+
+  // Match <name> where name is any non-<> run.
+  // We walk manually to allow overlapping-free replacement.
+  std::string out;
+  out.reserve(token.size());
+  std::size_t pos = 0;
+
+  while (pos < token.size()) {
+    const std::size_t open = token.find('<', pos);
+    if (open == std::string::npos) {
+      out.append(token, pos, token.size() - pos);
+      break;
+    }
+    // Append literal up to '<'.
+    out.append(token, pos, open - pos);
+
+    const std::size_t close = token.find('>', open + 1);
+    if (close == std::string::npos) {
+      // No closing '>': append rest literally.
+      out.append(token, open, token.size() - open);
+      pos = token.size();
+      break;
+    }
+
+    const std::string name = token.substr(open + 1, close - open - 1);
+
+    // 1. Registry hit.
+    bool resolved = false;
+    if (labels.lookup) {
+      const auto hit = labels.lookup(name);
+      if (hit.has_value()) {
+        out += *hit;
+        resolved = true;
+      }
+    }
+
+    // 2. Autoderive.
+    if (!resolved && labels.autoderive && !name.empty()) {
+      std::string derived = "/";
+      for (char c : name) {
+        derived += (c == '-') ? '/' : c;
+      }
+      out += derived;
+      resolved = true;
+    }
+
+    // 3. Leave literal.
+    if (!resolved) {
+      out += '<';
+      out += name;
+      out += '>';
+    }
+
+    pos = close + 1;
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// resolve_fs_path — §1.3
+// ---------------------------------------------------------------------------
+
+std::string resolve_fs_path(const std::string &stored,
+                            const LabelResolver &labels) {
+  // Order is load-bearing: labels -> envvars -> ~ -> normpath.
+  std::string s = label_expand(stored, labels);
+  s = expandvars(s);
+  s = expanduser(s);
+  s = normpath(s);
+  return s;
+}
+
+std::string resolve_fs_path(const std::string &stored) {
+  return resolve_fs_path(stored, LabelResolver{});
+}
 
 } // namespace pathutil
 } // namespace cidx

@@ -954,6 +954,120 @@ const char kAstCacheClearHelp[] =
     "  --json                emit machine-readable JSON\n";
 
 // ---------------------------------------------------------------------------
+// component / label help texts (portable-paths v14)
+// ---------------------------------------------------------------------------
+
+const char kComponentUsage[] =
+    "usage: cidx component [-h] {show,set-version} ...\n";
+
+const char kComponentHelp[] =
+    "usage: cidx component [-h] {show,set-version} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {show,set-version}\n"
+    "    show                show component details (path, version, effective "
+    "root)\n"
+    "    set-version         set or clear the stored version for a component\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kComponentShowUsage[] =
+    "usage: cidx component show [-h] [--db PATH] NAME\n";
+
+const char kComponentShowHelp[] =
+    "usage: cidx component show [-h] [--db PATH] NAME\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME        component name\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   operate on this index DB (default: the standard index)\n";
+
+const char kComponentSetVersionUsage[] =
+    "usage: cidx component set-version [-h] [--db PATH] NAME [VERSION]\n";
+
+const char kComponentSetVersionHelp[] =
+    "usage: cidx component set-version [-h] [--db PATH] NAME [VERSION]\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME        component name\n"
+    "  VERSION     version string to set (omit to clear)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   operate on this index DB (default: the standard index)\n";
+
+const char kLabelUsage[] =
+    "usage: cidx label [-h] {add,rm,list,resolve} ...\n";
+
+const char kLabelHelp[] =
+    "usage: cidx label [-h] {add,rm,list,resolve} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {add,rm,list,resolve}\n"
+    "    add                 register a label mapping <name> -> stored-path\n"
+    "    rm                  remove a label\n"
+    "    list                list all labels\n"
+    "    resolve             resolve a stored path through the label registry\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kLabelAddUsage[] =
+    "usage: cidx label add [-h] [--db PATH] NAME PATH\n";
+
+const char kLabelAddHelp[] =
+    "usage: cidx label add [-h] [--db PATH] NAME PATH\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME        label key (e.g. 'libfoo-include')\n"
+    "  PATH        stored path (may contain $VAR)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   operate on this index DB (default: the standard index)\n";
+
+const char kLabelRmUsage[] =
+    "usage: cidx label rm [-h] [--db PATH] NAME\n";
+
+const char kLabelRmHelp[] =
+    "usage: cidx label rm [-h] [--db PATH] NAME\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME        label key to remove\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   operate on this index DB (default: the standard index)\n";
+
+const char kLabelListUsage[] =
+    "usage: cidx label list [-h] [--db PATH]\n";
+
+const char kLabelListHelp[] =
+    "usage: cidx label list [-h] [--db PATH]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   operate on this index DB (default: the standard index)\n";
+
+const char kLabelResolveUsage[] =
+    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive] PATH\n";
+
+const char kLabelResolveHelp[] =
+    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive] PATH\n"
+    "\n"
+    "positional arguments:\n"
+    "  PATH                stored path to resolve\n"
+    "\n"
+    "options:\n"
+    "  -h, --help          show this help message and exit\n"
+    "  --db PATH           operate on this index DB (default: the standard "
+    "index)\n"
+    "  --no-autoderive     disable autoderive fallback (registry-only lookup)\n";
+
+// ---------------------------------------------------------------------------
 // Choice sets
 // ---------------------------------------------------------------------------
 
@@ -968,7 +1082,8 @@ const std::vector<std::string> kCommands = {
     "init",  "add-source", "import",                "index",
     "resolve", "set",      "file",                  "dump-compile-commands",
     "search",  "show",     "list",                  "ls",
-    "delete",  "graph",    "ast"};
+    "delete",  "graph",    "ast",
+    "component", "label"};
 const std::vector<std::string> kGraphWhats = {
     "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
     "dispatch"};
@@ -1416,6 +1531,10 @@ const Spec kAddSourceSpec = {
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
         {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
         {"--no-git", '\0', ValueKind::kNone, "--no-git", nullptr, 0},
+        // v14: portable-paths
+        {"--version", '\0', ValueKind::kString, "--version", nullptr, 0},
+        {"--no-detect-version", '\0', ValueKind::kNone, "--no-detect-version",
+         nullptr, 0},
     },
     {},
     false,
@@ -1430,6 +1549,10 @@ const Spec kImportSpec = {
         {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
         {"--force", '\0', ValueKind::kNone, "--force", nullptr, 0},
+        // v14: portable-paths
+        {"--version", '\0', ValueKind::kString, "--version", nullptr, 0},
+        {"--no-detect-version", '\0', ValueKind::kNone, "--no-detect-version",
+         nullptr, 0},
     },
     {},
     false,
@@ -1443,6 +1566,9 @@ const Spec kIndexSpec = {
     {
         {"--source", '\0', ValueKind::kString, "--source", nullptr, 0},
         {"--no-graph", '\0', ValueKind::kNone, "--no-graph", nullptr, 0},
+        // v14: portable-paths
+        {"--no-autoderive-labels", '\0', ValueKind::kNone,
+         "--no-autoderive-labels", nullptr, 0},
     },
     {},
     true, // files: nargs="*"
@@ -1878,6 +2004,88 @@ const Spec kAstCacheClearSpec = {
 #undef AST_COMMON_OPTS
 #undef AST_CACHE_OPTS
 
+// -- component leaf specs (v14) ----------------------------------------------
+
+const std::vector<std::string> kComponentWhats = {"show", "set-version"};
+
+const Spec kComponentShowSpec = {
+    "cidx component show",
+    kComponentShowUsage,
+    kComponentShowHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
+const Spec kComponentSetVersionSpec = {
+    "cidx component set-version",
+    kComponentSetVersionUsage,
+    kComponentSetVersionHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "VERSION"}, // VERSION is optional (nargs=?)
+    true,                // rest: captures any surplus (including the optional VERSION)
+    {"NAME"},
+};
+
+// -- label leaf specs (v14) --------------------------------------------------
+
+const std::vector<std::string> kLabelWhats = {"add", "rm", "list", "resolve"};
+
+const Spec kLabelAddSpec = {
+    "cidx label add",
+    kLabelAddUsage,
+    kLabelAddHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "PATH"},
+    false,
+    {"NAME", "PATH"},
+};
+
+const Spec kLabelRmSpec = {
+    "cidx label rm",
+    kLabelRmUsage,
+    kLabelRmHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
+const Spec kLabelListSpec = {
+    "cidx label list",
+    kLabelListUsage,
+    kLabelListHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+};
+
+const Spec kLabelResolveSpec = {
+    "cidx label resolve",
+    kLabelResolveUsage,
+    kLabelResolveHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+        {"--no-autoderive", '\0', ValueKind::kNone, "--no-autoderive", nullptr,
+         0},
+    },
+    {"PATH"},
+    false,
+    {"PATH"},
+};
+
 } // namespace
 
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
@@ -1924,6 +2132,8 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.kind = "repo"; // argparse default
     }
     pa.no_git = st.flags.count("--no-git") != 0;
+    pa.version_str = opt_value(st, "--version");
+    pa.no_detect_version = st.flags.count("--no-detect-version") != 0;
   } else if (pa.command == "import") {
     ParseState st = parse_leaf(kImportSpec, argv, i, extras);
     if (st.help) {
@@ -1933,6 +2143,8 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.db = st.values["--db"];
     pa.name = opt_value(st, "--name");
     pa.force = st.flags.count("--force") != 0;
+    pa.version_str = opt_value(st, "--version");
+    pa.no_detect_version = st.flags.count("--no-detect-version") != 0;
   } else if (pa.command == "index") {
     ParseState st = parse_leaf(kIndexSpec, argv, i, extras);
     if (st.help) {
@@ -1942,6 +2154,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.files = st.rest;
     pa.source = opt_value(st, "--source");
     pa.no_graph = st.flags.count("--no-graph") != 0;
+    pa.no_autoderive_labels = st.flags.count("--no-autoderive-labels") != 0;
   } else if (pa.command == "resolve") {
     ParseState st = parse_leaf(kResolveSpec, argv, i, extras);
     if (st.help) {
@@ -2353,6 +2566,103 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       }
       fill_ast_common(st);
       // cache sub-commands have no --cache/--no-cache toggle (Python design).
+    }
+  }
+
+  } else if (pa.command == "component") {
+    // -- component sub-command (v14) ------------------------------------------
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kComponentHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kComponentUsage, "cidx component",
+           "the following arguments are required: what");
+    }
+    if (!contains(kComponentWhats, *what.command)) {
+      fail(kComponentUsage, "cidx component",
+           "argument what: invalid choice: '" + *what.command +
+               "' (choose from " + join(kComponentWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+    if (pa.what == "show") {
+      ParseState st =
+          parse_leaf(kComponentShowSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kComponentShowHelp;
+        return pa;
+      }
+      pa.name = st.positionals[0];
+      pa.index_db = opt_value(st, "--db");
+    } else { // set-version
+      ParseState st =
+          parse_leaf(kComponentSetVersionSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kComponentSetVersionHelp;
+        return pa;
+      }
+      pa.name = st.positionals[0];
+      // VERSION is optional: captured in st.rest (we used rest=true + 2 positionals
+      // but only required NAME, so VERSION either lands in st.positionals[1] or st.rest).
+      if (st.positionals.size() >= 2) {
+        pa.version_str = st.positionals[1];
+      } else if (!st.rest.empty()) {
+        pa.version_str = st.rest[0];
+      }
+      pa.index_db = opt_value(st, "--db");
+    }
+  } else if (pa.command == "label") {
+    // -- label sub-command (v14) -----------------------------------------------
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kLabelHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kLabelUsage, "cidx label",
+           "the following arguments are required: what");
+    }
+    if (!contains(kLabelWhats, *what.command)) {
+      fail(kLabelUsage, "cidx label",
+           "argument what: invalid choice: '" + *what.command +
+               "' (choose from " + join(kLabelWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+    if (pa.what == "add") {
+      ParseState st = parse_leaf(kLabelAddSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kLabelAddHelp;
+        return pa;
+      }
+      pa.label_token = st.positionals[0];
+      pa.label_path = st.positionals[1];
+      pa.index_db = opt_value(st, "--db");
+    } else if (pa.what == "rm") {
+      ParseState st = parse_leaf(kLabelRmSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kLabelRmHelp;
+        return pa;
+      }
+      pa.label_token = st.positionals[0];
+      pa.index_db = opt_value(st, "--db");
+    } else if (pa.what == "list") {
+      ParseState st = parse_leaf(kLabelListSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kLabelListHelp;
+        return pa;
+      }
+      pa.index_db = opt_value(st, "--db");
+    } else { // resolve
+      ParseState st = parse_leaf(kLabelResolveSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kLabelResolveHelp;
+        return pa;
+      }
+      pa.label_path = st.positionals[0];
+      pa.no_autoderive_labels =
+          st.flags.count("--no-autoderive") != 0;
+      pa.index_db = opt_value(st, "--db");
     }
   }
 

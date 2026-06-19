@@ -14,8 +14,16 @@ namespace cidx {
 struct Component {
   int64_t id = -1;
   std::string name;
-  std::string path; // absolute repo/header root
+  std::string path; // base path (no version segment)
   std::string kind; // 'repo' | 'external'
+  std::optional<std::string> version; // v14: nullable; NULL = unversioned
+};
+
+// v14: label registry row
+struct Label {
+  int64_t id = -1;
+  std::string name; // label key, e.g. 'libfoo-include'
+  std::string path; // stored verbatim; may contain $VAR
 };
 
 struct Directory {

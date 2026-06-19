@@ -333,8 +333,19 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
       args.name
           ? *args.name
           : (use_git ? repo::repo_name(path) : pathutil::basename(path));
+  // v14: version auto-detection (split_base_version) then explicit override.
+  std::optional<std::string> version_to_store;
+  if (args.version_str) {
+    version_to_store = *args.version_str;
+  } else if (!args.no_detect_version) {
+    const auto [base, seg] = CompileDb::split_base_version(path);
+    if (!seg.empty()) {
+      path = base; // store base without version segment
+      version_to_store = seg;
+    }
+  }
   Storage db(ctx.index_path);
-  const int64_t cid = db.add_component(name, path, kind);
+  const int64_t cid = db.add_component(name, path, kind, version_to_store);
   *ctx.out << "component #" << cid << ": " << name << " (" << kind << ") at "
            << path << "\n";
   return 0;
@@ -375,15 +386,28 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
       args.name ? *args.name
                 : (groot ? repo::repo_name(root) : pathutil::basename(root));
 
+  // v14: version auto-detection (split_base_version) then explicit override.
+  std::string stored_root = root;
+  std::optional<std::string> version_to_store;
+  if (args.version_str) {
+    version_to_store = *args.version_str;
+  } else if (!args.no_detect_version) {
+    const auto [base, seg] = CompileDb::split_base_version(root);
+    if (!seg.empty()) {
+      stored_root = base;
+      version_to_store = seg;
+    }
+  }
+
   int imported = 0;
   int skipped = 0;
   Storage db(ctx.index_path);
   if (args.force) {
-    const std::optional<Component> existing = db.get_component(root);
+    const std::optional<Component> existing = db.get_component(stored_root);
     if (existing) {
       db.delete_component(existing->id);
       *ctx.out << "force: removed existing component #" << existing->id
-               << " at " << root << " (files and indexed symbols)\n";
+               << " at " << stored_root << " (files and indexed symbols)\n";
     }
   }
   // The db-dir/git-root component is created LAZILY: only when a source matches
@@ -398,9 +422,9 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
       const std::string src = source_path(cmd);
       if (!db.component_for_path(src)) {
         if (!root_cid) {
-          root_cid = db.add_component(name, root); // kind default "repo"
+          root_cid = db.add_component(name, stored_root, "repo", version_to_store);
           *ctx.out << "component #" << *root_cid << ": " << name << " at "
-                   << root << "\n";
+                   << stored_root << "\n";
         }
         if (!db.component_for_path(src)) {
           *ctx.err << "  skip (outside any component): " << src << "\n";
@@ -1391,7 +1415,12 @@ int cmd_dump_compile_commands(const ParsedArgs &args, Context &ctx) {
       continue;
     }
     CcEntry e;
-    e.directory = comp ? comp->path : pathutil::split(ap).first;
+    // v14: use effective root (base+version) as the directory field so the
+    // emitted compile_commands.json paths are consistent with the stored flags.
+    e.directory = comp
+                      ? pathutil::abspath(pathutil::resolve_fs_path(
+                            Storage::effective_root(*comp)))
+                      : pathutil::split(ap).first;
     e.file = ap;
     e.arguments.push_back(f.driver ? *f.driver : "cc");
     for (const std::string &o : *f.compile_options) {
@@ -2454,6 +2483,107 @@ int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Portable-paths commands (v14): component show/set-version,
+//                               label add/rm/list/resolve
+// ---------------------------------------------------------------------------
+
+int cmd_component_show(const ParsedArgs &args, Context &ctx) {
+  const std::string name = args.name ? *args.name : std::string();
+  Storage db(ctx.index_path);
+  std::optional<Component> comp = db.get_component_by_name(name);
+  if (!comp) {
+    *ctx.err << "error: component '" << name << "' not found\n";
+    return 1;
+  }
+  // Output: key-value table, 14-char left-justified key col.
+  // Contract §6 component show format: f"{key:<14} {value}"
+  const std::string eff = Storage::effective_root(*comp);
+  const std::string resolved =
+      pathutil::abspath(pathutil::resolve_fs_path(eff));
+  auto row = [&](const std::string &key, const std::string &val) {
+    *ctx.out << fmt::ljust(key, 14) << " " << val << "\n";
+  };
+  row("name", comp->name);
+  row("kind", comp->kind);
+  row("path", comp->path);
+  row("version", comp->version ? *comp->version : "(none)");
+  row("effective_root", eff);
+  row("resolved_root", resolved);
+  return 0;
+}
+
+int cmd_component_set_version(const ParsedArgs &args, Context &ctx) {
+  const std::string name = args.name ? *args.name : std::string();
+  Storage db(ctx.index_path);
+  // args.version_str absent or empty means clear the version.
+  const std::optional<std::string> ver =
+      (args.version_str && !args.version_str->empty())
+          ? args.version_str
+          : std::optional<std::string>{};
+  const bool ok = db.set_component_version(name, ver);
+  if (!ok) {
+    *ctx.err << "error: component '" << name << "' not found\n";
+    return 1;
+  }
+  if (ver) {
+    *ctx.out << "component '" << name << "' version set to '" << *ver << "'\n";
+  } else {
+    *ctx.out << "component '" << name << "' version cleared\n";
+  }
+  return 0;
+}
+
+int cmd_label_add(const ParsedArgs &args, Context &ctx) {
+  const std::string lname = args.label_token ? *args.label_token : std::string();
+  const std::string lpath = args.label_path ? *args.label_path : std::string();
+  if (lname.empty() || lpath.empty()) {
+    *ctx.err << "error: NAME and PATH are required\n";
+    return 1;
+  }
+  Storage db(ctx.index_path);
+  const int64_t lid = db.add_label(lname, lpath);
+  *ctx.out << "label #" << lid << ": <" << lname << "> -> " << lpath << "\n";
+  return 0;
+}
+
+int cmd_label_rm(const ParsedArgs &args, Context &ctx) {
+  const std::string lname = args.label_token ? *args.label_token : std::string();
+  Storage db(ctx.index_path);
+  const bool removed = db.remove_label(lname);
+  if (!removed) {
+    *ctx.err << "error: label '" << lname << "' not found\n";
+    return 1;
+  }
+  *ctx.out << "label '" << lname << "' removed\n";
+  return 0;
+}
+
+int cmd_label_list(const ParsedArgs &args, Context &ctx) {
+  (void)args;
+  Storage db(ctx.index_path);
+  const auto labels = db.list_labels();
+  for (const auto &[lname, lpath] : labels) {
+    // f"{key:<14} {value}" — contract §6 label list format.
+    *ctx.out << fmt::ljust(lname, 14) << " " << lpath << "\n";
+  }
+  *ctx.out << labels.size() << " label(s)\n";
+  return 0;
+}
+
+int cmd_label_resolve(const ParsedArgs &args, Context &ctx) {
+  const std::string stored = args.label_path ? *args.label_path : std::string();
+  Storage db(ctx.index_path);
+  // Build a LabelResolver backed by the DB.
+  const bool autoderive = !args.no_autoderive_labels;
+  pathutil::LabelResolver resolver(
+      [&db](const std::string &n) { return db.get_label(n); }, autoderive);
+  const std::string resolved =
+      pathutil::abspath(pathutil::resolve_fs_path(stored, resolver));
+  *ctx.out << resolved << "\n";
+  return 0;
+}
+
 int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "init") {
     return cmd_init(args, ctx);
@@ -2519,6 +2649,16 @@ int run_command(const ParsedArgs &args, Context &ctx) {
     if (args.what == "path")      return cmd_graph_path(args, ctx);
     if (args.what == "hierarchy") return cmd_graph_hierarchy(args, ctx);
     if (args.what == "dispatch")  return cmd_graph_dispatch(args, ctx);
+  }
+  if (args.command == "component") {
+    if (args.what == "show") return cmd_component_show(args, ctx);
+    return cmd_component_set_version(args, ctx);
+  }
+  if (args.command == "label") {
+    if (args.what == "add") return cmd_label_add(args, ctx);
+    if (args.what == "rm") return cmd_label_rm(args, ctx);
+    if (args.what == "list") return cmd_label_list(args, ctx);
+    return cmd_label_resolve(args, ctx);
   }
   // list
   if (args.what == "components") {

@@ -284,6 +284,90 @@ TEST_CASE("A1: load() emits a one-shot warning when CIDX_LIBCLANG is set") {
 }
 
 // ---------------------------------------------------------------------------
+// Portable-paths preserve rule (v14): strip_for_libclang with <label>/$VAR.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("strip: -I value with '<' preserved verbatim (preserve rule)") {
+  // Space form: -I <libfoo-include>/extra → do NOT absolutize
+  const std::vector<std::string> argv = {"cc", "-I", "<libfoo-include>/extra",
+                                         "a.c"};
+  const auto out = CompileDb::strip_for_libclang(argv, "a.c", "/d");
+  CHECK(out == std::vector<std::string>{"-I", "<libfoo-include>/extra"});
+}
+
+TEST_CASE("strip: -I value with '$' preserved verbatim (preserve rule)") {
+  // Space form: -I $VAR/include → do NOT absolutize
+  const std::vector<std::string> argv = {"cc", "-I", "$MYLIB/include", "a.c"};
+  const auto out = CompileDb::strip_for_libclang(argv, "a.c", "/d");
+  CHECK(out == std::vector<std::string>{"-I", "$MYLIB/include"});
+}
+
+TEST_CASE("strip: glued -I with '<' preserved verbatim") {
+  // Glued form: -I<label>/inc → emit the entire original token
+  const std::vector<std::string> argv = {"cc", "-I<libfoo-include>/inc",
+                                         "a.c"};
+  const auto out = CompileDb::strip_for_libclang(argv, "a.c", "/d");
+  CHECK(out == std::vector<std::string>{"-I<libfoo-include>/inc"});
+}
+
+TEST_CASE("strip: -isystem with '$' preserved verbatim") {
+  const std::vector<std::string> argv = {"cc", "-isystem", "$SYSROOT/include",
+                                         "a.c"};
+  const auto out = CompileDb::strip_for_libclang(argv, "a.c", "/d");
+  CHECK(out == std::vector<std::string>{"-isystem", "$SYSROOT/include"});
+}
+
+// ---------------------------------------------------------------------------
+// split_base_version (portable-paths §2)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("split_base_version: version segment detected") {
+  // /opt/libfoo/v1.2.3 → (/opt/libfoo, v1.2.3)
+  const auto [base, seg] = CompileDb::split_base_version("/opt/libfoo/v1.2.3");
+  CHECK(base == "/opt/libfoo");
+  CHECK(seg == "v1.2.3");
+}
+
+TEST_CASE("split_base_version: bare numeric version detected") {
+  const auto [base, seg] = CompileDb::split_base_version("/opt/mylib/1.0");
+  CHECK(base == "/opt/mylib");
+  CHECK(seg == "1.0");
+}
+
+TEST_CASE("split_base_version: no version segment returns root and empty") {
+  // 'include' is not a version segment.
+  const auto [base, seg] = CompileDb::split_base_version("/opt/mylib/include");
+  CHECK(base == "/opt/mylib/include");
+  CHECK(seg.empty());
+}
+
+TEST_CASE("split_base_version: empty base case (root is /seg)") {
+  // base would be "" or "/": not accepted as versioned.
+  const auto [base, seg] = CompileDb::split_base_version("/v1.0");
+  CHECK(base == "/v1.0");
+  CHECK(seg.empty());
+}
+
+TEST_CASE("split_base_version: normpath applied first") {
+  // Trailing slash stripped.
+  const auto [base, seg] = CompileDb::split_base_version("/opt/mylib/1.0/");
+  CHECK(base == "/opt/mylib");
+  CHECK(seg == "1.0");
+}
+
+TEST_CASE("split_base_version: _-separated version") {
+  const auto [base, seg] = CompileDb::split_base_version("/opt/libfoo/1_2_3");
+  CHECK(base == "/opt/libfoo");
+  CHECK(seg == "1_2_3");
+}
+
+TEST_CASE("split_base_version: dot-separated version") {
+  const auto [base, seg] = CompileDb::split_base_version("/opt/libfoo/2.14.0");
+  CHECK(base == "/opt/libfoo");
+  CHECK(seg == "2.14.0");
+}
+
+// ---------------------------------------------------------------------------
 // libclang-dependent cases (label "clang"; runtime SKIP -> exit 77).
 // ---------------------------------------------------------------------------
 
