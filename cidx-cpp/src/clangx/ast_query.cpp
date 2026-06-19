@@ -469,7 +469,7 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
                 ? std::vector<std::string>(rec->compile_options->begin(),
                                            rec->compile_options->end())
                 : std::vector<std::string>{},
-            [&db](const std::string &n) { return db.get_label(n); });
+            [&db](const std::string &n) { return db.get_alias(n); });
         t.driver = rec->driver;
         t.focus_usr = focus_usr;
         t.focus_name = focus_name;
@@ -506,7 +506,7 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
                 ? std::vector<std::string>(rec->compile_options->begin(),
                                            rec->compile_options->end())
                 : std::vector<std::string>{},
-            [&db](const std::string &n) { return db.get_label(n); });
+            [&db](const std::string &n) { return db.get_alias(n); });
         t.driver = rec->driver;
         t.focus_usr = focus_usr;
         t.focus_name = focus_name;
@@ -609,7 +609,7 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
             ? std::vector<std::string>(rec->compile_options->begin(),
                                        rec->compile_options->end())
             : std::vector<std::string>{},
-        [&db](const std::string &n) { return db.get_label(n); });
+        [&db](const std::string &n) { return db.get_alias(n); });
     t.driver = rec->driver;
     t.focus_usr = sym.usr;
     return {std::move(t), 0};
