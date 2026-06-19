@@ -48,6 +48,7 @@ from indexer.query import GraphQuery, EDGE_KINDS
 # This exercises the core selection-map derivation (SC-01, SC-02, SC-13).
 # --------------------------------------------------------------------------- #
 
+
 def _seed_chain(db: Storage, repo: str) -> dict[str, int]:
     """A, B:A, C:B, D:C each declare rank(); top_rank() calls a.rank()."""
     comp = db.add_component("chain", repo)
@@ -58,16 +59,37 @@ def _seed_chain(db: Storage, repo: str) -> dict[str, int]:
     ids: dict[str, int] = {}
     C = EDGE_KINDS
 
-    def sym(key, usr, spelling, kind, file_id, line, *,
-            qual=None, is_def=True, is_pure=False, parent=None,
-            resolved=True, access="public"):
-        ids[key] = db.add_symbol(Symbol(
-            usr=usr, spelling=spelling, kind=kind,
-            qual_name=qual or spelling,
-            file_id=file_id, line=line, col=1,
-            is_definition=is_def, is_pure=is_pure,
-            parent_usr=parent, resolved=resolved, access=access,
-        ))
+    def sym(
+        key,
+        usr,
+        spelling,
+        kind,
+        file_id,
+        line,
+        *,
+        qual=None,
+        is_def=True,
+        is_pure=False,
+        parent=None,
+        resolved=True,
+        access="public",
+    ):
+        ids[key] = db.add_symbol(
+            Symbol(
+                usr=usr,
+                spelling=spelling,
+                kind=kind,
+                qual_name=qual or spelling,
+                file_id=file_id,
+                line=line,
+                col=1,
+                is_definition=is_def,
+                is_pure=is_pure,
+                parent_usr=parent,
+                resolved=resolved,
+                access=access,
+            )
+        )
 
     # Classes
     sym("A", "c:@S@A", "A", "struct", hpp, 10, qual="chain::A")
@@ -76,18 +98,57 @@ def _seed_chain(db: Storage, repo: str) -> dict[str, int]:
     sym("D", "c:@S@D", "D", "struct", hpp, 40, qual="chain::D")
 
     # rank() methods (A::rank is non-pure virtual; B/C/D override)
-    sym("A::rank", "c:@S@A@F@rank#", "rank", "method", hpp, 12,
-        qual="chain::A::rank", parent="c:@S@A")
-    sym("B::rank", "c:@S@B@F@rank#", "rank", "method", cpp, 2,
-        qual="chain::B::rank", parent="c:@S@B")
-    sym("C::rank", "c:@S@C@F@rank#", "rank", "method", cpp, 3,
-        qual="chain::C::rank", parent="c:@S@C")
-    sym("D::rank", "c:@S@D@F@rank#", "rank", "method", cpp, 4,
-        qual="chain::D::rank", parent="c:@S@D")
+    sym(
+        "A::rank",
+        "c:@S@A@F@rank#",
+        "rank",
+        "method",
+        hpp,
+        12,
+        qual="chain::A::rank",
+        parent="c:@S@A",
+    )
+    sym(
+        "B::rank",
+        "c:@S@B@F@rank#",
+        "rank",
+        "method",
+        cpp,
+        2,
+        qual="chain::B::rank",
+        parent="c:@S@B",
+    )
+    sym(
+        "C::rank",
+        "c:@S@C@F@rank#",
+        "rank",
+        "method",
+        cpp,
+        3,
+        qual="chain::C::rank",
+        parent="c:@S@C",
+    )
+    sym(
+        "D::rank",
+        "c:@S@D@F@rank#",
+        "rank",
+        "method",
+        cpp,
+        4,
+        qual="chain::D::rank",
+        parent="c:@S@D",
+    )
 
     # top_rank calls a.rank() (virtual call -> static edge to A::rank)
-    sym("top_rank", "c:@F@top_rank", "top_rank", "function", cpp, 6,
-        qual="chain::top_rank")
+    sym(
+        "top_rank",
+        "c:@F@top_rank",
+        "top_rank",
+        "function",
+        cpp,
+        6,
+        qual="chain::top_rank",
+    )
 
     with db.transaction():
         # inherits: B->A, C->B, D->C
@@ -135,6 +196,7 @@ def chain_g(chain_db):
 # A::virt() is the base method; one override is a stub (unresolved, no file).
 # --------------------------------------------------------------------------- #
 
+
 def _seed_stub_target(db: Storage, repo: str) -> dict[str, int]:
     """A::virt has one indexed override (B::virt) and one stub override."""
     comp = db.add_component("stub", repo)
@@ -145,31 +207,66 @@ def _seed_stub_target(db: Storage, repo: str) -> dict[str, int]:
     ids: dict[str, int] = {}
     C = EDGE_KINDS
 
-    def sym(key, usr, spelling, kind, file_id, line, *,
-            qual=None, is_def=True, is_pure=False, parent=None,
-            resolved=True, access="public"):
-        ids[key] = db.add_symbol(Symbol(
-            usr=usr, spelling=spelling, kind=kind,
-            qual_name=qual or spelling,
-            file_id=file_id, line=line, col=1,
-            is_definition=is_def, is_pure=is_pure,
-            parent_usr=parent, resolved=resolved, access=access,
-        ))
+    def sym(
+        key,
+        usr,
+        spelling,
+        kind,
+        file_id,
+        line,
+        *,
+        qual=None,
+        is_def=True,
+        is_pure=False,
+        parent=None,
+        resolved=True,
+        access="public",
+    ):
+        ids[key] = db.add_symbol(
+            Symbol(
+                usr=usr,
+                spelling=spelling,
+                kind=kind,
+                qual_name=qual or spelling,
+                file_id=file_id,
+                line=line,
+                col=1,
+                is_definition=is_def,
+                is_pure=is_pure,
+                parent_usr=parent,
+                resolved=resolved,
+                access=access,
+            )
+        )
 
     sym("A", "c:@S@A_s", "A", "struct", hpp, 1, qual="A_s")
     sym("B", "c:@S@B_s", "B", "struct", hpp, 10, qual="B_s")
 
-    sym("A::virt", "c:@S@A_s@F@virt#", "virt", "method", hpp, 2,
-        qual="A_s::virt", parent="c:@S@A_s")
-    sym("B::virt", "c:@S@B_s@F@virt#", "virt", "method", cpp, 1,
-        qual="B_s::virt", parent="c:@S@B_s")
+    sym(
+        "A::virt",
+        "c:@S@A_s@F@virt#",
+        "virt",
+        "method",
+        hpp,
+        2,
+        qual="A_s::virt",
+        parent="c:@S@A_s",
+    )
+    sym(
+        "B::virt",
+        "c:@S@B_s@F@virt#",
+        "virt",
+        "method",
+        cpp,
+        1,
+        qual="B_s::virt",
+        parent="c:@S@B_s",
+    )
 
     # ExternalLib::virt is a stub (unresolved, no file)
-    ids["ExtLib::virt"] = db.mint_symbol_id(
-        "c:@S@ExtLib@F@virt#", spelling="virt")
+    ids["ExtLib::virt"] = db.mint_symbol_id("c:@S@ExtLib@F@virt#", spelling="virt")
 
-    sym("caller", "c:@F@caller_s", "caller", "function", cpp, 5,
-        qual="caller_s")
+    sym("caller", "c:@F@caller_s", "caller", "function", cpp, 5, qual="caller_s")
 
     with db.transaction():
         db.add_edge(ids["B"], ids["A"], C["inherits"], base_access=1)
@@ -208,6 +305,7 @@ def stub_g(stub_db):
 # PureBase::virt() is pure-virtual, zero overrides in the index.
 # --------------------------------------------------------------------------- #
 
+
 def _seed_pure_no_targets(db: Storage, repo: str) -> dict[str, int]:
     comp = db.add_component("pure", repo)
     root = db.add_directory(comp, "")
@@ -215,26 +313,52 @@ def _seed_pure_no_targets(db: Storage, repo: str) -> dict[str, int]:
     ids: dict[str, int] = {}
     C = EDGE_KINDS
 
-    ids["PureBase"] = db.add_symbol(Symbol(
-        usr="c:@S@PureBase", spelling="PureBase", kind="struct",
-        qual_name="PureBase", file_id=hpp, line=1, col=1,
-        is_definition=True, resolved=True, access="public",
-    ))
-    ids["PureBase::virt"] = db.add_symbol(Symbol(
-        usr="c:@S@PureBase@F@virt#", spelling="virt", kind="method",
-        qual_name="PureBase::virt", file_id=hpp, line=2, col=1,
-        is_definition=False, is_pure=True, parent_usr="c:@S@PureBase",
-        resolved=True, access="public",
-    ))
-    ids["caller"] = db.add_symbol(Symbol(
-        usr="c:@F@pure_caller", spelling="pure_caller", kind="function",
-        qual_name="pure_caller", file_id=hpp, line=10, col=1,
-        is_definition=True, resolved=True,
-    ))
+    ids["PureBase"] = db.add_symbol(
+        Symbol(
+            usr="c:@S@PureBase",
+            spelling="PureBase",
+            kind="struct",
+            qual_name="PureBase",
+            file_id=hpp,
+            line=1,
+            col=1,
+            is_definition=True,
+            resolved=True,
+            access="public",
+        )
+    )
+    ids["PureBase::virt"] = db.add_symbol(
+        Symbol(
+            usr="c:@S@PureBase@F@virt#",
+            spelling="virt",
+            kind="method",
+            qual_name="PureBase::virt",
+            file_id=hpp,
+            line=2,
+            col=1,
+            is_definition=False,
+            is_pure=True,
+            parent_usr="c:@S@PureBase",
+            resolved=True,
+            access="public",
+        )
+    )
+    ids["caller"] = db.add_symbol(
+        Symbol(
+            usr="c:@F@pure_caller",
+            spelling="pure_caller",
+            kind="function",
+            qual_name="pure_caller",
+            file_id=hpp,
+            line=10,
+            col=1,
+            is_definition=True,
+            resolved=True,
+        )
+    )
     with db.transaction():
         db.add_edge(ids["PureBase::virt"], ids["PureBase"], C["method_of"])
-        e = db.add_edge(ids["caller"], ids["PureBase::virt"],
-                        C["calls"], count=1)
+        e = db.add_edge(ids["caller"], ids["PureBase::virt"], C["calls"], count=1)
         db.add_edge_site(e, hpp, 11, 5)
     return ids
 
@@ -263,6 +387,7 @@ def pure_g(pure_db):
 # A method whose parent_usr is None (or the owning symbol is absent).
 # --------------------------------------------------------------------------- #
 
+
 def _seed_no_receiver(db: Storage, repo: str) -> dict[str, int]:
     """A method with no parent_usr (detached from any record)."""
     comp = db.add_component("norec", repo)
@@ -272,24 +397,52 @@ def _seed_no_receiver(db: Storage, repo: str) -> dict[str, int]:
     C = EDGE_KINDS
 
     # Method with no parent_usr
-    ids["orphan_virt"] = db.add_symbol(Symbol(
-        usr="c:@F@orphan_virt", spelling="orphan_virt", kind="method",
-        qual_name="orphan_virt", file_id=hpp, line=1, col=1,
-        is_definition=True, is_pure=False, parent_usr=None,
-        resolved=True, access="public",
-    ))
+    ids["orphan_virt"] = db.add_symbol(
+        Symbol(
+            usr="c:@F@orphan_virt",
+            spelling="orphan_virt",
+            kind="method",
+            qual_name="orphan_virt",
+            file_id=hpp,
+            line=1,
+            col=1,
+            is_definition=True,
+            is_pure=False,
+            parent_usr=None,
+            resolved=True,
+            access="public",
+        )
+    )
     # A concrete override so it IS virtual
-    ids["orphan_override"] = db.add_symbol(Symbol(
-        usr="c:@F@orphan_override", spelling="orphan_virt", kind="method",
-        qual_name="Sub::orphan_virt", file_id=hpp, line=10, col=1,
-        is_definition=True, is_pure=False, parent_usr=None,
-        resolved=True, access="public",
-    ))
-    ids["caller"] = db.add_symbol(Symbol(
-        usr="c:@F@orphan_caller", spelling="orphan_caller", kind="function",
-        qual_name="orphan_caller", file_id=hpp, line=20, col=1,
-        is_definition=True, resolved=True,
-    ))
+    ids["orphan_override"] = db.add_symbol(
+        Symbol(
+            usr="c:@F@orphan_override",
+            spelling="orphan_virt",
+            kind="method",
+            qual_name="Sub::orphan_virt",
+            file_id=hpp,
+            line=10,
+            col=1,
+            is_definition=True,
+            is_pure=False,
+            parent_usr=None,
+            resolved=True,
+            access="public",
+        )
+    )
+    ids["caller"] = db.add_symbol(
+        Symbol(
+            usr="c:@F@orphan_caller",
+            spelling="orphan_caller",
+            kind="function",
+            qual_name="orphan_caller",
+            file_id=hpp,
+            line=20,
+            col=1,
+            is_definition=True,
+            resolved=True,
+        )
+    )
     with db.transaction():
         db.add_edge(ids["orphan_override"], ids["orphan_virt"], C["overrides"])
         e = db.add_edge(ids["caller"], ids["orphan_virt"], C["calls"], count=1)
@@ -321,6 +474,7 @@ def norec_g(norec_db):
 #              virtual_call_sites()
 # =========================================================================== #
 
+
 class TestSelectionDataclass:
     """Basic structural contracts for the Selection dataclass (query.py)."""
 
@@ -331,48 +485,126 @@ class TestSelectionDataclass:
     def test_selection_fields(self):
         """Selection carries selecting_type, target, inherited fields."""
         from indexer.query import Selection, Sym
+
         # Build minimal Sym stubs
-        sym_a = Sym(id=1, usr="a", spelling="A", name="A", kind="struct",
-                    type_info=None, is_definition=True, is_pure=False,
-                    access="public", parent_usr=None, resolved=True,
-                    component=None, file=None, line=None, col=None)
-        sym_m = Sym(id=2, usr="m", spelling="rank", name="A::rank",
-                    kind="method", type_info=None, is_definition=True,
-                    is_pure=False, access="public", parent_usr="a",
-                    resolved=True, component=None, file=None, line=None,
-                    col=None)
+        sym_a = Sym(
+            id=1,
+            usr="a",
+            spelling="A",
+            name="A",
+            kind="struct",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr=None,
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
+        sym_m = Sym(
+            id=2,
+            usr="m",
+            spelling="rank",
+            name="A::rank",
+            kind="method",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr="a",
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
         sel = Selection(selecting_type=sym_a, target=sym_m)
         assert sel.selecting_type.name == "A"
         assert sel.target.name == "A::rank"
-        assert sel.inherited is False          # default
+        assert sel.inherited is False  # default
 
     def test_selection_inherited_flag(self):
         """Selection.inherited can be set to True."""
         from indexer.query import Selection, Sym
-        sym_x = Sym(id=3, usr="x", spelling="X", name="X", kind="struct",
-                    type_info=None, is_definition=True, is_pure=False,
-                    access="public", parent_usr=None, resolved=True,
-                    component=None, file=None, line=None, col=None)
-        sym_y = Sym(id=4, usr="y", spelling="rank", name="Y::rank",
-                    kind="method", type_info=None, is_definition=True,
-                    is_pure=False, access="public", parent_usr="z",
-                    resolved=True, component=None, file=None, line=None,
-                    col=None)
+
+        sym_x = Sym(
+            id=3,
+            usr="x",
+            spelling="X",
+            name="X",
+            kind="struct",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr=None,
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
+        sym_y = Sym(
+            id=4,
+            usr="y",
+            spelling="rank",
+            name="Y::rank",
+            kind="method",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr="z",
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
         sel = Selection(selecting_type=sym_x, target=sym_y, inherited=True)
         assert sel.inherited is True
 
     def test_selection_is_frozen(self):
         """Selection must be immutable (frozen dataclass)."""
         from indexer.query import Selection, Sym
-        sym_a = Sym(id=1, usr="a", spelling="A", name="A", kind="struct",
-                    type_info=None, is_definition=True, is_pure=False,
-                    access="public", parent_usr=None, resolved=True,
-                    component=None, file=None, line=None, col=None)
-        sym_m = Sym(id=2, usr="m", spelling="rank", name="A::rank",
-                    kind="method", type_info=None, is_definition=True,
-                    is_pure=False, access="public", parent_usr="a",
-                    resolved=True, component=None, file=None, line=None,
-                    col=None)
+
+        sym_a = Sym(
+            id=1,
+            usr="a",
+            spelling="A",
+            name="A",
+            kind="struct",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr=None,
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
+        sym_m = Sym(
+            id=2,
+            usr="m",
+            spelling="rank",
+            name="A::rank",
+            kind="method",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr="a",
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
         sel = Selection(selecting_type=sym_a, target=sym_m)
         with pytest.raises((AttributeError, TypeError)):
             sel.inherited = True  # type: ignore[misc]
@@ -387,6 +619,7 @@ class TestDispatchSiteDataclass:
     def test_dispatch_site_is_frozen(self):
         """DispatchSite is a frozen dataclass."""
         from indexer.query import DispatchSite
+
         ds = DispatchSite(
             receiver_static_type=None,
             declared_target=None,  # type: ignore[arg-type]
@@ -400,15 +633,41 @@ class TestDispatchSiteDataclass:
     def test_dispatch_site_targets_property(self):
         """DispatchSite.targets yields all target Syms from candidates."""
         from indexer.query import DispatchSite, Selection, Sym
-        sym_a = Sym(id=1, usr="a", spelling="A", name="A", kind="struct",
-                    type_info=None, is_definition=True, is_pure=False,
-                    access="public", parent_usr=None, resolved=True,
-                    component=None, file=None, line=None, col=None)
-        sym_m = Sym(id=2, usr="m", spelling="rank", name="A::rank",
-                    kind="method", type_info=None, is_definition=True,
-                    is_pure=False, access="public", parent_usr="a",
-                    resolved=True, component=None, file=None, line=None,
-                    col=None)
+
+        sym_a = Sym(
+            id=1,
+            usr="a",
+            spelling="A",
+            name="A",
+            kind="struct",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr=None,
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
+        sym_m = Sym(
+            id=2,
+            usr="m",
+            spelling="rank",
+            name="A::rank",
+            kind="method",
+            type_info=None,
+            is_definition=True,
+            is_pure=False,
+            access="public",
+            parent_usr="a",
+            resolved=True,
+            component=None,
+            file=None,
+            line=None,
+            col=None,
+        )
         sel = Selection(selecting_type=sym_a, target=sym_m)
         ds = DispatchSite(
             receiver_static_type=sym_a,
@@ -422,6 +681,7 @@ class TestDispatchSiteDataclass:
     def test_dispatch_site_to_dict(self):
         """DispatchSite.to_dict() returns a JSON-serializable dict."""
         from indexer.query import DispatchSite
+
         ds = DispatchSite(
             receiver_static_type=None,
             declared_target=None,  # type: ignore[arg-type]
@@ -437,6 +697,7 @@ class TestDispatchSiteDataclass:
 
 
 # ============== dispatch_selection() — the core primitive =================== #
+
 
 class TestDispatchSelection:
     """SC-01 to SC-06: GraphQuery.dispatch_selection(method) contract."""
@@ -457,8 +718,7 @@ class TestDispatchSelection:
         """SC-01: each Selection maps the owning class to its own rank() override."""
         g, ids = chain_g
         ds = g.dispatch_selection(ids["A::rank"])
-        tgt_map = {sel.selecting_type.id: sel.target.id
-                   for sel in ds.candidates}
+        tgt_map = {sel.selecting_type.id: sel.target.id for sel in ds.candidates}
         assert tgt_map[ids["A"]] == ids["A::rank"]
         assert tgt_map[ids["B"]] == ids["B::rank"]
         assert tgt_map[ids["C"]] == ids["C::rank"]
@@ -522,6 +782,7 @@ class TestDispatchSelection:
     def test_dispatch_selection_accepts_sym(self, chain_g):
         """dispatch_selection accepts a Sym as well as an int id."""
         from indexer.query import Sym
+
         g, ids = chain_g
         sym = g.get(ids["A::rank"])
         assert isinstance(sym, Sym)
@@ -564,25 +825,62 @@ class TestDispatchSelectionCloseSubtypes:
             root = db.add_directory(comp, "")
             hpp = db.add_file(root, "abe.hpp")
 
-            def sym(key, ids_, usr, spelling, kind, line, *,
-                    qual=None, is_def=True, is_pure=False,
-                    parent=None, resolved=True, access="public"):
-                ids_[key] = db.add_symbol(Symbol(
-                    usr=usr, spelling=spelling, kind=kind,
-                    qual_name=qual or spelling,
-                    file_id=hpp, line=line, col=1,
-                    is_definition=is_def, is_pure=is_pure,
-                    parent_usr=parent, resolved=resolved, access=access,
-                ))
+            def sym(
+                key,
+                ids_,
+                usr,
+                spelling,
+                kind,
+                line,
+                *,
+                qual=None,
+                is_def=True,
+                is_pure=False,
+                parent=None,
+                resolved=True,
+                access="public",
+            ):
+                ids_[key] = db.add_symbol(
+                    Symbol(
+                        usr=usr,
+                        spelling=spelling,
+                        kind=kind,
+                        qual_name=qual or spelling,
+                        file_id=hpp,
+                        line=line,
+                        col=1,
+                        is_definition=is_def,
+                        is_pure=is_pure,
+                        parent_usr=parent,
+                        resolved=resolved,
+                        access=access,
+                    )
+                )
 
             ids: dict[str, int] = {}
             sym("A", ids, "c:@S@A_abe", "A", "struct", 1, qual="A_abe")
             sym("B", ids, "c:@S@B_abe", "B", "struct", 10, qual="B_abe")
             sym("E", ids, "c:@S@E_abe", "E", "struct", 20, qual="E_abe")
-            sym("A::rank", ids, "c:@S@A_abe@F@rank#", "rank", "method", 2,
-                qual="A_abe::rank", parent="c:@S@A_abe")
-            sym("B::rank", ids, "c:@S@B_abe@F@rank#", "rank", "method", 11,
-                qual="B_abe::rank", parent="c:@S@B_abe")
+            sym(
+                "A::rank",
+                ids,
+                "c:@S@A_abe@F@rank#",
+                "rank",
+                "method",
+                2,
+                qual="A_abe::rank",
+                parent="c:@S@A_abe",
+            )
+            sym(
+                "B::rank",
+                ids,
+                "c:@S@B_abe@F@rank#",
+                "rank",
+                "method",
+                11,
+                qual="B_abe::rank",
+                parent="c:@S@B_abe",
+            )
             with db.transaction():
                 db.add_edge(ids["B"], ids["A"], C["inherits"], base_access=1)
                 db.add_edge(ids["E"], ids["B"], C["inherits"], base_access=1)
@@ -608,8 +906,7 @@ class TestDispatchSelectionCloseSubtypes:
         inherited_entries = [sel for sel in ds.candidates if sel.inherited]
         assert len(inherited_entries) >= 1
         e_entry = next(
-            (sel for sel in inherited_entries
-             if sel.selecting_type.id == ids["E"]),
+            (sel for sel in inherited_entries if sel.selecting_type.id == ids["E"]),
             None,
         )
         assert e_entry is not None, "E should appear in candidates as inherited"
@@ -622,8 +919,9 @@ class TestDispatchSelectionCloseSubtypes:
         with GraphQuery(db_path) as g:
             ds_closed = g.dispatch_selection(ids["A::rank"], close_subtypes=True)
             ds_open = g.dispatch_selection(ids["A::rank"], close_subtypes=False)
-        direct_closed = {sel.target.id for sel in ds_closed.candidates
-                         if not sel.inherited}
+        direct_closed = {
+            sel.target.id for sel in ds_closed.candidates if not sel.inherited
+        }
         direct_open = {sel.target.id for sel in ds_open.candidates}
         assert direct_closed == direct_open
 
@@ -634,12 +932,14 @@ class TestVirtualCallSites:
 
     def test_sc07_virtual_call_sites_importable(self):
         from indexer.query import GraphQuery
+
         assert hasattr(GraphQuery, "virtual_call_sites")
 
     def test_sc07_returns_list_of_dispatch_sites(self, chain_g):
         """SC-07: top_rank has exactly one virtual callee (A::rank); one site."""
         g, ids = chain_g
         from indexer.query import DispatchSite
+
         sites = g.virtual_call_sites(ids["top_rank"])
         assert isinstance(sites, list)
         assert len(sites) == 1
@@ -651,8 +951,9 @@ class TestVirtualCallSites:
         sites = g.virtual_call_sites(ids["top_rank"])
         ds_direct = g.dispatch_selection(ids["A::rank"])
         assert sites[0].prunable == ds_direct.prunable
-        assert {s.target.id for s in sites[0].candidates} == \
-               {s.target.id for s in ds_direct.candidates}
+        assert {s.target.id for s in sites[0].candidates} == {
+            s.target.id for s in ds_direct.candidates
+        }
 
     def test_sc07_non_virtual_callees_excluded(self, g, ids):
         """SC-07: virtual_call_sites omits non-virtual callees (static edges)."""
@@ -673,12 +974,14 @@ class TestVirtualCallSites:
 #              Callable.devirtualized_callgraph() + CallStep
 # =========================================================================== #
 
+
 class TestModelDispatchSelection:
     """SC-08: Method.dispatch_selection() returns entity-typed DispatchSiteModel."""
 
     @pytest.fixture
     def chain_cb(self, chain_db):
         from indexer.model import CodeBase
+
         db_path, ids = chain_db
         cb = CodeBase(GraphQuery(db_path))
         yield cb, ids
@@ -686,6 +989,7 @@ class TestModelDispatchSelection:
 
     def test_sc08_importable(self):
         from indexer.model import Method
+
         assert hasattr(Method, "dispatch_selection")
 
     def test_sc08_dispatch_site_model_importable(self):
@@ -697,6 +1001,7 @@ class TestModelDispatchSelection:
     def test_sc08_receiver_type_is_class(self, chain_cb):
         """SC-08: receiver_static_type is a Class entity."""
         from indexer.model import Method, Class
+
         cb, ids = chain_cb
         a_rank = cb.get(ids["A::rank"])
         assert isinstance(a_rank, Method)
@@ -707,6 +1012,7 @@ class TestModelDispatchSelection:
     def test_sc08_selections_have_method_entities(self, chain_cb):
         """SC-08: each SelectionModel carries Method entities."""
         from indexer.model import Method
+
         cb, ids = chain_cb
         a_rank = cb.get(ids["A::rank"])
         assert isinstance(a_rank, Method)
@@ -717,6 +1023,7 @@ class TestModelDispatchSelection:
     def test_sc08_selection_map_completeness(self, chain_cb):
         """SC-08: the model selection map covers all four chain classes."""
         from indexer.model import Method
+
         cb, ids = chain_cb
         a_rank = cb.get(ids["A::rank"])
         assert isinstance(a_rank, Method)
@@ -734,6 +1041,7 @@ class TestCallStep:
     @pytest.fixture
     def chain_cb(self, chain_db):
         from indexer.model import CodeBase
+
         db_path, ids = chain_db
         cb = CodeBase(GraphQuery(db_path))
         yield cb, ids
@@ -744,11 +1052,13 @@ class TestCallStep:
 
     def test_devirt_callgraph_importable(self):
         from indexer.model import Callable
+
         assert hasattr(Callable, "devirtualized_callgraph")
 
     def test_sc09_devirt_yields_call_steps(self, chain_cb):
         """SC-09: devirtualized_callgraph yields CallStep objects."""
         from indexer.model import Callable, CallStep
+
         cb, ids = chain_cb
         top_rank = cb.get(ids["top_rank"])
         assert isinstance(top_rank, Callable)
@@ -759,6 +1069,7 @@ class TestCallStep:
     def test_sc09_call_step_structure(self, chain_cb):
         """SC-09: CallStep carries callee, depth, and dispatch_site attributes."""
         from indexer.model import Callable, CallStep, DispatchSiteModel
+
         cb, ids = chain_cb
         top_rank = cb.get(ids["top_rank"])
         assert isinstance(top_rank, Callable)
@@ -773,6 +1084,7 @@ class TestCallStep:
     def test_sc15_non_virtual_callee_has_no_dispatch_site(self, g, ids):
         """SC-15: a step for a non-virtual callee has dispatch_site=None."""
         from indexer.model import CodeBase, Callable
+
         db_path = g.db_path
         with CodeBase(GraphQuery(db_path)) as cb:
             main = cb.get(ids["main"])
@@ -787,6 +1099,7 @@ class TestCallStep:
         """SC-09: devirtualized_callgraph is lazy (a generator)."""
         import types
         from indexer.model import Callable
+
         cb, ids = chain_cb
         top_rank = cb.get(ids["top_rank"])
         assert isinstance(top_rank, Callable)
@@ -800,19 +1113,22 @@ class TestCallStep:
         all dispatch targets) unless expand_virtual=True is used. The default
         must produce the SAME (callee.id, depth) pairs as callgraph()."""
         from indexer.model import CodeBase, Callable
+
         db_path = g.db_path
         with CodeBase(GraphQuery(db_path)) as cb:
             main = cb.get(ids["main"])
             assert isinstance(main, Callable)
             cg_result = [(e.id, d) for e, d in main.callgraph()]
-            dvirt_result = [(s.callee.id, s.depth)
-                            for s in main.devirtualized_callgraph()]
+            dvirt_result = [
+                (s.callee.id, s.depth) for s in main.devirtualized_callgraph()
+            ]
         assert cg_result == dvirt_result
 
     def test_sc10_chain_devirt_node_set(self, chain_db):
         """SC-10: top_rank.devirtualized_callgraph() visits only A::rank (the
         statically declared callee), not B/C/D::rank."""
         from indexer.model import CodeBase, Callable
+
         db_path, ids = chain_db
         with CodeBase(GraphQuery(db_path)) as cb:
             top = cb.get(ids["top_rank"])
@@ -833,18 +1149,21 @@ class TestDevirtExpandVirtual:
         """devirtualized_callgraph must accept expand_virtual kwarg."""
         from indexer.model import Callable
         import inspect
+
         sig = inspect.signature(Callable.devirtualized_callgraph)
         assert "expand_virtual" in sig.parameters
 
     def test_expand_virtual_visits_all_targets(self, chain_db):
         """expand_virtual=True also visits B/C/D::rank as direct dispatch targets."""
         from indexer.model import CodeBase, Callable
+
         db_path, ids = chain_db
         with CodeBase(GraphQuery(db_path)) as cb:
             top = cb.get(ids["top_rank"])
             assert isinstance(top, Callable)
-            visited = {s.callee.id
-                       for s in top.devirtualized_callgraph(expand_virtual=True)}
+            visited = {
+                s.callee.id for s in top.devirtualized_callgraph(expand_virtual=True)
+            }
         assert ids["A::rank"] in visited
         assert ids["B::rank"] in visited
         assert ids["C::rank"] in visited
@@ -854,6 +1173,7 @@ class TestDevirtExpandVirtual:
 # =========================================================================== #
 # CATEGORY C — regression: default callgraph() / callees() unchanged
 # =========================================================================== #
+
 
 class TestDefaultCallgraphUnchanged:
     """SC-11 / SC-12: the Phase-1 additions must NOT alter the existing
@@ -866,20 +1186,22 @@ class TestDefaultCallgraphUnchanged:
     def test_sc11_callgraph_node_sequence_unchanged(self, g, ids):
         """SC-11: callgraph() DFS pre-order is byte-identical after Phase 1."""
         from indexer.model import CodeBase, Callable
+
         with CodeBase(GraphQuery(g.db_path)) as cb:
             main = cb.get(ids["main"])
             assert isinstance(main, Callable)
             result = [(e.id, d) for e, d in main.callgraph()]
         # Expected from baseline (pre-Phase-1): main->helper(1)->compute(2),ext_fn(2)
         assert result == [
-            (ids["helper"],  1),
+            (ids["helper"], 1),
             (ids["compute"], 2),
-            (ids["ext_fn"],  2),
+            (ids["ext_fn"], 2),
         ]
 
     def test_sc11_callgraph_render_unchanged(self, g, ids):
         """SC-11: render.callgraph() (has a virtual callee) is unchanged."""
         from indexer.model import CodeBase, Callable
+
         with CodeBase(GraphQuery(g.db_path)) as cb:
             render = cb.get(ids["render"])
             assert isinstance(render, Callable)
@@ -890,6 +1212,7 @@ class TestDefaultCallgraphUnchanged:
     def test_sc12_callees_list_unchanged(self, g, ids):
         """SC-12: callees() list for helper is exactly [compute, ext_fn] (source order)."""
         from indexer.model import CodeBase, Callable
+
         with CodeBase(GraphQuery(g.db_path)) as cb:
             helper = cb.get(ids["helper"])
             assert isinstance(helper, Callable)
@@ -900,6 +1223,7 @@ class TestDefaultCallgraphUnchanged:
     def test_sc12_callees_non_callable_entity_unchanged(self, g, ids):
         """SC-12: callees() on a leaf (compute) still returns []."""
         from indexer.model import CodeBase, Callable
+
         with CodeBase(GraphQuery(g.db_path)) as cb:
             compute = cb.get(ids["compute"])
             assert isinstance(compute, Callable)
@@ -910,12 +1234,13 @@ class TestDefaultCallgraphUnchanged:
         targets = {s.id for s in g.dispatch_targets(ids["Base::draw"])}
         assert ids["Derived::draw"] in targets
         assert ids["Derived2::draw"] in targets
-        assert ids["Base::draw"] not in targets   # pure, excluded
+        assert ids["Base::draw"] not in targets  # pure, excluded
 
     def test_callgraph_returns_generator_not_list(self, g, ids):
         """Regression: callgraph() return type must not have changed to a list."""
         import types
         from indexer.model import CodeBase, Callable
+
         with CodeBase(GraphQuery(g.db_path)) as cb:
             main = cb.get(ids["main"])
             assert isinstance(main, Callable)

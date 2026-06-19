@@ -13,7 +13,7 @@ Drives the REAL libclang extractor over small C++ sources and asserts:
   * query.callees(caller_int, include_instantiations=False) == direct only
   * Method-template Y::print<int>: node+instantiates+method_of present,
     template_args == [] (ADR-004 §1b known limitation)
-  * Migration: a v12 DB (no is_instantiation column) upgrades to v13 correctly
+  * Migration: a v12 DB (no is_instantiation column) upgrades to v14 correctly
   * Blast-radius guard: std::vector<int> mints NO instance node
     (primary unindexed -> guard holds)
 
@@ -128,14 +128,14 @@ def _sym_by_spelling(g: GraphQuery, spelling: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_13(extracted_db):
-    """Freshly-created DB must be at schema v13."""
+def test_schema_version_is_14(extracted_db):
+    """Freshly-created DB must be at schema v14 (current)."""
     db = Storage(extracted_db)
     row = db._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()
     db.close()
-    assert row is not None and int(row[0]) == 13
+    assert row is not None and int(row[0]) == 14
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +396,9 @@ def test_method_template_node_and_edges_present(g):
 def test_migration_v12_to_v13(tmp_path):
     """Opening a v12 DB (no is_instantiation column) must:
     - add the column with DEFAULT 0
-    - bump schema_version to 13
+    - bump schema_version to current (14)
     - be idempotent on second open
-    - not downgrade a v14 DB"""
+    - not downgrade a v15 DB"""
     db_path = str(tmp_path / "v12.db")
 
     # Build a minimal v12-era DB without the is_instantiation column.
@@ -512,27 +512,27 @@ def test_migration_v12_to_v13(tmp_path):
     conn.commit()
     conn.close()
 
-    # First open: should migrate v12->v13 and add is_instantiation
+    # First open: should migrate v12->v14 (current) and add is_instantiation
     db = Storage(db_path)
     cols = {r[1] for r in db._conn.execute("PRAGMA table_info(symbol)")}
     assert "is_instantiation" in cols, "is_instantiation column not added"
     version = db._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(version) == 13, f"expected schema v13, got {version}"
+    assert int(version) == 14, f"expected schema v14 (current), got {version}"
     db.close()
 
-    # Second open: idempotent (no error, still v13)
+    # Second open: idempotent (no error, still v14)
     db2 = Storage(db_path)
     v2 = db2._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(v2) == 13
+    assert int(v2) == 14
     db2.close()
 
-    # Future DB (v14): must NOT be downgraded
+    # Future DB (v15): must NOT be downgraded
     conn2 = sqlite3.connect(db_path)
-    conn2.execute("UPDATE meta SET value='14' WHERE key='schema_version'")
+    conn2.execute("UPDATE meta SET value='15' WHERE key='schema_version'")
     conn2.commit()
     conn2.close()
 
@@ -540,7 +540,7 @@ def test_migration_v12_to_v13(tmp_path):
     v3 = db3._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(v3) == 14, "Storage must not downgrade a future-schema DB"
+    assert int(v3) == 15, "Storage must not downgrade a future-schema DB"
     db3.close()
 
 

@@ -384,7 +384,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v14 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -399,10 +399,11 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
       tables.insert(st.col_text(0));
     }
   }
+  // v14 adds the label table
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "edge_kind", "edge",
                                         "edge_site", "template_param",
-                                        "template_arg", "call_arg"});
+                                        "template_arg", "call_arg", "label"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -414,8 +415,9 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
     return out;
   };
   CHECK(cols("meta") == std::vector<std::string>{"key", "value"});
+  // v14 adds the version column to component
   CHECK(cols("component") ==
-        std::vector<std::string>{"id", "name", "path", "kind"});
+        std::vector<std::string>{"id", "name", "path", "kind", "version"});
   CHECK(cols("directory") ==
         std::vector<std::string>{"id", "component_id", "path"});
   CHECK(cols("file") == std::vector<std::string>{"id", "directory_id", "name",
@@ -452,7 +454,7 @@ TEST_CASE("fresh Storage produces schema v10 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "13");
+    CHECK(st.col_text(0) == "14");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

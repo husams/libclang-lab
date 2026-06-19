@@ -319,7 +319,8 @@ def test_gp01_migration_v9_to_v10(tmp_path):
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
     assert int(ver) == SCHEMA_VERSION, (
-        f"expected schema_version={SCHEMA_VERSION}, got {ver}")
+        f"expected schema_version={SCHEMA_VERSION}, got {ver}"
+    )
 
     es_cols = {r[1] for r in db._conn.execute("PRAGMA table_info(edge_site)")}
     assert "recv_src_kind" in es_cols

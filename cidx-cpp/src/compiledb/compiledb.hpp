@@ -8,6 +8,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cidx {
@@ -35,6 +36,8 @@ public:
   // drop argv[0]; apply the drop sets; drop the source file (matched by the
   // command's filename OR its basename, G10); absolutize -I/-isystem/-iquote
   // against `directory` in spaced and glued forms (G12); keep the rest.
+  // Preserve rule (portable-paths §5): when a -I/-isystem/-iquote value
+  // already contains '<' or '$', emit verbatim (do NOT absolutize).
   static std::vector<std::string>
   strip_for_libclang(const std::vector<std::string> &argv,
                      const std::string &filename, const std::string &directory);
@@ -50,6 +53,15 @@ public:
   // (compiledb.py:106-115).
   static std::string driver(const std::vector<std::string> &argv,
                             const std::string &directory);
+
+  // split_base_version(root) — portable-paths §2:
+  //   normpath(root), take split(root) → (base, seg).
+  //   If seg matches the version regex (^v?[0-9]+([._-][0-9]+)*$) AND base is
+  //   non-empty AND base != "/" → return {base, seg}.
+  //   Else return {root, ""}.
+  // The empty-string second element signals "no version detected".
+  static std::pair<std::string, std::string>
+  split_base_version(const std::string &root);
 };
 
 } // namespace cidx

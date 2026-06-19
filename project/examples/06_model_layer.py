@@ -31,7 +31,6 @@ from indexer import open_codebase, Function, Method, Record
 def main() -> None:
     # open_codebase() mirrors open_query(): same standard read-only index.
     with open_codebase() as cb:
-
         # --------------------------------------------------------------- #
         # 1. LOOK UP — find() returns TYPED entities, not bare Syms.
         # --------------------------------------------------------------- #
@@ -43,7 +42,7 @@ def main() -> None:
             args = ", ".join(a.spelling for a in fn.arguments)
             print(f"  {fn.name}({args}) -> {fn.return_type}")
             print(f"    defined : {fn.definition.loc if fn.definition else '?'}")
-            if fn.declaration:                       # only shown when distinct
+            if fn.declaration:  # only shown when distinct
                 print(f"    declared: {fn.declaration.loc}")
             print(f"    callers : {[c.name for c in fn.callers()][:5]}")
             break
@@ -52,8 +51,10 @@ def main() -> None:
         # 2. A RECORD — fields, methods, inheritance, abstractness.
         # --------------------------------------------------------------- #
         print("\n== a class/struct ==")
-        rec = next((e for e in cb.find("", limit=2000)
-                    if isinstance(e, Record) and e.fields), None)
+        rec = next(
+            (e for e in cb.find("", limit=2000) if isinstance(e, Record) and e.fields),
+            None,
+        )
         if rec:
             print(f"  {rec.kind} {rec.name}  (abstract={rec.is_abstract})")
             for f in rec.fields[:5]:
@@ -70,12 +71,17 @@ def main() -> None:
         # 3. DYNAMIC DISPATCH — a virtual method's real run-time targets.
         # --------------------------------------------------------------- #
         print("\n== virtual methods ==")
-        vm = next((e for e in cb.find("", limit=4000)
-                   if isinstance(e, Method) and e.is_virtual), None)
+        vm = next(
+            (
+                e
+                for e in cb.find("", limit=4000)
+                if isinstance(e, Method) and e.is_virtual
+            ),
+            None,
+        )
         if vm:
             print(f"  {vm.name}  owner={vm.owner.name if vm.owner else '?'}")
-            print(f"    dispatch targets: "
-                  f"{[t.name for t in vm.dispatch_targets()]}")
+            print(f"    dispatch targets: {[t.name for t in vm.dispatch_targets()]}")
         else:
             print("  (no virtual methods in this index)")
 

@@ -43,11 +43,11 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 _GRAPHLAB = os.path.join(_REPO, "manifests", "graphlab")
-sys.path.insert(0, os.path.join(_REPO, "project"))   # the `indexer` package
-sys.path.insert(0, os.path.join(_REPO, "scripts"))   # `_helpers.clang_args`
+sys.path.insert(0, os.path.join(_REPO, "project"))  # the `indexer` package
+sys.path.insert(0, os.path.join(_REPO, "scripts"))  # `_helpers.clang_args`
 
-from indexer.model import CodeBase, Method            # noqa: E402
-from indexer.query import GraphQuery                  # noqa: E402
+from indexer.model import CodeBase, Method  # noqa: E402
+from indexer.query import GraphQuery  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -75,14 +75,14 @@ def build_chain_codebase(db_path: str) -> CodeBase:
     db.add_component("graphlab", _GRAPHLAB)
     hid = db.add_file_path(hpp)
     with db.transaction():
-        A.index_symbols(db, tu_h, hid)               # declarations (the .hpp)
+        A.index_symbols(db, tu_h, hid)  # declarations (the .hpp)
     cid = db.add_file_path(cpp)
     with db.transaction():
-        A.index_symbols(db, tu_c, cid)               # definitions
+        A.index_symbols(db, tu_c, cid)  # definitions
     with db.transaction():
         db.delete_edges_for_file(cid)
-        A._index_edges_notxn(db, tu_c, cpp, cid)     # calls + arg provenance
-    db.resolve_pass()                                # link decls <-> defs
+        A._index_edges_notxn(db, tu_c, cpp, cid)  # calls + arg provenance
+    db.resolve_pass()  # link decls <-> defs
     db.close()
     return CodeBase(GraphQuery(db_path))
 
@@ -108,14 +108,17 @@ def main() -> None:
         #    run-time type select? And is the site prunable at all?
         # ---------------------------------------------------------------- #
         a_rank = next(
-            m for m in cb.find("rank")
+            m
+            for m in cb.find("rank")
             if isinstance(m, Method) and m.owner and m.owner.name == "chain::A"
         )
         site = a_rank.dispatch_selection()
         print("== 1. selection map for chain::A::rank (Phase 1) ==")
         print(f"   receiver static type : {site.receiver_static_type}")
-        print(f"   prunable             : {site.prunable}"
-              + ("" if site.prunable else f"  ({site.unprunable_reasons})"))
+        print(
+            f"   prunable             : {site.prunable}"
+            + ("" if site.prunable else f"  ({site.unprunable_reasons})")
+        )
         for sel in site.selections:
             print(f"     {_name(sel.selecting_type):<12} -> {_name(sel.target.sym)}")
 
@@ -124,13 +127,17 @@ def main() -> None:
         #    The conservative superset: every virtual hop keeps ALL targets.
         #    This is byte-identical to the plain callgraph (the default).
         # ---------------------------------------------------------------- #
-        f = cb.get("c:@N@chain@F@f#") or next(x for x in cb.find("f") if x.name == "chain::f")
+        f = cb.get("c:@N@chain@F@f#") or next(
+            x for x in cb.find("f") if x.name == "chain::f"
+        )
         print("\n== 2. chain::f()  devirtualized_callgraph(prune=False) — Phase 1 ==")
         for step in f.devirtualized_callgraph(expand_virtual=True, prune=False):
             if step.dispatch_site is None:
                 continue
-            print(f"   virtual dispatch -> {_targets(step.dispatch_site.selections)}"
-                  f"   (pruned_candidates={step.pruned_candidates})")
+            print(
+                f"   virtual dispatch -> {_targets(step.dispatch_site.selections)}"
+                f"   (pruned_candidates={step.pruned_candidates})"
+            )
 
         # ---------------------------------------------------------------- #
         # 3. PHASE 2 — devirtualized_callgraph(prune=True)
@@ -143,13 +150,15 @@ def main() -> None:
             if step.dispatch_site is None:
                 continue
             full = _targets(step.dispatch_site.selections)
-            if step.pruned_candidates is None:        # ⊤ / unprunable -> sound fallback
+            if step.pruned_candidates is None:  # ⊤ / unprunable -> sound fallback
                 print(f"   virtual dispatch -> kept full set {full}  (no type info)")
             else:
                 kept = _targets(step.pruned_candidates)
                 gamma = sorted(_name(cb.get(u) or u) for u in step.gamma_receiver)
-                print(f"   virtual dispatch -> Γ(receiver)={gamma} "
-                      f"pruned {full} -> {kept}")
+                print(
+                    f"   virtual dispatch -> Γ(receiver)={gamma} "
+                    f"pruned {full} -> {kept}"
+                )
                 pruned_once = True
 
         # A self-check so this doubles as a smoke test.
@@ -158,6 +167,7 @@ def main() -> None:
     finally:
         cb.close()
         import shutil
+
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

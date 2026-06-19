@@ -23,8 +23,7 @@ from indexer import open_query, GraphQuery, Sym
 def main() -> None:
     with open_query() as g:
         if g.edge_count() == 0:
-            print("This index has no edges — see README to regenerate, then "
-                  "re-run.")
+            print("This index has no edges — see README to regenerate, then re-run.")
             return
 
         fn = _first_function_with_calls(g)
@@ -47,8 +46,9 @@ def main() -> None:
         # was reached by -- returns (Sym, edge_kind) tuples. Pass kinds=None to
         # see the full mix (calls / uses / contains / field_of / ...).
         print("\n== neighbors out, ALL kinds, with relation type ==")
-        for s, kind in g.neighbors(fn, kinds=None, direction="out", limit=12,
-                                   with_kind=True):
+        for s, kind in g.neighbors(
+            fn, kinds=None, direction="out", limit=12, with_kind=True
+        ):
             print(f"   --{kind}--> {s.name:<26} {s.loc}")
 
         # ------------------------------------------------------------------- #
@@ -59,8 +59,7 @@ def main() -> None:
         # the MINIMUM depth at which it was found. This is your "transitive
         # callees within 3 hops" / "dependency cone" query.
         print("\n== walk out over 'calls', depth<=3 ==")
-        tr = g.walk(fn, kinds=("calls",), direction="out", depth=3,
-                    max_nodes=50)
+        tr = g.walk(fn, kinds=("calls",), direction="out", depth=3, max_nodes=50)
         # tr.nodes is sorted shallowest-first; tr.depth_by_id gives the depth.
         for s in tr.nodes[:15]:
             depth = tr.depth_by_id.get(s.id, 0)
@@ -77,7 +76,7 @@ def main() -> None:
         # callees, then printing the chain.
         targets = [s for s in tr.nodes if s.id != fn.id]
         if targets:
-            dst = targets[-1]                 # a deepest reached node
+            dst = targets[-1]  # a deepest reached node
             path = g.reaches(fn, dst, kinds=("calls",), max_depth=8)
             print(f"\n== reaches  {fn.spelling} -> {dst.spelling} ==")
             if path:
@@ -95,8 +94,11 @@ def main() -> None:
             # Traversal that recorded parents — which walk() always does.)
             print(f"\n== Traversal.path_to  {fn.spelling} -> {dst.spelling} ==")
             chain = tr.path_to(dst)
-            print("   " + " -> ".join(s.spelling for s in chain)
-                  if chain else "   (not reached in this walk)")
+            print(
+                "   " + " -> ".join(s.spelling for s in chain)
+                if chain
+                else "   (not reached in this walk)"
+            )
 
 
 def _first_function_with_calls(g: GraphQuery) -> Sym | None:

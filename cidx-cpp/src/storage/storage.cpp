@@ -31,11 +31,12 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS component (
-    id    INTEGER PRIMARY KEY,
-    name  TEXT NOT NULL,
-    path  TEXT NOT NULL UNIQUE,
-    kind  TEXT NOT NULL DEFAULT 'repo'
-          CHECK (kind IN ('repo', 'external'))
+    id      INTEGER PRIMARY KEY,
+    name    TEXT NOT NULL,
+    path    TEXT NOT NULL UNIQUE,         -- base path (no version segment)
+    kind    TEXT NOT NULL DEFAULT 'repo'
+            CHECK (kind IN ('repo', 'external')),
+    version TEXT                          -- v14: nullable; NULL = unversioned
 );
 
 CREATE TABLE IF NOT EXISTS directory (
@@ -173,7 +174,15 @@ CREATE TABLE IF NOT EXISTS call_arg (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '13');
+-- ---- v14: label registry (portable paths §5) --------------------------------
+
+CREATE TABLE IF NOT EXISTS label (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,   -- label key, e.g. 'libfoo-include'
+    path TEXT NOT NULL           -- stored verbatim; may contain $VAR
+);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '14');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -222,7 +231,9 @@ constexpr std::array<std::string_view, 21> kSymbolInsertCols = {
 // right after is_static (col index 16), then linkage/access/parent_usr/resolved
 // (17-20), then decl_path appended last (21) -- append-at-end pattern for
 // migrated DBs (ALTER TABLE appends; positional decode in symbol_from must match).
-constexpr char kComponentCols[] = "id, name, path, kind";
+// v14: version appended at end (append-at-end discipline so migrated DBs
+// whose ALTER added the column last decode positionally).
+constexpr char kComponentCols[] = "id, name, path, kind, version";
 constexpr char kDirectoryCols[] = "id, component_id, path";
 constexpr char kFileCols[] =
     "id, directory_id, name, mtime, md5, compile_options, driver, indexed, "
@@ -288,6 +299,8 @@ Component component_from(const SqliteStmt &st) {
   c.name = st.col_text(1);
   c.path = st.col_text(2);
   c.kind = st.col_text(3);
+  // v14: version at column 4 (appended last; nullopt when NULL)
+  c.version = opt_text(st, 4);
   return c;
 }
 
@@ -600,9 +613,24 @@ void Storage::migrate() {
     if (st.step()) {
       const std::string v = st.col_text(0);
       if (!v.empty() && std::stoi(v) < kSchemaVersion) {
-        changed = true; // forces the meta UPDATE below to write '7'
+        changed = true; // forces the meta UPDATE below to write the new version
       }
     }
+  }
+  // v13 -> v14: component.version column + label table.
+  // component.version: guard on PRAGMA table_info(component).
+  if (has_table("component")) {
+    const auto ccols = table_columns("component");
+    if (!has_col(ccols, "version")) {
+      // No backfill — existing components get version = NULL.
+      db_.exec("ALTER TABLE component ADD COLUMN version TEXT");
+      changed = true;
+    }
+  }
+  // label table: created by the schema script (CREATE TABLE IF NOT EXISTS).
+  // Only flip changed here so the meta UPDATE fires.
+  if (!has_table("label")) {
+    changed = true; // table will be created by the schema script
   }
   if (changed) {
     auto st =
@@ -616,16 +644,27 @@ void Storage::migrate() {
 // ----------------------------------------------------------------
 
 int64_t Storage::add_component(const std::string &name, const std::string &path,
-                               const std::string &kind) {
-  const std::string abs = pathutil::abspath(path);
-  auto st =
-      db_.prepare("INSERT INTO component (name, path, kind) VALUES (?, ?, ?) "
-                  "ON CONFLICT(path) DO UPDATE SET name = excluded.name, kind "
-                  "= excluded.kind "
-                  "RETURNING id");
+                               const std::string &kind,
+                               const std::optional<std::string> &version) {
+  // Preserve indirected (portable) paths verbatim; absolutize plain paths.
+  // Mirrors Python: if "$" not in path and "<" not in path: path = abspath(path)
+  const std::string abs =
+      (path.find('$') == std::string::npos &&
+       path.find('<') == std::string::npos)
+          ? pathutil::abspath(path)
+          : path;
+  // v14: COALESCE(excluded.version, component.version) so a re-import that
+  // supplies NO version (excluded.version bound NULL) PRESERVES the existing
+  // stored version instead of silently wiping it (contract §4.2).
+  auto st = db_.prepare(
+      "INSERT INTO component (name, path, kind, version) VALUES (?, ?, ?, ?) "
+      "ON CONFLICT(path) DO UPDATE SET name = excluded.name, kind = "
+      "excluded.kind, version = COALESCE(excluded.version, component.version) "
+      "RETURNING id");
   st.bind(1, std::string_view(name));
   st.bind(2, std::string_view(abs));
   st.bind(3, std::string_view(kind));
+  bind_opt(st, 4, version);
   if (!st.step()) {
     throw StorageError("component upsert returned no id");
   }
@@ -634,14 +673,53 @@ int64_t Storage::add_component(const std::string &name, const std::string &path,
   return cid;
 }
 
-std::optional<Component> Storage::get_component(const std::string &path) {
-  auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
-                        " FROM component WHERE path = ?");
-  st.bind(1, std::string_view(pathutil::abspath(path)));
-  if (!st.step()) {
-    return std::nullopt;
+bool Storage::set_component_version(const std::string &name,
+                                    const std::optional<std::string> &version) {
+  // Explicit clear goes through this path (not add_component) to avoid the
+  // COALESCE guard that would no-op a NULL-clear.
+  auto st = db_.prepare(
+      "UPDATE component SET version = ? WHERE name = ?");
+  bind_opt(st, 1, version);
+  st.bind(2, std::string_view(name));
+  st.step_done();
+  return db_.changes() > 0;
+}
+
+// static
+std::string Storage::effective_root(const Component &comp) {
+  // Stored effective root (NOT resolved; may contain $VAR).
+  if (!comp.version || comp.version->empty()) {
+    return comp.path;
   }
-  return component_from(st);
+  return pathutil::normpath(pathutil::join(comp.path, *comp.version));
+}
+
+std::optional<Component> Storage::get_component(const std::string &path) {
+  const std::string abs = pathutil::abspath(path);
+  // Step 1: exact match on stored BASE path (fast-path for unversioned comps).
+  {
+    auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
+                          " FROM component WHERE path = ?");
+    st.bind(1, std::string_view(abs));
+    if (st.step()) {
+      return component_from(st);
+    }
+  }
+  // Step 2: scan all components and match against effective root (required
+  // when version-detection split the trailing segment off the stored base).
+  {
+    auto st =
+        db_.prepare(std::string("SELECT ") + kComponentCols + " FROM component");
+    while (st.step()) {
+      Component c = component_from(st);
+      const std::string root =
+          pathutil::abspath(pathutil::resolve_fs_path(effective_root(c)));
+      if (root == abs) {
+        return c;
+      }
+    }
+  }
+  return std::nullopt;
 }
 
 std::optional<Component>
@@ -669,17 +747,22 @@ std::optional<Component>
 Storage::component_for_path(const std::string &abs_path) {
   const std::string abs = pathutil::abspath(abs_path);
   std::optional<Component> best;
+  std::string best_root;
   auto st =
       db_.prepare(std::string("SELECT ") + kComponentCols + " FROM component");
   while (st.step()) {
     Component c = component_from(st);
-    std::string root = c.path;
+    // Use the resolved effective root (base+version) for prefix matching
+    // (contract §4.4 item 1 / §2 hazard). Strip trailing slashes.
+    std::string root =
+        pathutil::abspath(pathutil::resolve_fs_path(effective_root(c)));
     while (!root.empty() && root.back() == '/') {
       root.pop_back(); // rstrip(os.sep)
     }
     const bool owns = abs == root || abs.starts_with(root + "/");
-    if (owns && (!best || root.size() > best->path.size())) {
+    if (owns && (!best || root.size() > best_root.size())) {
       best = std::move(c);
+      best_root = root;
     }
   }
   return best;
@@ -908,7 +991,11 @@ Storage::split_path(const std::string &abs_path) {
   if (!comp) {
     return std::nullopt;
   }
-  const std::string rel = pathutil::relpath(abs, comp->path);
+  // Use the resolved effective root (base+version) for relpath computation
+  // (contract §4.4 item 2).
+  const std::string root =
+      pathutil::abspath(pathutil::resolve_fs_path(effective_root(*comp)));
+  const std::string rel = pathutil::relpath(abs, root);
   auto [rel_dir, name] = pathutil::split(rel);
   if (rel_dir == ".") {
     rel_dir = "";
@@ -962,27 +1049,38 @@ std::optional<File> Storage::get_file_by_id(int64_t file_id) {
 }
 
 std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
-  auto st =
-      db_.prepare("SELECT c.path AS root, d.path AS rel, f.name AS name "
-                  "FROM file f JOIN directory d ON d.id = f.directory_id "
-                  "JOIN component c ON c.id = d.component_id WHERE f.id = ?");
+  // SELECT c.path AND c.version so we can build the effective root.
+  auto st = db_.prepare(
+      "SELECT c.path, c.version, d.path AS rel, f.name AS name "
+      "FROM file f JOIN directory d ON d.id = f.directory_id "
+      "JOIN component c ON c.id = d.component_id WHERE f.id = ?");
   st.bind(1, file_id);
   if (!st.step()) {
     return std::nullopt;
   }
-  return reconstruct_path(st.col_text(0), st.col_text(1), st.col_text(2));
+  // Build effective root using stored path + version (contract §4.4 item 3).
+  Component tmp;
+  tmp.path = st.col_text(0);
+  tmp.version = opt_text(st, 1);
+  const std::string root =
+      pathutil::abspath(pathutil::resolve_fs_path(effective_root(tmp)));
+  return reconstruct_path(root, st.col_text(2), st.col_text(3));
 }
 
 std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
-  auto st = db_.prepare("SELECT c.path AS root, d.path AS rel FROM directory d "
-                        "JOIN component c ON c.id = d.component_id "
-                        "WHERE d.id = ?");
+  auto st = db_.prepare(
+      "SELECT c.path, c.version, d.path AS rel FROM directory d "
+      "JOIN component c ON c.id = d.component_id WHERE d.id = ?");
   st.bind(1, directory_id);
   if (!st.step()) {
     return std::nullopt;
   }
-  const std::string root = st.col_text(0);
-  const std::string rel = st.col_text(1);
+  Component tmp;
+  tmp.path = st.col_text(0);
+  tmp.version = opt_text(st, 1);
+  const std::string root =
+      pathutil::abspath(pathutil::resolve_fs_path(effective_root(tmp)));
+  const std::string rel = st.col_text(2);
   return rel.empty() ? root : pathutil::join(root, rel);
 }
 
@@ -994,7 +1092,7 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   std::string sql =
       "SELECT f.id, f.directory_id, f.name, f.mtime, f.md5, f.compile_options, "
       "f.driver, f.indexed, f.indexed_at, f.args_overridden, "
-      "c.path AS root, d.path AS rel "
+      "c.path AS root, c.version, d.path AS rel "
       "FROM file f JOIN directory d ON d.id = f.directory_id "
       "JOIN component c ON c.id = d.component_id";
   std::vector<std::string> where;
@@ -1024,9 +1122,14 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   }
   std::vector<std::pair<File, std::string>> out;
   while (st.step()) {
-    out.emplace_back(
-        file_from(st),
-        reconstruct_path(st.col_text(10), st.col_text(11), st.col_text(2)));
+    // Columns 10=c.path, 11=c.version, 12=d.path (rel); f.name is col 2.
+    Component tmp;
+    tmp.path = st.col_text(10);
+    tmp.version = opt_text(st, 11);
+    const std::string root =
+        pathutil::abspath(pathutil::resolve_fs_path(effective_root(tmp)));
+    out.emplace_back(file_from(st),
+                     reconstruct_path(root, st.col_text(12), st.col_text(2)));
   }
   return out;
 }
@@ -1923,6 +2026,48 @@ Storage::edge_sites_one(int64_t edge_id, int limit) {
     row.recv_param_pos = opt_int64(st, 8);
     row.recv_type_is_value = opt_int64(st, 9);
     out.push_back(std::move(row));
+  }
+  return out;
+}
+
+// -- labels (v14) ------------------------------------------------------------
+
+int64_t Storage::add_label(const std::string &name, const std::string &path) {
+  auto st = db_.prepare(
+      "INSERT INTO label (name, path) VALUES (?, ?) "
+      "ON CONFLICT(name) DO UPDATE SET path = excluded.path "
+      "RETURNING id");
+  st.bind(1, std::string_view(name));
+  st.bind(2, std::string_view(path));
+  if (!st.step()) {
+    throw StorageError("label upsert returned no id");
+  }
+  const int64_t lid = st.col_int64(0);
+  st.step_done();
+  return lid;
+}
+
+bool Storage::remove_label(const std::string &name) {
+  auto st = db_.prepare("DELETE FROM label WHERE name = ?");
+  st.bind(1, std::string_view(name));
+  st.step_done();
+  return db_.changes() > 0;
+}
+
+std::optional<std::string> Storage::get_label(const std::string &name) {
+  auto st = db_.prepare("SELECT path FROM label WHERE name = ?");
+  st.bind(1, std::string_view(name));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return st.col_text(0);
+}
+
+std::vector<std::pair<std::string, std::string>> Storage::list_labels() {
+  auto st = db_.prepare("SELECT name, path FROM label ORDER BY name");
+  std::vector<std::pair<std::string, std::string>> out;
+  while (st.step()) {
+    out.emplace_back(st.col_text(0), st.col_text(1));
   }
   return out;
 }

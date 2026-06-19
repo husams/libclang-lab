@@ -34,8 +34,9 @@ def main():
         assert db.get_directory(comp, "src").id == d_src
 
         # -- files ---------------------------------------------------------
-        f1 = db.add_file(d_src, "a.c", mtime=100.0, md5="aaa",
-                         compile_options=["-I.", "-DDEBUG"])
+        f1 = db.add_file(
+            d_src, "a.c", mtime=100.0, md5="aaa", compile_options=["-I.", "-DDEBUG"]
+        )
         assert db.add_file(d_src, "a.c") == f1, "idempotent"
         a_c = os.path.join(repo, "src", "a.c")
         assert db.add_file_path(a_c) == f1, "path convenience resolves to same row"
@@ -61,18 +62,35 @@ def main():
         assert db.is_file_indexed(a_c)
 
         # -- symbols -------------------------------------------------------
-        decl = Symbol(usr="c:@F@multiply", spelling="multiply", kind="function",
-                      type_info="int (int, int)", file_id=f1, line=3, col=5,
-                      decl_file_id=f1, decl_line=3, decl_col=5,
-                      is_definition=False)
+        decl = Symbol(
+            usr="c:@F@multiply",
+            spelling="multiply",
+            kind="function",
+            type_info="int (int, int)",
+            file_id=f1,
+            line=3,
+            col=5,
+            decl_file_id=f1,
+            decl_line=3,
+            decl_col=5,
+            is_definition=False,
+        )
         sid = db.add_symbol(decl)
         assert db.lookup_symbol("c:@F@multiply").is_definition is False
 
         # definition upserts over the declaration (same USR, same row);
         # the declaration site recorded earlier survives alongside it
-        defn = Symbol(usr="c:@F@multiply", spelling="multiply", kind="function",
-                      type_info="int (int, int)", file_id=f1, line=10, col=1,
-                      is_definition=True, resolved=True)
+        defn = Symbol(
+            usr="c:@F@multiply",
+            spelling="multiply",
+            kind="function",
+            type_info="int (int, int)",
+            file_id=f1,
+            line=10,
+            col=1,
+            is_definition=True,
+            resolved=True,
+        )
         assert db.add_symbol(defn) == sid, "USR upsert, not a new row"
         got = db.lookup_symbol("c:@F@multiply")
         assert got.is_definition and got.resolved and got.line == 10
@@ -85,20 +103,32 @@ def main():
         assert got.decl_line == 3, "decl site stays"
 
         # qual_name: stored, upsert-preserved, and fuzzy-searchable
-        db.add_symbol(Symbol(usr="c:@N@rk@S@Conf@F@set", spelling="set",
-                             kind="method", qual_name="rk::Conf::set",
-                             parent_usr="c:@N@rk@S@Conf", is_pure=True,
-                             is_static=True, resolved=True))
+        db.add_symbol(
+            Symbol(
+                usr="c:@N@rk@S@Conf@F@set",
+                spelling="set",
+                kind="method",
+                qual_name="rk::Conf::set",
+                parent_usr="c:@N@rk@S@Conf",
+                is_pure=True,
+                is_static=True,
+                resolved=True,
+            )
+        )
         got = db.lookup_symbol("c:@N@rk@S@Conf@F@set")
         assert got.qual_name == "rk::Conf::set"
         assert got.is_pure is True, "is_pure round-trips"
         assert got.is_static is True, "is_static round-trips"
-        db.add_symbol(Symbol(usr="c:@N@rk@S@Conf@F@set", spelling="set",
-                             kind="method", resolved=True))
+        db.add_symbol(
+            Symbol(
+                usr="c:@N@rk@S@Conf@F@set", spelling="set", kind="method", resolved=True
+            )
+        )
         got = db.lookup_symbol("c:@N@rk@S@Conf@F@set")
         assert got.qual_name == "rk::Conf::set", "NULL must not clobber qual_name"
-        assert [s.usr for s in db.search_symbols("conf::set")] == \
-            ["c:@N@rk@S@Conf@F@set"], "segment fuzzy match"
+        assert [s.usr for s in db.search_symbols("conf::set")] == [
+            "c:@N@rk@S@Conf@F@set"
+        ], "segment fuzzy match"
         assert db.search_symbols("conf::set", kind="function") == []
         assert db.search_symbols("nosuchthing") == []
 
@@ -118,8 +148,14 @@ def main():
             pass
 
         # name lookup returns every row with that spelling
-        db.add_symbol(Symbol(usr="c:a.c@F@multiply", spelling="multiply",
-                             kind="function", is_definition=True))
+        db.add_symbol(
+            Symbol(
+                usr="c:a.c@F@multiply",
+                spelling="multiply",
+                kind="function",
+                is_definition=True,
+            )
+        )
         hits = db.lookup_symbols_by_name("multiply")
         assert len(hits) == 2 and all(h.spelling == "multiply" for h in hits)
         assert len(db.lookup_symbols_by_name("multiply", kind="struct")) == 0
@@ -127,8 +163,11 @@ def main():
         # bulk insert inside one transaction
         with db.transaction():
             for i in range(50):
-                db.add_symbol(Symbol(usr=f"c:@S@T{i}", spelling=f"T{i}",
-                                     kind="struct", resolved=True))
+                db.add_symbol(
+                    Symbol(
+                        usr=f"c:@S@T{i}", spelling=f"T{i}", kind="struct", resolved=True
+                    )
+                )
 
         # unresolved + per-file views
         assert {s.usr for s in db.unresolved_symbols()} == {"c:a.c@F@multiply"}
@@ -146,35 +185,36 @@ def main():
 
         # -- list views --------------------------------------------------------
         assert [c.name for c in db.list_components()] == ["libc", "myrepo"]
-        assert [c.name for c in db.list_components(name="myrp")] == \
-            ["myrepo"], "fuzzy: chars in order"
+        assert [c.name for c in db.list_components(name="myrp")] == ["myrepo"], (
+            "fuzzy: chars in order"
+        )
         assert [c.name for c in db.list_components(kind="external")] == ["libc"]
         assert db.list_components(name="zzz") == []
 
         dirs = db.list_directories(component_id=comp)
-        assert [(d.path, n) for d, n in dirs] == \
-            [("", "myrepo"), ("src", "myrepo")]
+        assert [(d.path, n) for d, n in dirs] == [("", "myrepo"), ("src", "myrepo")]
         assert [d.path for d, _ in db.list_directories(name="sr")] == ["src"]
 
         assert [p for _, p in db.list_files(component_id=comp)] == [a_c]
-        assert [p for _, p in db.list_files(component_id=comp,
-                                            dir_path="src")] == [a_c]
-        assert [p for _, p in db.list_files(component_id=comp,
-                                            dir_path="")] == [a_c], \
+        assert [p for _, p in db.list_files(component_id=comp, dir_path="src")] == [a_c]
+        assert [p for _, p in db.list_files(component_id=comp, dir_path="")] == [a_c], (
             "root subtree covers everything"
+        )
         assert db.list_files(component_id=comp, dir_path="other") == []
         assert [p for _, p in db.list_files(name="ac")] == [a_c], "fuzzy name"
         assert db.list_files(indexed=False) == []
         assert [p for _, p in db.list_files(indexed=True)] == [a_c]
 
-        assert [s.usr for s in db.list_symbols(component_id=comp)] == \
-            ["c:@F@multiply"], "scoped by definition/declaration site"
-        assert [s.usr for s in db.list_symbols(component_id=comp,
-                                               dir_path="src")] == \
-            ["c:@F@multiply"]
+        assert [s.usr for s in db.list_symbols(component_id=comp)] == [
+            "c:@F@multiply"
+        ], "scoped by definition/declaration site"
+        assert [s.usr for s in db.list_symbols(component_id=comp, dir_path="src")] == [
+            "c:@F@multiply"
+        ]
         assert [s.usr for s in db.list_symbols(file_id=f1)] == ["c:@F@multiply"]
-        assert [s.usr for s in db.list_symbols(name="cfset")] == \
-            ["c:@N@rk@S@Conf@F@set"], "fuzzy hits the qualified name"
+        assert [s.usr for s in db.list_symbols(name="cfset")] == [
+            "c:@N@rk@S@Conf@F@set"
+        ], "fuzzy hits the qualified name"
         assert len(db.list_symbols(kind="struct")) == 50
         assert db.list_symbols(component_id=comp, kind="struct") == []
 
@@ -195,16 +235,37 @@ def main():
         a = db.add_component("a", "/repo/a")
         da = db.add_directory(a, "")
         fa = db.add_file(da, "a.c")
-        db.add_symbol(Symbol(usr="c:@F@a_fn", spelling="a_fn", kind="function",
-                             file_id=fa, decl_file_id=fa))
+        db.add_symbol(
+            Symbol(
+                usr="c:@F@a_fn",
+                spelling="a_fn",
+                kind="function",
+                file_id=fa,
+                decl_file_id=fa,
+            )
+        )
         b = db.add_component("b", "/repo/b")
         dbdir = db.add_directory(b, "")
         fb = db.add_file(dbdir, "b.c")
-        db.add_symbol(Symbol(usr="c:@F@b_fn", spelling="b_fn", kind="function",
-                             file_id=fb, decl_file_id=fb))
+        db.add_symbol(
+            Symbol(
+                usr="c:@F@b_fn",
+                spelling="b_fn",
+                kind="function",
+                file_id=fb,
+                decl_file_id=fb,
+            )
+        )
         # Defined in B but declared in A's file -> related to A, removed with A.
-        db.add_symbol(Symbol(usr="c:@F@cross", spelling="cross", kind="function",
-                             file_id=fb, decl_file_id=fa))
+        db.add_symbol(
+            Symbol(
+                usr="c:@F@cross",
+                spelling="cross",
+                kind="function",
+                file_id=fb,
+                decl_file_id=fa,
+            )
+        )
 
         db.delete_component(a)
 

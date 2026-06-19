@@ -53,8 +53,9 @@ def conf_uses() -> set[str]:
         with open(path, "w") as fh:
             fh.write(SOURCE)
         tu = cx.Index.create().parse(path, args=clang_args(path) + ["-std=c++17"])
-        assert not [d for d in tu.diagnostics if d.severity >= 3], \
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
             "fixture source must parse cleanly"
+        )
 
         db = Storage(os.path.join(tmp, "i.db"))
         db.add_component("t", tmp)
@@ -70,7 +71,9 @@ def conf_uses() -> set[str]:
         rows = db._conn.execute(
             "SELECT s.qual_name FROM edge e "
             "JOIN symbol s ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.kind = 7", (conf.id,)).fetchall()
+            "WHERE e.dst_id = ? AND e.kind = 7",
+            (conf.id,),
+        ).fetchall()
         return {r[0] for r in rows}
 
 

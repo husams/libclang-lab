@@ -38,14 +38,37 @@ def _seed(db: Storage, repo: str) -> dict[str, int]:
 
     ids: dict[str, int] = {}
 
-    def sym(key, usr, spelling, kind, file_id, line, *, qual=None,
-            is_def=True, is_pure=False, parent=None, resolved=True,
-            access=None):
-        ids[key] = db.add_symbol(Symbol(
-            usr=usr, spelling=spelling, kind=kind, qual_name=qual or spelling,
-            file_id=file_id, line=line, col=1, is_definition=is_def,
-            is_pure=is_pure, parent_usr=parent, resolved=resolved, access=access,
-        ))
+    def sym(
+        key,
+        usr,
+        spelling,
+        kind,
+        file_id,
+        line,
+        *,
+        qual=None,
+        is_def=True,
+        is_pure=False,
+        parent=None,
+        resolved=True,
+        access=None,
+    ):
+        ids[key] = db.add_symbol(
+            Symbol(
+                usr=usr,
+                spelling=spelling,
+                kind=kind,
+                qual_name=qual or spelling,
+                file_id=file_id,
+                line=line,
+                col=1,
+                is_definition=is_def,
+                is_pure=is_pure,
+                parent_usr=parent,
+                resolved=resolved,
+                access=access,
+            )
+        )
 
     # --- functions (calls / uses) -----------------------------------------
     sym("main", "c:@F@main", "main", "function", f_main, 10)
@@ -59,22 +82,67 @@ def _seed(db: Storage, repo: str) -> dict[str, int]:
 
     # --- C++ class hierarchy (inherits / overrides / members) -------------
     sym("Base", "c:@S@Base", "Base", "class", f_hpp, 100, qual="Base")
-    sym("Base::draw", "c:@S@Base@F@draw#", "draw", "method", f_hpp, 102,
-        qual="Base::draw", is_pure=True, is_def=False, parent="c:@S@Base",
-        access="public")
-    sym("Base::x", "c:@S@Base@FI@x", "x", "member", f_hpp, 104,
-        qual="Base::x", parent="c:@S@Base", access="private")
-    sym("Base::Nested", "c:@S@Base@S@Nested", "Nested", "struct", f_hpp, 106,
-        qual="Base::Nested", parent="c:@S@Base", access="public")
+    sym(
+        "Base::draw",
+        "c:@S@Base@F@draw#",
+        "draw",
+        "method",
+        f_hpp,
+        102,
+        qual="Base::draw",
+        is_pure=True,
+        is_def=False,
+        parent="c:@S@Base",
+        access="public",
+    )
+    sym(
+        "Base::x",
+        "c:@S@Base@FI@x",
+        "x",
+        "member",
+        f_hpp,
+        104,
+        qual="Base::x",
+        parent="c:@S@Base",
+        access="private",
+    )
+    sym(
+        "Base::Nested",
+        "c:@S@Base@S@Nested",
+        "Nested",
+        "struct",
+        f_hpp,
+        106,
+        qual="Base::Nested",
+        parent="c:@S@Base",
+        access="public",
+    )
 
     sym("Derived", "c:@S@Derived", "Derived", "class", f_hpp, 120, qual="Derived")
-    sym("Derived::draw", "c:@S@Derived@F@draw#", "draw", "method", f_hpp, 122,
-        qual="Derived::draw", parent="c:@S@Derived", access="public")
+    sym(
+        "Derived::draw",
+        "c:@S@Derived@F@draw#",
+        "draw",
+        "method",
+        f_hpp,
+        122,
+        qual="Derived::draw",
+        parent="c:@S@Derived",
+        access="public",
+    )
 
-    sym("Derived2", "c:@S@Derived2", "Derived2", "class", f_hpp, 140,
-        qual="Derived2")
-    sym("Derived2::draw", "c:@S@Derived2@F@draw#", "draw", "method", f_hpp, 142,
-        qual="Derived2::draw", parent="c:@S@Derived2", access="public")
+    sym("Derived2", "c:@S@Derived2", "Derived2", "class", f_hpp, 140, qual="Derived2")
+    sym(
+        "Derived2::draw",
+        "c:@S@Derived2@F@draw#",
+        "draw",
+        "method",
+        f_hpp,
+        142,
+        qual="Derived2::draw",
+        parent="c:@S@Derived2",
+        access="public",
+    )
 
     C = EDGE_KINDS
     with db.transaction():
@@ -83,7 +151,7 @@ def _seed(db: Storage, repo: str) -> dict[str, int]:
         db.add_edge_site(e, f_main, 12, 5)
         e = db.add_edge(ids["helper"], ids["compute"], C["calls"], count=1)
         db.add_edge_site(e, f_lib, 22, 9)
-        db.add_edge_site(e, f_lib, 25, 9)            # called twice -> count 2
+        db.add_edge_site(e, f_lib, 25, 9)  # called twice -> count 2
         e = db.add_edge(ids["helper"], ids["ext_fn"], C["calls"], count=1)
         db.add_edge_site(e, f_lib, 28, 9)
         e = db.add_edge(ids["render"], ids["Base::draw"], C["calls"], count=1)
@@ -161,7 +229,17 @@ def empty_db(tmp_path) -> str:
         comp = db.add_component("lab", repo)
         root = db.add_directory(comp, "")
         fid = db.add_file(root, "main.c")
-        db.add_symbol(Symbol(usr="c:@F@main", spelling="main", kind="function",
-                             qual_name="main", file_id=fid, line=1, col=1,
-                             is_definition=True, resolved=True))
+        db.add_symbol(
+            Symbol(
+                usr="c:@F@main",
+                spelling="main",
+                kind="function",
+                qual_name="main",
+                file_id=fid,
+                line=1,
+                col=1,
+                is_definition=True,
+                resolved=True,
+            )
+        )
     return db_path

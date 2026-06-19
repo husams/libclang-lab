@@ -23,6 +23,7 @@ def cpp_toolchain_flags():
         flags += ["-isystem", res]
     return flags
 
+
 DB_DIR = "/Users/husam/workspace/qemu-vms/libclang-lab/test-repo/librdkafka/build"
 
 
@@ -39,17 +40,25 @@ def strip_for_libclang(cmd):
     """Raw driver invocation -> flags parse() wants. Resolve relative -I."""
     raw, directory = list(cmd.arguments), cmd.directory
     src = {cmd.filename, os.path.basename(cmd.filename)}
-    out, it = [], iter(raw[1:])            # drop argv[0] (the driver)
+    out, it = [], iter(raw[1:])  # drop argv[0] (the driver)
     for tok in it:
-        if tok in ("-c", "--"):                 continue
-        if tok == "-o":     next(it, None);     continue   # drop flag + its arg
-        if tok in src:                          continue   # the source file
+        if tok in ("-c", "--"):
+            continue
+        if tok == "-o":
+            next(it, None)
+            continue  # drop flag + its arg
+        if tok in src:
+            continue  # the source file
         matched = False
         for flag in ("-I", "-isystem", "-iquote"):
-            if tok == flag:                                 # space form: -I path
-                out += [flag, _abs(next(it, ""), directory)]; matched = True; break
+            if tok == flag:  # space form: -I path
+                out += [flag, _abs(next(it, ""), directory)]
+                matched = True
+                break
             if tok.startswith(flag) and len(tok) > len(flag):  # glued: -Ipath
-                out.append(flag + _abs(tok[len(flag):], directory)); matched = True; break
+                out.append(flag + _abs(tok[len(flag) :], directory))
+                matched = True
+                break
         if not matched:
             out.append(tok)
     return out
@@ -69,7 +78,7 @@ def flags_for_header(commands, header_path):
     """Strategy 1: borrow flags from a TU in the same directory."""
     hdr_dir = os.path.dirname(os.path.abspath(header_path))
     same = [c for c in commands if os.path.dirname(c.filename) == hdr_dir]
-    pick = same[0] if same else list(commands)[0]   # fallback: any TU
+    pick = same[0] if same else list(commands)[0]  # fallback: any TU
     return strip_for_libclang(pick)
 
 
@@ -89,8 +98,11 @@ def main():
     args = flags_for_header(commands, hdr) + cpp_toolchain_flags()
     tu = parse(hdr, args=args, options=cx.TranslationUnit.PARSE_INCOMPLETE)
     fatals = fatal_diagnostics(tu)
-    top = [c for c in tu.cursor.get_children()
-           if c.location.file and c.location.file.name == hdr]
+    top = [
+        c
+        for c in tu.cursor.get_children()
+        if c.location.file and c.location.file.name == hdr
+    ]
     print(f"   fatals={len(fatals)}  top-level cursors from header={len(top)}")
     for c in top[:6]:
         print(f"     {c.kind.name:22} {c.spelling}")

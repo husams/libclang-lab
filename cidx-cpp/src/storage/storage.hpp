@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 13;
+constexpr int kSchemaVersion = 14;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
 // SQL CHECK and by an application-side StorageError (§3.2).
@@ -63,12 +63,17 @@ public:
 
   // -- components ------------------------------------------------------------
   int64_t add_component(const std::string &name, const std::string &path,
-                        const std::string &kind = "repo");
+                        const std::string &kind = "repo",
+                        const std::optional<std::string> &version =
+                            std::nullopt);
+  // Two-step lookup: first by stored BASE path, then by effective root.
+  // Required because version-detection may split a trailing segment off the
+  // registered path (see §2 hazard in portable_paths_contract.md).
   std::optional<Component> get_component(const std::string &path);
   std::optional<Component> get_component_by_name(const std::string &name);
   std::optional<Component> get_component_by_id(int64_t component_id);
   // Longest-prefix match computed app-side (G16); nested components resolve
-  // to the deeper root.
+  // to the deeper root. Uses resolved_root (base+version) for comparison.
   std::optional<Component> component_for_path(const std::string &abs_path);
   std::vector<Component>
   list_components(const std::optional<std::string> &name = std::nullopt,
@@ -77,6 +82,14 @@ public:
   // via ON DELETE CASCADE, plus symbols indexed from those files (deleted
   // explicitly -- symbol file refs are ON DELETE SET NULL). For import --force.
   void delete_component(int64_t component_id);
+
+  // v14: version management
+  // Returns false when no component with that name exists.
+  bool set_component_version(const std::string &name,
+                             const std::optional<std::string> &version);
+  // Stored effective root: version ? normpath(join(path, version)) : path.
+  // NOT resolved (may contain $VAR). Static so callers can use it anywhere.
+  static std::string effective_root(const Component &comp);
 
   // -- directories -----------------------------------------------------------
   int64_t add_directory(int64_t component_id, const std::string &path);
@@ -281,6 +294,16 @@ public:
 
   // A8: single-edge sites with LIMIT (query.py:884-906)
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit);
+
+  // -- labels (v14) ----------------------------------------------------------
+  // Upsert on name; returns the row id.
+  int64_t add_label(const std::string &name, const std::string &path);
+  // Returns false when name absent.
+  bool remove_label(const std::string &name);
+  // Returns stored path or nullopt when absent.
+  std::optional<std::string> get_label(const std::string &name);
+  // Sorted by name; returns (name, stored path) pairs.
+  std::vector<std::pair<std::string, std::string>> list_labels();
 
   // Raw connection — exposed for tests (schema assertions on :memory: DBs)
   // and future maintenance commands. Not part of the indexing flow.

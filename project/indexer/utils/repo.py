@@ -24,6 +24,6 @@ def repo_name(root: str) -> str:
         cfg.read(cfg_path)
         url = cfg.get('remote "origin"', "url")
         name = url.rstrip("/").rsplit("/", 1)[-1]
-        return name[:-len(".git")] if name.endswith(".git") else name
+        return name[: -len(".git")] if name.endswith(".git") else name
     except (configparser.Error, OSError):
         return os.path.basename(root)

@@ -65,9 +65,7 @@ def _sysroot() -> str | None:
     if sys.platform != "darwin":
         return None
     try:
-        return subprocess.check_output(
-            ["xcrun", "--show-sdk-path"], text=True
-        ).strip()
+        return subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -81,6 +79,7 @@ def _resource_include() -> str | None:
     and finally `-print-resource-dir` of a PATH clang -- the pip wheel does
     not ship these headers at all.
     """
+
     def _check(inc: str) -> str | None:
         return inc if os.path.exists(os.path.join(inc, "stddef.h")) else None
 
@@ -92,16 +91,15 @@ def _resource_include() -> str | None:
     lib = os.environ.get(LIBCLANG_ENV)
     if lib:
         libdir = os.path.dirname(os.path.expanduser(lib))
-        for cand in sorted(glob(os.path.join(libdir, "clang", "*", "include")),
-                           reverse=True):
+        for cand in sorted(
+            glob(os.path.join(libdir, "clang", "*", "include")), reverse=True
+        ):
             inc = _check(cand)
             if inc:
                 return inc
     for cc in ("clang", "clang++"):
         try:
-            rd = subprocess.check_output(
-                [cc, "-print-resource-dir"], text=True
-            ).strip()
+            rd = subprocess.check_output([cc, "-print-resource-dir"], text=True).strip()
             inc = _check(os.path.join(rd, "include"))
             if inc:
                 return inc
@@ -109,10 +107,12 @@ def _resource_include() -> str | None:
             continue
     # last resort: well-known LLVM install prefixes, newest version first
     found = []
-    for pattern in ("/opt/llvm*/lib*/clang/*/include",
-                    "/usr/lib/llvm-*/lib/clang/*/include",
-                    "/usr/local/llvm*/lib/clang/*/include",
-                    "/usr/lib*/clang/*/include"):
+    for pattern in (
+        "/opt/llvm*/lib*/clang/*/include",
+        "/usr/lib/llvm-*/lib/clang/*/include",
+        "/usr/local/llvm*/lib/clang/*/include",
+        "/usr/lib*/clang/*/include",
+    ):
         for cand in glob(pattern):
             inc = _check(cand)
             if inc:
@@ -138,7 +138,10 @@ def _driver_search_dirs(driver: str, lang: str) -> tuple[str, ...]:
     try:
         proc = subprocess.run(
             [driver, "-E", "-x", lang, "-", "-v"],
-            input="", capture_output=True, text=True, timeout=30,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return ()
@@ -152,7 +155,7 @@ def _driver_search_dirs(driver: str, lang: str) -> tuple[str, ...]:
             break
         if active and line.startswith(" "):
             d = line.strip()
-            if d.endswith("(framework directory)"):    # macOS noise
+            if d.endswith("(framework directory)"):  # macOS noise
                 continue
             d = os.path.normpath(d)
             if os.path.isdir(d):
@@ -185,13 +188,14 @@ def _libclang_major() -> int:
     """Major version of the LOADED libclang (0 when undeterminable)."""
     try:
         from clang.cindex import _CXString
+
         fn = cx.conf.lib.clang_getClangVersion
         fn.restype = _CXString
-        cxstr = fn()                # MUST outlive the getCString copy below:
+        cxstr = fn()  # MUST outlive the getCString copy below:
         s = cx.conf.lib.clang_getCString(cxstr)  # points INTO cxstr, and the
-        if hasattr(s, "value"):     # _CXString destructor disposes the buffer
-            s = s.value             # (official clang>=17 bindings return a
-        if isinstance(s, bytes):    # c_interop_string here, not str)
+        if hasattr(s, "value"):  # _CXString destructor disposes the buffer
+            s = s.value  # (official clang>=17 bindings return a
+        if isinstance(s, bytes):  # c_interop_string here, not str)
             s = s.decode(errors="replace")
         del cxstr
         m = re.search(r"version (\d+)", s or "")
@@ -226,8 +230,11 @@ def _glibc_probe(driver: str, cpp: bool) -> tuple[bool, bool]:
 #: plain types where glibc's declarations would otherwise be unparseable.
 #: Parse-fidelity only -- no codegen ever happens here.
 _FLOATN_ALIASES = [
-    "-D_Float32=float", "-D_Float64=double", "-D_Float128=long double",
-    "-D_Float32x=double", "-D_Float64x=long double",
+    "-D_Float32=float",
+    "-D_Float64=double",
+    "-D_Float128=long double",
+    "-D_Float32x=double",
+    "-D_Float64x=long double",
 ]
 
 
@@ -300,7 +307,9 @@ def driver_flags(driver: str, cpp: bool = False) -> list[str]:
         # libclang (only its intrinsics headers may not).
         _log.warning(
             "no clang builtin headers found (set %s or install clang); "
-            "falling back to %s's own builtin headers", RESOURCE_ENV, driver
+            "falling back to %s's own builtin headers",
+            RESOURCE_ENV,
+            driver,
         )
         flags = ["-nostdinc", *gnuc]
         for d in dirs:
@@ -371,15 +380,20 @@ def _log_diagnostics(filename: str, diags: Sequence["cx.Diagnostic"]) -> None:
     carries the WARNING/ERROR level, so the CLI's warning counter stays
     one-per-file instead of one-per-diagnostic."""
     for d in diags[:_DIAG_LOG_CAP]:
-        _log.info("%s: diag %s:%d: %s",
-                  filename, d.location.file, d.location.line, d.spelling)
+        _log.info(
+            "%s: diag %s:%d: %s", filename, d.location.file, d.location.line, d.spelling
+        )
     if len(diags) > _DIAG_LOG_CAP:
-        _log.info("%s: ... %d more diagnostic(s) suppressed",
-                  filename, len(diags) - _DIAG_LOG_CAP)
+        _log.info(
+            "%s: ... %d more diagnostic(s) suppressed",
+            filename,
+            len(diags) - _DIAG_LOG_CAP,
+        )
 
 
-def fatal_diagnostics(tu: cx.TranslationUnit,
-                      level: int | None = None) -> list[cx.Diagnostic]:
+def fatal_diagnostics(
+    tu: cx.TranslationUnit, level: int | None = None
+) -> list[cx.Diagnostic]:
     """Diagnostics at/above `level` (default: severity >= ERROR)."""
     if level is None:
         level = cx.Diagnostic.Error
@@ -414,9 +428,11 @@ class _CXTUResourceUsageEntry(ctypes.Structure):
 
 
 class _CXTUResourceUsage(ctypes.Structure):
-    _fields_ = [("data", ctypes.c_void_p),
-                ("numEntries", ctypes.c_uint),
-                ("entries", ctypes.POINTER(_CXTUResourceUsageEntry))]
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("numEntries", ctypes.c_uint),
+        ("entries", ctypes.POINTER(_CXTUResourceUsageEntry)),
+    ]
 
 
 #: Cached (get, dispose, name) ctypes bindings. clang.cindex does NOT register
@@ -465,8 +481,13 @@ def _log_resource_usage(filename: str, tu: cx.TranslationUnit) -> None:
                 parts.append(f"{nm.decode() if nm else '?'}={entry.amount}")
     finally:
         dispose(usage)
-    _log.info("%s: TU memory total=%d bytes (%d KiB); %s",
-              filename, total, total // 1024, ", ".join(parts))
+    _log.info(
+        "%s: TU memory total=%d bytes (%d KiB); %s",
+        filename,
+        total,
+        total // 1024,
+        ", ".join(parts),
+    )
 
 
 def parse(
@@ -488,9 +509,11 @@ def parse(
     # -ferror-limit=0 lifts clang's default 20-error cap: hitting the cap
     # emits a FATAL 'too many errors emitted, stopping now' that aborts an
     # otherwise indexable TU while naming none of the real errors.
-    flags = (list(args)
-             + toolchain_flags(cpp=is_cpp(filename, args), driver=driver)
-             + ["-ferror-limit=0"])
+    flags = (
+        list(args)
+        + toolchain_flags(cpp=is_cpp(filename, args), driver=driver)
+        + ["-ferror-limit=0"]
+    )
     index = cx.Index.create()
     try:
         tu = index.parse(filename, args=flags, options=options)
@@ -501,15 +524,17 @@ def parse(
         fatals = fatal_diagnostics(tu, level)
         if fatals:
             summary = "; ".join(
-                f"{d.location.file}:{d.location.line}: {d.spelling}"
-                for d in fatals[:3]
+                f"{d.location.file}:{d.location.line}: {d.spelling}" for d in fatals[:3]
             )
             # The flag dump is debugging detail -- log it, keep it out of the
             # exception message the CLI shows on screen.
-            _log.error("%s: failed parse flags: %s; libclang: %s",
-                       filename, " ".join(flags), _libclang_major() or "?")
-            _log_diagnostics(filename, fatal_diagnostics(tu,
-                                                         cx.Diagnostic.Error))
+            _log.error(
+                "%s: failed parse flags: %s; libclang: %s",
+                filename,
+                " ".join(flags),
+                _libclang_major() or "?",
+            )
+            _log_diagnostics(filename, fatal_diagnostics(tu, cx.Diagnostic.Error))
             raise ClangParseError(
                 f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}"
             )
@@ -518,7 +543,10 @@ def parse(
             if errors:
                 _log.warning(
                     "%s: %d error diagnostic(s) ignored (%s=1 to abort)",
-                    filename, len(errors), STRICT_ENV)
+                    filename,
+                    len(errors),
+                    STRICT_ENV,
+                )
                 _log_diagnostics(filename, errors)
     if _mem_reporting_enabled():
         _log_resource_usage(filename, tu)

@@ -306,7 +306,8 @@ def test_p3_02_migration_v10_to_v11(tmp_path):
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
     assert int(ver) == SCHEMA_VERSION, (
-        f"expected schema_version={SCHEMA_VERSION} after migration, got {ver}")
+        f"expected schema_version={SCHEMA_VERSION} after migration, got {ver}"
+    )
 
     es_cols = {r[1] for r in db._conn.execute("PRAGMA table_info(edge_site)")}
     ca_cols = {r[1] for r in db._conn.execute("PRAGMA table_info(call_arg)")}
@@ -868,9 +869,14 @@ def test_p3_17b_reordered_forwarding_is_sound(tmp_path):
     with db.transaction():
         e_c = db.add_edge(callee_id, ids["A::rank"], C["calls"], count=1)
         db.add_edge_site(
-            e_c, cpp, 51, 14,
-            recv_src_kind="local", recv_type_usr="c:@S@A",
-            recv_decl_usr="callee17b_x", recv_param_pos=0,
+            e_c,
+            cpp,
+            51,
+            14,
+            recv_src_kind="local",
+            recv_type_usr="c:@S@A",
+            recv_decl_usr="callee17b_x",
+            recv_param_pos=0,
         )
 
     # wrapper(p, q) calls callee(q, p) — q (wrapper param 1) goes to callee arg 0
@@ -879,10 +885,12 @@ def test_p3_17b_reordered_forwarding_is_sound(tmp_path):
         e_w = db.add_edge(wrapper_id, callee_id, C["calls"], count=1)
         db.add_edge_site(e_w, cpp, 61, 5)
         # callee arg0 = q (wrapper's 2nd param), arg1 = p (wrapper's 1st param)
-        db.add_call_arg(e_w, cpp, 61, 5, 0, "local", type_usr="c:@S@A",
-                        decl_usr="wrapper17b_q")
-        db.add_call_arg(e_w, cpp, 61, 5, 1, "local", type_usr="c:@S@A",
-                        decl_usr="wrapper17b_p")
+        db.add_call_arg(
+            e_w, cpp, 61, 5, 0, "local", type_usr="c:@S@A", decl_usr="wrapper17b_q"
+        )
+        db.add_call_arg(
+            e_w, cpp, 61, 5, 1, "local", type_usr="c:@S@A", decl_usr="wrapper17b_p"
+        )
 
     # top() passes B at wrapper arg0 (p) and D at wrapper arg1 (q)
     top_id = _add_sym(db, "c:@F@top17b", "top17b", "function", cpp, 70)
