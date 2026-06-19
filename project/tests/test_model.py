@@ -16,8 +16,10 @@ from indexer.query import GraphQuery, EDGE_KINDS
 from indexer.model import (
     CodeBase,
     Function,
+    FunctionTemplate,
     Method,
     Class,
+    Namespace,
     Field,
     Variable,
     Type,
@@ -426,3 +428,88 @@ def test_type_resolves_to_declaration(cb, ids):
     assert t.name == "Base"
     decl = t.declaration()
     assert decl == cb.get(ids["Base"])
+
+
+# --------------------------------------------------------------------------- #
+# function templates surface as members / free functions (regression)
+#
+# FunctionTemplate is a sibling of Method/Function, not a subclass. A member
+# function template (e.g. Cache::set<T>) must still appear in Record.methods,
+# and a free function template must be findable via CodeBase.function() and
+# Namespace.functions. (cf. utl::BzRuleValueCache::set/get vanishing report.)
+# --------------------------------------------------------------------------- #
+
+
+def _build_template_db(db_path: str, repo: str) -> dict[str, int]:
+    os.makedirs(repo, exist_ok=True)
+    ids: dict[str, int] = {}
+    with Storage(db_path) as db:
+        comp = db.add_component("lab", repo)
+        root = db.add_directory(comp, "")
+        f = db.add_file(root, "t.hpp")
+
+        def sym(key, usr, spelling, kind, line, *, qual=None, parent=None,
+                access=None):
+            ids[key] = db.add_symbol(
+                Symbol(usr=usr, spelling=spelling, kind=kind,
+                       qual_name=qual or spelling, file_id=f, line=line, col=1,
+                       is_definition=True, parent_usr=parent, resolved=True,
+                       access=access)
+            )
+
+        # class Cache with a plain method + two member function templates
+        sym("Cache", "c:@S@Cache", "Cache", "class", 1, qual="Cache")
+        sym("Cache::clear", "c:@S@Cache@F@clear#", "clear", "method", 2,
+            qual="Cache::clear", parent="c:@S@Cache", access="public")
+        sym("Cache::set", "c:@S@Cache@FT@>1#Tset#", "set", "function-template",
+            3, qual="Cache::set", parent="c:@S@Cache", access="public")
+        sym("Cache::get", "c:@S@Cache@FT@>1#Tget#", "get", "function-template",
+            4, qual="Cache::get", parent="c:@S@Cache", access="public")
+        # namespace ns with a free function template
+        sym("ns", "c:@N@ns", "ns", "namespace", 10, qual="ns")
+        sym("ns::wrap", "c:@N@ns@FT@>1#Twrap#", "wrap", "function-template", 11,
+            qual="ns::wrap", parent="c:@N@ns")
+
+        # edges (add_edge does not auto-commit -> wrap in a transaction):
+        #   method_of (kind=9): member -> record
+        #   contains  (kind=3): namespace -> member
+        with db.transaction():
+            for m in ("Cache::clear", "Cache::set", "Cache::get"):
+                db.add_edge(ids[m], ids["Cache"], EDGE_KINDS["method_of"])
+            db.add_edge(ids["ns"], ids["ns::wrap"], EDGE_KINDS["contains"])
+    return ids
+
+
+def test_member_function_templates_in_methods(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    ids = _build_template_db(db_path, str(tmp_path / "r"))
+    with CodeBase(GraphQuery(db_path)) as cb:
+        cache = cb.get(ids["Cache"])
+        names = sorted(m.spelling for m in cache.methods)
+        # plain method AND both member templates present
+        assert names == ["clear", "get", "set"]
+        # the templates are typed as FunctionTemplate, the plain one as Method
+        by_name = {m.spelling: m for m in cache.methods}
+        assert isinstance(by_name["clear"], Method)
+        assert isinstance(by_name["set"], FunctionTemplate)
+        assert isinstance(by_name["get"], FunctionTemplate)
+
+
+def test_free_function_template_found_by_function_lookup(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _build_template_db(db_path, str(tmp_path / "r"))
+    with CodeBase(GraphQuery(db_path)) as cb:
+        f = cb.function("wrap")
+        assert isinstance(f, FunctionTemplate)
+        assert f.spelling == "wrap"
+
+
+def test_namespace_functions_include_templates(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    ids = _build_template_db(db_path, str(tmp_path / "r"))
+    with CodeBase(GraphQuery(db_path)) as cb:
+        ns = cb.get(ids["ns"])
+        assert isinstance(ns, Namespace)
+        names = sorted(e.spelling for e in ns.functions)
+        assert names == ["wrap"]
+        assert all(isinstance(e, FunctionTemplate) for e in ns.functions)
