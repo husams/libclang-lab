@@ -646,7 +646,13 @@ void Storage::migrate() {
 int64_t Storage::add_component(const std::string &name, const std::string &path,
                                const std::string &kind,
                                const std::optional<std::string> &version) {
-  const std::string abs = pathutil::abspath(path);
+  // Preserve indirected (portable) paths verbatim; absolutize plain paths.
+  // Mirrors Python: if "$" not in path and "<" not in path: path = abspath(path)
+  const std::string abs =
+      (path.find('$') == std::string::npos &&
+       path.find('<') == std::string::npos)
+          ? pathutil::abspath(path)
+          : path;
   // v14: COALESCE(excluded.version, component.version) so a re-import that
   // supplies NO version (excluded.version bound NULL) PRESERVES the existing
   // stored version instead of silently wiping it (contract §4.2).

@@ -258,7 +258,7 @@ TEST_CASE("v13 DB migrates to v14: component.version added, label table created"
   }
   cidx::SqliteDb raw(path);
   // Verify schema_version bumped to current (14).
-  CHECK(meta_version(raw) == std::to_string(cidx::Storage::kSchemaVersion));
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   // component.version column exists.
   CHECK(has_col(table_columns(raw, "component"), "version"));
   // label table exists.

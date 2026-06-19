@@ -23,27 +23,29 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,graph,ast} "
+    "{init,add-source,import,index,resolve,component,label,set,file,"
+    "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,graph,ast} "
+    "{init,add-source,import,index,resolve,component,label,set,file,"
+    "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,index,resolve,set,file,dump-compile-commands,"
-    "search,show,list,ls,delete,graph,ast}\n"
+    "  {init,add-source,import,index,resolve,component,label,set,file,"
+    "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
     "    index               index imported C/C++ files\n"
     "    resolve             finalize cross-repo edges and roll up edge counts\n"
+    "    component           inspect or modify a component\n"
+    "    label               manage include/arg label registry\n"
     "    set                 set a mutable file attribute (e.g. pending "
     "status)\n"
     "    file                inspect or edit one file's stored compile flags\n"
@@ -1053,19 +1055,20 @@ const char kLabelListHelp[] =
     "  --db PATH   operate on this index DB (default: the standard index)\n";
 
 const char kLabelResolveUsage[] =
-    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive] PATH\n";
+    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive-labels] PATH\n";
 
 const char kLabelResolveHelp[] =
-    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive] PATH\n"
+    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive-labels] PATH\n"
     "\n"
     "positional arguments:\n"
     "  PATH                stored path to resolve\n"
     "\n"
     "options:\n"
-    "  -h, --help          show this help message and exit\n"
-    "  --db PATH           operate on this index DB (default: the standard "
+    "  -h, --help              show this help message and exit\n"
+    "  --db PATH               operate on this index DB (default: the standard "
     "index)\n"
-    "  --no-autoderive     disable autoderive fallback (registry-only lookup)\n";
+    "  --no-autoderive-labels  disable autoderive fallback (registry-only "
+    "lookup)\n";
 
 // ---------------------------------------------------------------------------
 // Choice sets
@@ -1079,11 +1082,11 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",  "add-source", "import",                "index",
-    "resolve", "set",      "file",                  "dump-compile-commands",
-    "search",  "show",     "list",                  "ls",
-    "delete",  "graph",    "ast",
-    "component", "label"};
+    "init",      "add-source", "import",               "index",
+    "resolve",   "component",  "label",                "set",
+    "file",      "dump-compile-commands",
+    "search",    "show",       "list",                 "ls",
+    "delete",    "graph",      "ast"};
 const std::vector<std::string> kGraphWhats = {
     "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
     "dispatch"};
@@ -2078,8 +2081,8 @@ const Spec kLabelResolveSpec = {
     kLabelResolveHelp,
     {
         {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-        {"--no-autoderive", '\0', ValueKind::kNone, "--no-autoderive", nullptr,
-         0},
+        {"--no-autoderive-labels", '\0', ValueKind::kNone,
+         "--no-autoderive-labels", nullptr, 0},
     },
     {"PATH"},
     false,
@@ -2567,8 +2570,6 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       fill_ast_common(st);
       // cache sub-commands have no --cache/--no-cache toggle (Python design).
     }
-  }
-
   } else if (pa.command == "component") {
     // -- component sub-command (v14) ------------------------------------------
     CommandScan what = scan_command(argv, i, extras);
@@ -2661,7 +2662,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       }
       pa.label_path = st.positionals[0];
       pa.no_autoderive_labels =
-          st.flags.count("--no-autoderive") != 0;
+          st.flags.count("--no-autoderive-labels") != 0;
       pa.index_db = opt_value(st, "--db");
     }
   }

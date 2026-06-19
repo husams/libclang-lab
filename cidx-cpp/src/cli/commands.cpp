@@ -2493,11 +2493,12 @@ int cmd_component_show(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path);
   std::optional<Component> comp = db.get_component_by_name(name);
   if (!comp) {
-    *ctx.err << "error: component '" << name << "' not found\n";
+    *ctx.err << "error: no component named '" << name << "'\n";
     return 1;
   }
   // Output: key-value table, 14-char left-justified key col.
-  // Contract §6 component show format: f"{key:<14} {value}"
+  // Byte-identical with Python: f"{key:<14} {value}"
+  // Keys: name, kind, "base path", version, "effective root", "resolved root"
   const std::string eff = Storage::effective_root(*comp);
   const std::string resolved =
       pathutil::abspath(pathutil::resolve_fs_path(eff));
@@ -2506,10 +2507,10 @@ int cmd_component_show(const ParsedArgs &args, Context &ctx) {
   };
   row("name", comp->name);
   row("kind", comp->kind);
-  row("path", comp->path);
+  row("base path", comp->path);
   row("version", comp->version ? *comp->version : "(none)");
-  row("effective_root", eff);
-  row("resolved_root", resolved);
+  row("effective root", eff);
+  row("resolved root", resolved);
   return 0;
 }
 
@@ -2523,11 +2524,12 @@ int cmd_component_set_version(const ParsedArgs &args, Context &ctx) {
           : std::optional<std::string>{};
   const bool ok = db.set_component_version(name, ver);
   if (!ok) {
-    *ctx.err << "error: component '" << name << "' not found\n";
+    *ctx.err << "error: no component named '" << name << "'\n";
     return 1;
   }
   if (ver) {
-    *ctx.out << "component '" << name << "' version set to '" << *ver << "'\n";
+    // Python: f"component '{name}' version set to {version}" — unquoted version.
+    *ctx.out << "component '" << name << "' version set to " << *ver << "\n";
   } else {
     *ctx.out << "component '" << name << "' version cleared\n";
   }
@@ -2542,8 +2544,15 @@ int cmd_label_add(const ParsedArgs &args, Context &ctx) {
     return 1;
   }
   Storage db(ctx.index_path);
-  const int64_t lid = db.add_label(lname, lpath);
-  *ctx.out << "label #" << lid << ": <" << lname << "> -> " << lpath << "\n";
+  // Check existence before upsert so we can print "added" vs "updated".
+  // Mirrors Python: existing = db.get_label(args.name)
+  const std::optional<std::string> existing = db.get_label(lname);
+  db.add_label(lname, lpath);
+  if (!existing) {
+    *ctx.out << "added label " << lname << " -> " << lpath << "\n";
+  } else {
+    *ctx.out << "updated label " << lname << " -> " << lpath << "\n";
+  }
   return 0;
 }
 
@@ -2552,10 +2561,11 @@ int cmd_label_rm(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path);
   const bool removed = db.remove_label(lname);
   if (!removed) {
-    *ctx.err << "error: label '" << lname << "' not found\n";
+    *ctx.err << "error: no label named '" << lname << "'\n";
     return 1;
   }
-  *ctx.out << "label '" << lname << "' removed\n";
+  // Python: f"removed label {args.name}" (no quotes around name)
+  *ctx.out << "removed label " << lname << "\n";
   return 0;
 }
 
@@ -2563,23 +2573,44 @@ int cmd_label_list(const ParsedArgs &args, Context &ctx) {
   (void)args;
   Storage db(ctx.index_path);
   const auto labels = db.list_labels();
+  if (labels.empty()) {
+    *ctx.out << "0 label(s)\n";
+    return 0;
+  }
+  // Dynamic column width: max(len(name)) + 2-space separator.
+  // Python: width = max(len(name) for name, _ in labels)
+  //         f"{name:<{width}}  {path}"
+  std::size_t width = 0;
   for (const auto &[lname, lpath] : labels) {
-    // f"{key:<14} {value}" — contract §6 label list format.
-    *ctx.out << fmt::ljust(lname, 14) << " " << lpath << "\n";
+    (void)lpath;
+    if (lname.size() > width) width = lname.size();
+  }
+  for (const auto &[lname, lpath] : labels) {
+    *ctx.out << fmt::ljust(lname, static_cast<int>(width)) << "  " << lpath
+             << "\n";
   }
   *ctx.out << labels.size() << " label(s)\n";
   return 0;
 }
 
 int cmd_label_resolve(const ParsedArgs &args, Context &ctx) {
-  const std::string stored = args.label_path ? *args.label_path : std::string();
+  std::string token = args.label_path ? *args.label_path : std::string();
+  // Parity with Python: if no '<' or '$' in the token, treat it as a bare
+  // label name and wrap it: f"<{token}>".
+  if (token.find('<') == std::string::npos &&
+      token.find('$') == std::string::npos) {
+    token = "<" + token + ">";
+  }
   Storage db(ctx.index_path);
   // Build a LabelResolver backed by the DB.
   const bool autoderive = !args.no_autoderive_labels;
   pathutil::LabelResolver resolver(
       [&db](const std::string &n) { return db.get_label(n); }, autoderive);
+  const std::string raw = pathutil::resolve_fs_path(token, resolver);
+  // Apply abspath only for bare paths (not compound tokens like -I<...>).
+  // resolve_fs_path contract: abspath is the caller's responsibility.
   const std::string resolved =
-      pathutil::abspath(pathutil::resolve_fs_path(stored, resolver));
+      (!raw.empty() && raw[0] == '-') ? raw : pathutil::abspath(raw);
   *ctx.out << resolved << "\n";
   return 0;
 }

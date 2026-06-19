@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 
 
 def cache_dir() -> str:
@@ -1406,6 +1406,10 @@ def cmd_label_resolve(args) -> int:
         if "<" not in token and "$" not in token:
             token = f"<{token}>"
         result = pathx.resolve_fs_path(token, lookup=lookup, autoderive=autoderive)
+        # Apply abspath only for bare paths (not compound tokens like -I<...>).
+        # resolve_fs_path docstring: abspath is the caller's responsibility.
+        if not result.startswith("-"):
+            result = os.path.abspath(result)
     print(result)
     return 0
 
@@ -1413,12 +1417,6 @@ def cmd_label_resolve(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx", description="cidx command-line skeleton")
     ap.add_argument("--version", action="version", version=f"cidx {VERSION}")
-    ap.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="index database override (alternative to per-subcommand --db)",
-    )
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="create a blank index database")
@@ -1508,16 +1506,11 @@ def main(argv=None) -> int:
     csub = p.add_subparsers(dest="comp_action", required=True)
 
     def _db_arg(q):
-        """Add a standard --db (index database override) argument.
-
-        Uses default=SUPPRESS so that the subcommand's absent --db does not
-        clobber a top-level --db value already captured in args.graph_db.
-        """
+        """Add a standard --db (index database override) argument."""
         q.add_argument(
             "--db",
             dest="graph_db",
             metavar="PATH",
-            default=argparse.SUPPRESS,
             help="index database (default: the standard cache index)",
         )
 

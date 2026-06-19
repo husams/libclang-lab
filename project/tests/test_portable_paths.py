@@ -764,7 +764,7 @@ def comp_db(tmp_path):
 
 def test_component_show_versioned(comp_db, capsys, monkeypatch):
     monkeypatch.setenv("REP", "/home/u/src")
-    rc, out, err = run(["--db", comp_db, "component", "show", "libfoo"], capsys)
+    rc, out, err = run(["component", "show", "--db", comp_db, "libfoo"], capsys)
     assert rc == 0
     assert "name           libfoo" in out
     assert "kind           external" in out
@@ -776,7 +776,7 @@ def test_component_show_versioned(comp_db, capsys, monkeypatch):
 
 def test_component_show_unversioned_var_base(comp_db, capsys, monkeypatch):
     monkeypatch.setenv("REP", "/home/u/src")
-    rc, out, err = run(["--db", comp_db, "component", "show", "app"], capsys)
+    rc, out, err = run(["component", "show", "--db", comp_db, "app"], capsys)
     assert rc == 0
     assert "name           app" in out
     assert "kind           repo" in out
@@ -787,7 +787,7 @@ def test_component_show_unversioned_var_base(comp_db, capsys, monkeypatch):
 
 
 def test_component_show_unknown(comp_db, capsys):
-    rc, out, err = run(["--db", comp_db, "component", "show", "notexist"], capsys)
+    rc, out, err = run(["component", "show", "--db", comp_db, "notexist"], capsys)
     assert rc == 1
     assert "error: no component named 'notexist'" in err
 
@@ -795,7 +795,7 @@ def test_component_show_unknown(comp_db, capsys):
 def test_component_show_field_width(comp_db, capsys, monkeypatch):
     """Every key is left-justified in a 14-char field (§8.1 format check)."""
     monkeypatch.setenv("REP", "/home/u/src")
-    rc, out, _ = run(["--db", comp_db, "component", "show", "libfoo"], capsys)
+    rc, out, _ = run(["component", "show", "--db", comp_db, "libfoo"], capsys)
     assert rc == 0
     for line in out.strip().splitlines():
         # The value starts at offset 15 (14 chars key + 1 space).
@@ -812,7 +812,7 @@ def test_component_show_field_width(comp_db, capsys, monkeypatch):
 
 def test_component_set_version(comp_db, capsys):
     rc, out, err = run(
-        ["--db", comp_db, "component", "set-version", "libfoo", "2.0.0"], capsys
+        ["component", "set-version", "--db", comp_db, "libfoo", "2.0.0"], capsys
     )
     assert rc == 0
     assert "component 'libfoo' version set to 2.0.0" in out
@@ -823,7 +823,7 @@ def test_component_set_version(comp_db, capsys):
 
 def test_component_set_version_clear(comp_db, capsys):
     rc, out, err = run(
-        ["--db", comp_db, "component", "set-version", "libfoo", ""], capsys
+        ["component", "set-version", "--db", comp_db, "libfoo", ""], capsys
     )
     assert rc == 0
     assert "component 'libfoo' version cleared" in out
@@ -834,14 +834,14 @@ def test_component_set_version_clear(comp_db, capsys):
 
 def test_component_set_version_no_v_arg(comp_db, capsys):
     """Omitting V (no positional arg) clears the version."""
-    rc, out, err = run(["--db", comp_db, "component", "set-version", "libfoo"], capsys)
+    rc, out, err = run(["component", "set-version", "--db", comp_db, "libfoo"], capsys)
     assert rc == 0
     assert "version cleared" in out
 
 
 def test_component_set_version_unknown(comp_db, capsys):
     rc, out, err = run(
-        ["--db", comp_db, "component", "set-version", "nobody", "1.0"], capsys
+        ["component", "set-version", "--db", comp_db, "nobody", "1.0"], capsys
     )
     assert rc == 1
     assert "error: no component named 'nobody'" in err
@@ -862,7 +862,7 @@ def db_with_labels(tmp_path):
 
 def test_label_add(db_with_labels, capsys):
     rc, out, err = run(
-        ["--db", db_with_labels, "label", "add", "libfoo-include", "$REP/foo/include"],
+        ["label", "add", "--db", db_with_labels, "libfoo-include", "$REP/foo/include"],
         capsys,
     )
     assert rc == 0
@@ -870,40 +870,40 @@ def test_label_add(db_with_labels, capsys):
 
 
 def test_label_add_update(db_with_labels, capsys):
-    run(["--db", db_with_labels, "label", "add", "libfoo-include", "/v1"], capsys)
+    run(["label", "add", "--db", db_with_labels, "libfoo-include", "/v1"], capsys)
     rc, out, err = run(
-        ["--db", db_with_labels, "label", "add", "libfoo-include", "/v2"], capsys
+        ["label", "add", "--db", db_with_labels, "libfoo-include", "/v2"], capsys
     )
     assert rc == 0
     assert "updated label libfoo-include -> /v2" in out
 
 
 def test_label_rm(db_with_labels, capsys):
-    run(["--db", db_with_labels, "label", "add", "toremove", "/x"], capsys)
-    rc, out, err = run(["--db", db_with_labels, "label", "rm", "toremove"], capsys)
+    run(["label", "add", "--db", db_with_labels, "toremove", "/x"], capsys)
+    rc, out, err = run(["label", "rm", "--db", db_with_labels, "toremove"], capsys)
     assert rc == 0
     assert "removed label toremove" in out
 
 
 def test_label_rm_absent(db_with_labels, capsys):
-    rc, out, err = run(["--db", db_with_labels, "label", "rm", "nope"], capsys)
+    rc, out, err = run(["label", "rm", "--db", db_with_labels, "nope"], capsys)
     assert rc == 1
     assert "error: no label named 'nope'" in err
 
 
 def test_label_list_empty(db_with_labels, capsys):
-    rc, out, err = run(["--db", db_with_labels, "label", "list"], capsys)
+    rc, out, err = run(["label", "list", "--db", db_with_labels], capsys)
     assert rc == 0
     assert "0 label(s)" in out
 
 
 def test_label_list_sorted(db_with_labels, capsys):
     run(
-        ["--db", db_with_labels, "label", "add", "libfoo-include", "$REP/foo/include"],
+        ["label", "add", "--db", db_with_labels, "libfoo-include", "$REP/foo/include"],
         capsys,
     )
-    run(["--db", db_with_labels, "label", "add", "libbar", "/opt/bar"], capsys)
-    rc, out, err = run(["--db", db_with_labels, "label", "list"], capsys)
+    run(["label", "add", "--db", db_with_labels, "libbar", "/opt/bar"], capsys)
+    rc, out, err = run(["label", "list", "--db", db_with_labels], capsys)
     assert rc == 0
     lines = out.strip().splitlines()
     # Last line is the count.
@@ -921,11 +921,11 @@ def test_label_list_sorted(db_with_labels, capsys):
 def test_label_resolve_registry(db_with_labels, capsys, monkeypatch):
     monkeypatch.setenv("REP", "/opt")
     run(
-        ["--db", db_with_labels, "label", "add", "libfoo-include", "$REP/foo/include"],
+        ["label", "add", "--db", db_with_labels, "libfoo-include", "$REP/foo/include"],
         capsys,
     )
     rc, out, err = run(
-        ["--db", db_with_labels, "label", "resolve", "libfoo-include"], capsys
+        ["label", "resolve", "--db", db_with_labels, "libfoo-include"], capsys
     )
     assert rc == 0
     assert out.strip() == "/opt/foo/include"
@@ -933,7 +933,7 @@ def test_label_resolve_registry(db_with_labels, capsys, monkeypatch):
 
 def test_label_resolve_autoderive(db_with_labels, capsys):
     rc, out, err = run(
-        ["--db", db_with_labels, "label", "resolve", "usr-local-include"], capsys
+        ["label", "resolve", "--db", db_with_labels, "usr-local-include"], capsys
     )
     assert rc == 0
     assert out.strip() == "/usr/local/include"
@@ -942,13 +942,13 @@ def test_label_resolve_autoderive(db_with_labels, capsys):
 def test_label_resolve_token_with_angle(db_with_labels, capsys, monkeypatch):
     monkeypatch.setenv("REP", "/opt")
     run(
-        ["--db", db_with_labels, "label", "add", "libfoo-include", "$REP/foo/include"],
+        ["label", "add", "--db", db_with_labels, "libfoo-include", "$REP/foo/include"],
         capsys,
     )
     # Tokens starting with '-' must be preceded by '--' to avoid argparse treating
     # them as flags.
     rc, out, err = run(
-        ["--db", db_with_labels, "label", "resolve", "--", "-I<libfoo-include>/x"],
+        ["label", "resolve", "--db", db_with_labels, "--", "-I<libfoo-include>/x"],
         capsys,
     )
     assert rc == 0
@@ -958,7 +958,7 @@ def test_label_resolve_token_with_angle(db_with_labels, capsys, monkeypatch):
 def test_label_resolve_always_exit_0(db_with_labels, capsys):
     """resolve never errors even on an unknown label with autoderive on."""
     rc, out, err = run(
-        ["--db", db_with_labels, "label", "resolve", "totally-unknown-label"], capsys
+        ["label", "resolve", "--db", db_with_labels, "totally-unknown-label"], capsys
     )
     assert rc == 0
     assert out.strip() == "/totally/unknown/label"
@@ -969,7 +969,7 @@ def test_label_resolve_always_exit_0(db_with_labels, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_import_detects_version(tmp_path, capsys):
+def test_import_detects_version(tmp_path, capsys, monkeypatch):
     """import auto-detects trailing version segment from compile_commands root."""
     import json
 
@@ -984,7 +984,9 @@ def test_import_detects_version(tmp_path, capsys):
     with open(cdb_path, "w") as fh:
         json.dump(cdb, fh)
     db_path = str(tmp_path / "idx.db")
-    rc, out, err = run(["--db", db_path, "import", "--db", cdb_path], capsys)
+    # Use monkeypatch to redirect the standard index path to our tmp DB.
+    monkeypatch.setattr(cli, "index_path", lambda: db_path)
+    rc, out, err = run(["import", "--db", cdb_path], capsys)
     assert rc == 0
     with Storage(db_path) as db:
         comp = db.get_component_by_name("myproject")
@@ -997,7 +999,7 @@ def test_import_detects_version(tmp_path, capsys):
     assert comp.version == "1.0.0"
 
 
-def test_import_no_detect_version(tmp_path, capsys):
+def test_import_no_detect_version(tmp_path, capsys, monkeypatch):
     """--no-detect-version disables splitting."""
     import json
 
@@ -1011,8 +1013,10 @@ def test_import_no_detect_version(tmp_path, capsys):
     with open(cdb_path, "w") as fh:
         json.dump(cdb, fh)
     db_path = str(tmp_path / "idx.db")
+    # Use monkeypatch to redirect the standard index path to our tmp DB.
+    monkeypatch.setattr(cli, "index_path", lambda: db_path)
     rc, out, err = run(
-        ["--db", db_path, "import", "--db", cdb_path, "--no-detect-version"], capsys
+        ["import", "--db", cdb_path, "--no-detect-version"], capsys
     )
     assert rc == 0
     with Storage(db_path) as db:
