@@ -513,8 +513,7 @@ TEST_CASE("args: missing required option -> exit 2 (add-source, import)") {
   f = parse_fail({"import"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx import [-h] --db DB [--name NAME] [--force] [--version V]\n"
-        "                   [--no-detect-version] [--no-alias]\n"
+        "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
         "cidx import: error: the following arguments are required: "
         "--db\n");
 }
@@ -779,12 +778,12 @@ TEST_CASE("args: index collects FILE... and --source") {
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {
-  // $ python3 -m indexer --version   -> "cidx 0.6.0" on stdout, exit 0
+  // $ python3 -m indexer --version   -> "cidx 0.7.0" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.6.0");
+  CHECK(std::string(cli::kVersion) == "0.7.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1263,12 +1262,12 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   // $ python3 -m indexer list components
   CmdResult r = run_cli({"list", "components"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      {ROOT}\n1 component(s)\n"));
+  CHECK(r.out == g.expect("   1  gold  repo      -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer ls components   (alias, same output)
   r = run_cli({"ls", "components"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      {ROOT}\n1 component(s)\n"));
+  CHECK(r.out == g.expect("   1  gold  repo      -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer list components --kind external   (0 rows, exit 1)
   r = run_cli({"list", "components", "--kind", "external"}, g.cache);
@@ -1278,7 +1277,7 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   // $ python3 -m indexer list components gld   (char-in-order fuzzy)
   r = run_cli({"list", "components", "gld"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      {ROOT}\n1 component(s)\n"));
+  CHECK(r.out == g.expect("   1  gold  repo      -  {ROOT}\n1 component(s)\n"));
 }
 
 TEST_CASE("list dirs: table + unknown component error") {
@@ -1309,24 +1308,24 @@ TEST_CASE("list files: idx/pend marks, --indexed/--pending, --dir scope") {
   // $ python3 -m indexer list files
   CmdResult r = run_cli({"list", "files"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   2  pend  {ROOT}/include/a.h\n"
-                          "   1  idx   {ROOT}/src/a.c\n"
+  CHECK(r.out == g.expect("   2  pend  -  {ROOT}/include/a.h\n"
+                          "   1  idx   -  {ROOT}/src/a.c\n"
                           "2 file(s)\n"));
 
   // $ python3 -m indexer list files --pending
   r = run_cli({"list", "files", "--pending"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   2  pend  {ROOT}/include/a.h\n1 file(s)\n"));
+  CHECK(r.out == g.expect("   2  pend  -  {ROOT}/include/a.h\n1 file(s)\n"));
 
   // $ python3 -m indexer list files --indexed
   r = run_cli({"list", "files", "--indexed"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  idx   {ROOT}/src/a.c\n1 file(s)\n"));
+  CHECK(r.out == g.expect("   1  idx   -  {ROOT}/src/a.c\n1 file(s)\n"));
 
   // $ python3 -m indexer list files -c gold -d src
   r = run_cli({"list", "files", "-c", "gold", "-d", "src"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  idx   {ROOT}/src/a.c\n1 file(s)\n"));
+  CHECK(r.out == g.expect("   1  idx   -  {ROOT}/src/a.c\n1 file(s)\n"));
 }
 
 TEST_CASE("list files/symbols: --dir without --component -> exit 1") {

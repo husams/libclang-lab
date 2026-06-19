@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 
 def cache_dir() -> str:
@@ -196,8 +196,10 @@ def cmd_import(args) -> int:
     root = groot or compiledb.db_directory(args.db)
     name = args.name or (repo_name(root) if groot else os.path.basename(root))
 
-    # Version detection / override for the root component.
-    base, version = _resolve_version(args, root)
+    # Version is a per-component property: import only AUTO-DETECTS a trailing
+    # version segment (e.g. .../1.4.0). Manual version control lives in
+    # `cidx component set-version`, not on import.
+    base, version = compiledb.split_base_version(root)
 
     imported, skipped = 0, 0
     with Storage(args.index) as db:
@@ -682,8 +684,10 @@ def cmd_list_components(args) -> int:
     with Storage(args.index) as db:
         comps = db.list_components(name=args.pattern, kind=args.kind)
         width = max((len(c.name) for c in comps), default=0)
+        vw = max((len(c.version) for c in comps if c.version), default=1)
         for c in comps:
-            print(f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {c.path}")
+            ver = c.version if c.version else "-"
+            print(f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {c.path}")
     print(f"{len(comps)} component(s)")
     return 0 if comps else 1
 
@@ -726,9 +730,15 @@ def cmd_list_files(args) -> int:
             name=args.pattern,
             indexed=indexed,
         )
-        for rec, path in rows:
+        # Version is a per-component property; show each file's owning-component
+        # version. Map file -> directory -> component -> version (two queries).
+        comp_ver = {c.id: c.version for c in db.list_components()}
+        dir_comp = {d.id: d.component_id for d, _ in db.list_directories()}
+        vers = [comp_ver.get(dir_comp.get(rec.directory_id)) or "-" for rec, _ in rows]
+        vw = max((len(v) for v in vers), default=1)
+        for (rec, path), ver in zip(rows, vers):
             mark = "idx " if rec.indexed else "pend"
-            print(f"{rec.id:>4}  {mark}  {path}")
+            print(f"{rec.id:>4}  {mark}  {ver:<{vw}}  {path}")
     print(f"{len(rows)} file(s)")
     return 0 if rows else 1
 
@@ -1504,17 +1514,6 @@ def main(argv=None) -> int:
         action="store_true",
         help="reimport: delete the existing component (its files "
         "and indexed symbols) before importing",
-    )
-    p.add_argument(
-        "--version",
-        metavar="V",
-        default=None,
-        help="set component version to V (overrides auto-detection; '' clears)",
-    )
-    p.add_argument(
-        "--no-detect-version",
-        action="store_true",
-        help="disable trailing-segment version detection",
     )
     p.add_argument(
         "--no-alias",

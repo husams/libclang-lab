@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.6.0";
+inline constexpr const char *kVersion = "0.7.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -95,8 +95,8 @@ struct ParsedArgs {
   std::string access{"all"};             // --access {public,protected,private,all}
 
   // -- portable-paths (v14) fields -------------------------------------------
-  std::optional<std::string> version_str; // --version VER (import/add-source)
-  bool no_detect_version = false;          // --no-detect-version
+  std::optional<std::string> version_str; // --version VER (add-source)
+  bool no_detect_version = false;          // --no-detect-version (add-source)
   bool no_autoderive_labels = false;       // --no-autoderive-labels (index)
   std::optional<std::string> label_token; // label add/rm/resolve NAME
   std::optional<std::string> label_path;  // label add PATH

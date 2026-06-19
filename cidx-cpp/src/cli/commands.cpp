@@ -389,12 +389,12 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
       args.name ? *args.name
                 : (groot ? repo::repo_name(root) : pathutil::basename(root));
 
-  // v14: version auto-detection (split_base_version) then explicit override.
+  // Version is a per-component property: import only AUTO-DETECTS a trailing
+  // version segment (e.g. .../1.4.0). Manual version control lives in
+  // `cidx component set-version`, not on import. Mirrors Python cmd_import.
   std::string stored_root = root;
   std::optional<std::string> version_to_store;
-  if (args.version_str) {
-    version_to_store = *args.version_str;
-  } else if (!args.no_detect_version) {
+  {
     const auto [base, seg] = CompileDb::split_base_version(root);
     if (!seg.empty()) {
       stored_root = base;
@@ -514,14 +514,19 @@ int cmd_list_components(const ParsedArgs &args, Context &ctx) {
   const std::vector<Component> comps =
       db.list_components(args.pattern, args.kind);
   std::size_t width = 0;
+  std::size_t vw = 1;
   for (const Component &c : comps) {
     width = std::max(width, c.name.size());
+    if (c.version) {
+      vw = std::max(vw, c.version->size());
+    }
   }
   for (const Component &c : comps) {
-    // f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {c.path}"
+    const std::string ver = c.version ? *c.version : "-";
+    // f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {c.path}"
     *ctx.out << fmt::rjust(std::to_string(c.id), 4) << "  "
              << fmt::ljust(c.name, width) << "  " << fmt::ljust(c.kind, 8)
-             << "  " << c.path << "\n";
+             << "  " << fmt::ljust(ver, vw) << "  " << c.path << "\n";
   }
   *ctx.out << comps.size() << " component(s)\n";
   return comps.empty() ? 1 : 0;
@@ -570,12 +575,37 @@ int cmd_list_files(const ParsedArgs &args, Context &ctx) {
   const auto rows =
       db.list_files(comp ? std::optional<int64_t>(comp->id) : std::nullopt,
                     args.dir, args.pattern, indexed);
+  // Version is a per-component property; show each file's owning-component
+  // version. Map file -> directory -> component -> version (two queries).
+  std::unordered_map<int64_t, std::optional<std::string>> comp_ver;
+  for (const Component &c : db.list_components()) {
+    comp_ver[c.id] = c.version;
+  }
+  std::unordered_map<int64_t, int64_t> dir_comp;
+  for (const auto &pr : db.list_directories()) {
+    dir_comp[pr.first.id] = pr.first.component_id;
+  }
+  std::vector<std::string> vers;
+  vers.reserve(rows.size());
+  std::size_t vw = 1;
   for (const auto &row : rows) {
-    const File &rec = row.first;
+    std::string v = "-";
+    const auto dit = dir_comp.find(row.first.directory_id);
+    if (dit != dir_comp.end()) {
+      const auto cit = comp_ver.find(dit->second);
+      if (cit != comp_ver.end() && cit->second && !cit->second->empty()) {
+        v = *cit->second;
+      }
+    }
+    vw = std::max(vw, v.size());
+    vers.push_back(v);
+  }
+  for (std::size_t k = 0; k < rows.size(); ++k) {
+    const File &rec = rows[k].first;
     const char *mark = rec.indexed ? "idx " : "pend";
-    // f"{rec.id:>4}  {mark}  {path}"
+    // f"{rec.id:>4}  {mark}  {ver:<{vw}}  {path}"
     *ctx.out << fmt::rjust(std::to_string(rec.id), 4) << "  " << mark << "  "
-             << row.second << "\n";
+             << fmt::ljust(vers[k], vw) << "  " << rows[k].second << "\n";
   }
   *ctx.out << rows.size() << " file(s)\n";
   return rows.empty() ? 1 : 0;

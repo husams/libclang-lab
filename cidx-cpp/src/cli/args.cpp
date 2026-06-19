@@ -100,28 +100,20 @@ const char kAddSourceHelp[] =
     "  --no-detect-version   disable trailing-segment version detection\n";
 
 const char kImportUsage[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--version V]\n"
-    "                   [--no-detect-version] [--no-alias]\n";
+    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n";
 
 const char kImportHelp[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--version V]\n"
-    "                   [--no-detect-version] [--no-alias]\n"
+    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
     "\n"
     "options:\n"
-    "  -h, --help           show this help message and exit\n"
-    "  --db DB              compile_commands.json (or the directory holding "
-    "it)\n"
-    "  --name NAME          component name override\n"
-    "  --force              reimport: delete the existing component (its files "
-    "and\n"
-    "                       indexed symbols) before importing\n"
-    "  --version V          set component version to V (overrides "
-    "auto-detection;\n"
-    "                       '' clears)\n"
-    "  --no-detect-version  disable trailing-segment version detection\n"
-    "  --no-alias           do not rewrite include paths to <label> tokens via "
-    "the\n"
-    "                       registry\n";
+    "  -h, --help   show this help message and exit\n"
+    "  --db DB      compile_commands.json (or the directory holding it)\n"
+    "  --name NAME  component name override\n"
+    "  --force      reimport: delete the existing component (its files and "
+    "indexed\n"
+    "               symbols) before importing\n"
+    "  --no-alias   do not rewrite include paths to <label> tokens via the "
+    "registry\n";
 
 const char kRealiasUsage[] =
     "usage: cidx realias [-h] [--db PATH] [COMPONENT]\n";
@@ -1582,10 +1574,6 @@ const Spec kImportSpec = {
         {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
         {"--force", '\0', ValueKind::kNone, "--force", nullptr, 0},
-        // v14: portable-paths
-        {"--version", '\0', ValueKind::kString, "--version", nullptr, 0},
-        {"--no-detect-version", '\0', ValueKind::kNone, "--no-detect-version",
-         nullptr, 0},
         // v0.6.0: aliasing
         {"--no-alias", '\0', ValueKind::kNone, "--no-alias", nullptr, 0},
     },
@@ -2190,8 +2178,6 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.db = st.values["--db"];
     pa.name = opt_value(st, "--name");
     pa.force = st.flags.count("--force") != 0;
-    pa.version_str = opt_value(st, "--version");
-    pa.no_detect_version = st.flags.count("--no-detect-version") != 0;
     pa.no_alias = st.flags.count("--no-alias") != 0;
   } else if (pa.command == "realias") {
     ParseState st = parse_leaf(kRealiasSpec, argv, i, extras);
