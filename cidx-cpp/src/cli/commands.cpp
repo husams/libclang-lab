@@ -386,16 +386,27 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
                << " at " << root << " (files and indexed symbols)\n";
     }
   }
-  const int64_t cid = db.add_component(name, root); // kind default "repo"
-  *ctx.out << "component #" << cid << ": " << name << " at " << root << "\n";
+  // The db-dir/git-root component is created LAZILY: only when a source matches
+  // no already-registered component. Matching first means an import whose
+  // sources are already covered by existing components (e.g. sub-components
+  // Comp_1/Comp_2) does not spawn a spurious project component and re-home
+  // those files under it. Mirrors Python cmd_import.
+  std::optional<int64_t> root_cid;
   {
     Transaction txn = db.transaction();
     for (const CompileCommand &cmd : commands) {
       const std::string src = source_path(cmd);
       if (!db.component_for_path(src)) {
-        *ctx.err << "  skip (outside any component): " << src << "\n";
-        ++skipped;
-        continue;
+        if (!root_cid) {
+          root_cid = db.add_component(name, root); // kind default "repo"
+          *ctx.out << "component #" << *root_cid << ": " << name << " at "
+                   << root << "\n";
+        }
+        if (!db.component_for_path(src)) {
+          *ctx.err << "  skip (outside any component): " << src << "\n";
+          ++skipped;
+          continue;
+        }
       }
       db.add_file_path(src, file_mtime(src), md5_of(src), cmd.args, cmd.driver);
       ++imported;

@@ -64,7 +64,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 
 def cache_dir() -> str:
@@ -189,15 +189,26 @@ def cmd_import(args) -> int:
                     f"force: removed existing component #{existing.id} "
                     f"at {root} (files and indexed symbols)"
                 )
-        cid = db.add_component(name, root)
-        print(f"component #{cid}: {name} at {root}")
+        # The db-dir/git-root component is created LAZILY: only when a source
+        # matches no already-registered component. Matching first means an
+        # import whose sources are already covered by existing components
+        # (e.g. sub-components Comp_1/Comp_2) does not spawn a spurious project
+        # component and re-home those files under it.
+        root_cid = None
         with db.transaction():
             for cmd in commands:
                 src = compiledb.source_path(cmd)
                 if db.component_for_path(src) is None:
-                    print(f"  skip (outside any component): {src}", file=sys.stderr)
-                    skipped += 1
-                    continue
+                    if root_cid is None:
+                        root_cid = db.add_component(name, root)
+                        print(f"component #{root_cid}: {name} at {root}")
+                    if db.component_for_path(src) is None:
+                        print(
+                            f"  skip (outside any component): {src}",
+                            file=sys.stderr,
+                        )
+                        skipped += 1
+                        continue
                 mtime = os.path.getmtime(src) if os.path.exists(src) else None
                 db.add_file_path(
                     src,
