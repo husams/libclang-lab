@@ -36,8 +36,7 @@ def main() -> None:
         #                   file, line, col, is_definition, ...}
         doc = {
             "symbol": fn.to_dict(),
-            "stats": {"symbols": g.stats().get("symbols"),
-                      "edges": g.edge_count()},
+            "stats": {"symbols": g.stats().get("symbols"), "edges": g.edge_count()},
         }
 
         # Only add graph sections when the index actually has edges.
@@ -53,7 +52,7 @@ def main() -> None:
             refs = []
             for e in g.edges_out(fn, kinds=("calls",), limit=10):
                 sites = g.sites(e, limit=20)
-                refs.append(e.to_dict(sites=sites))   # includes sites[] in JSON
+                refs.append(e.to_dict(sites=sites))  # includes sites[] in JSON
             doc["outgoing_calls"] = refs
 
         # indent=2 for human reading; drop it (or use separators) for compact
@@ -67,8 +66,9 @@ def _pick_symbol(g: GraphQuery) -> Sym | None:
     """
     has_edges = g.edge_count() > 0
     for cand in g.find("main", kind="function", limit=10):
-        if not cand.is_stub and (not has_edges
-                                 or g.edges_out(cand, kinds=("calls",), limit=1)):
+        if not cand.is_stub and (
+            not has_edges or g.edges_out(cand, kinds=("calls",), limit=1)
+        ):
             return cand
     for s in g.find("", kind="function", limit=3000):
         if s.is_stub:

@@ -28,8 +28,7 @@ from indexer import open_query, GraphQuery, Sym
 def main() -> None:
     with open_query() as g:
         if g.edge_count() == 0:
-            print("This index has no edges — see README to regenerate, then "
-                  "re-run.")
+            print("This index has no edges — see README to regenerate, then re-run.")
             return
 
         # Pick any function that actually participates in the call graph, so
@@ -70,8 +69,7 @@ def main() -> None:
         for e in g.references(fn, limit=10):
             # e.peer is the using/calling symbol; e.kind is 'calls' or 'uses';
             # e.count is how many times it occurs.
-            print(f"   {e.kind:<6} x{e.count:<3} from {e.peer.name:<24} "
-                  f"{e.peer.loc}")
+            print(f"   {e.kind:<6} x{e.count:<3} from {e.peer.name:<24} {e.peer.loc}")
 
         # ------------------------------------------------------------------- #
         # sites — drill into ONE edge for exact source locations
@@ -83,8 +81,10 @@ def main() -> None:
         out_edges = g.edges_out(fn, kinds=("calls",), limit=1)
         if out_edges:
             e = out_edges[0]
-            print(f"\n== sites of  {fn.spelling} -> {e.peer.spelling}  "
-                  f"(count={e.count}) ==")
+            print(
+                f"\n== sites of  {fn.spelling} -> {e.peer.spelling}  "
+                f"(count={e.count}) =="
+            )
             for site in g.sites(e, limit=10):
                 cond = "  (conditional)" if site.conditional else ""
                 print(f"   {site.loc}{cond}")

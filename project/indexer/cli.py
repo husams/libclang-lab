@@ -36,6 +36,7 @@ if __package__ in (None, ""):  # direct execution
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from indexer.storage import SYMBOL_KINDS, File, Storage  # noqa: E402
     from indexer import compiledb  # noqa: E402
+    from indexer import pathx  # noqa: E402
     from indexer.clang import ClangParseError, index_source  # noqa: E402
     from indexer.query import (  # noqa: E402
         EDGE_KINDS,
@@ -52,7 +53,7 @@ if __package__ in (None, ""):  # direct execution
     )
 else:
     from .storage import SYMBOL_KINDS, File, Storage
-    from . import astcmd, compiledb
+    from . import astcmd, compiledb, pathx
     from .clang import ClangParseError, index_source
     from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
     from .utils import git_root, index_status, md5_of, repo_name, resolve_file_arg
@@ -141,6 +142,20 @@ def cmd_init(args) -> int:
     return 0
 
 
+def _resolve_version(args, root: str) -> tuple[str, str | None]:
+    """Apply --version / --no-detect-version / auto-detect to produce (base, version).
+
+    *root* is the already-normalised component root (before splitting).
+    """
+    if hasattr(args, "version") and args.version is not None:
+        # --version "" means clear; "" treated as no version
+        v = args.version if args.version else None
+        return root, v
+    if getattr(args, "no_detect_version", False):
+        return root, None
+    return compiledb.split_base_version(root)
+
+
 def cmd_add_source(args) -> int:
     path = os.path.abspath(args.path)
     if not os.path.isdir(path):
@@ -150,10 +165,12 @@ def cmd_add_source(args) -> int:
     root = git_root(path) if use_git else None
     if root is not None:
         path = root
+    # Component name is derived from ORIGINAL path (before version split).
     name = args.name or (repo_name(path) if use_git else os.path.basename(path))
+    base, version = _resolve_version(args, path)
     with Storage(args.index) as db:
-        cid = db.add_component(name, path, kind=args.kind)
-    print(f"component #{cid}: {name} ({args.kind}) at {path}")
+        cid = db.add_component(name, base, kind=args.kind, version=version)
+    print(f"component #{cid}: {name} ({args.kind}) at {base}")
     return 0
 
 
@@ -179,6 +196,9 @@ def cmd_import(args) -> int:
     root = groot or compiledb.db_directory(args.db)
     name = args.name or (repo_name(root) if groot else os.path.basename(root))
 
+    # Version detection / override for the root component.
+    base, version = _resolve_version(args, root)
+
     imported, skipped = 0, 0
     with Storage(args.index) as db:
         if args.force:
@@ -187,7 +207,7 @@ def cmd_import(args) -> int:
                 db.delete_component(existing.id)
                 print(
                     f"force: removed existing component #{existing.id} "
-                    f"at {root} (files and indexed symbols)"
+                    f"at {existing.path} (files and indexed symbols)"
                 )
         # The db-dir/git-root component is created LAZILY: only when a source
         # matches no already-registered component. Matching first means an
@@ -200,8 +220,8 @@ def cmd_import(args) -> int:
                 src = compiledb.source_path(cmd)
                 if db.component_for_path(src) is None:
                     if root_cid is None:
-                        root_cid = db.add_component(name, root)
-                        print(f"component #{root_cid}: {name} at {root}")
+                        root_cid = db.add_component(name, base, version=version)
+                        print(f"component #{root_cid}: {name} at {base}")
                     if db.component_for_path(src) is None:
                         print(
                             f"  skip (outside any component): {src}",
@@ -453,7 +473,8 @@ def _parse_file_target(db: Storage, target: str):
     comp = db.get_component_by_name(comp_name)
     if comp is None:
         raise LookupError(f"no component named {comp_name!r}")
-    abs_path = os.path.normpath(os.path.join(comp.path, rel.lstrip("/")))
+    resolved_root = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp)))
+    abs_path = os.path.normpath(os.path.join(resolved_root, rel.lstrip("/")))
     return comp, abs_path
 
 
@@ -566,9 +587,18 @@ def cmd_dump_compile_commands(args) -> int:
             if not f.compile_options:
                 continue
             driver = f.driver or "cc"
+            # directory uses the resolved effective root (real fs path), so
+            # compile_commands.json consumers get real paths for directory+file.
+            # The stored (indirected) -I tokens in arguments are kept verbatim.
+            if comp is not None:
+                directory = os.path.abspath(
+                    pathx.resolve_fs_path(Storage.effective_root(comp))
+                )
+            else:
+                directory = os.path.dirname(ap)
             entries.append(
                 {
-                    "directory": comp.path if comp else os.path.dirname(ap),
+                    "directory": directory,
                     "file": ap,
                     "arguments": [driver] + list(f.compile_options) + [ap],
                 }
@@ -839,12 +869,14 @@ def _selector_str(args) -> str:
 
 
 def _under_component(abs_path: str | None, comp) -> bool:
-    """True when comp is None, or abs_path lies within the component root."""
+    """True when comp is None, or abs_path lies within the component's effective root."""
     if comp is None:
         return True
     if abs_path is None:
         return False
-    root = comp.path.rstrip(os.sep)
+    root = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp))).rstrip(
+        os.sep
+    )
     return abs_path == root or abs_path.startswith(root + os.sep)
 
 
@@ -1282,9 +1314,111 @@ def cmd_graph_dispatch(args) -> int:
     return 0
 
 
+# -- component show / set-version --------------------------------------------
+
+
+def cmd_component_show(args) -> int:
+    """cidx component show NAME -- print six fields for a component."""
+    with Storage(args.index) as db:
+        comp = db.get_component_by_name(args.name)
+        if comp is None:
+            print(f"error: no component named {args.name!r}", file=sys.stderr)
+            return 1
+        eff = Storage.effective_root(comp)
+        resolved = os.path.abspath(pathx.resolve_fs_path(eff))
+        version_str = comp.version if comp.version is not None else "(none)"
+        fields = [
+            ("name", comp.name),
+            ("kind", comp.kind),
+            ("base path", comp.path),
+            ("version", version_str),
+            ("effective root", eff),
+            ("resolved root", resolved),
+        ]
+        for key, value in fields:
+            print(f"{key:<14} {value}")
+    return 0
+
+
+def cmd_component_set_version(args) -> int:
+    """cidx component set-version NAME [V] -- set or clear a component's version."""
+    # V is optional; absent or "" means clear.
+    version = args.version if args.version else None
+    with Storage(args.index) as db:
+        ok = db.set_component_version(args.name, version)
+    if not ok:
+        print(f"error: no component named '{args.name}'", file=sys.stderr)
+        return 1
+    if version is not None:
+        print(f"component '{args.name}' version set to {version}")
+    else:
+        print(f"component '{args.name}' version cleared")
+    return 0
+
+
+# -- label add / rm / list / resolve -----------------------------------------
+
+
+def cmd_label_add(args) -> int:
+    """cidx label add NAME PATH -- upsert a label."""
+    with Storage(args.index) as db:
+        existing = db.get_label(args.name)
+        db.add_label(args.name, args.path)
+    if existing is None:
+        print(f"added label {args.name} -> {args.path}")
+    else:
+        print(f"updated label {args.name} -> {args.path}")
+    return 0
+
+
+def cmd_label_rm(args) -> int:
+    """cidx label rm NAME -- remove a label."""
+    with Storage(args.index) as db:
+        removed = db.remove_label(args.name)
+    if not removed:
+        print(f"error: no label named '{args.name}'", file=sys.stderr)
+        return 1
+    print(f"removed label {args.name}")
+    return 0
+
+
+def cmd_label_list(args) -> int:
+    """cidx label list -- print all labels sorted by name."""
+    with Storage(args.index) as db:
+        labels = db.list_labels()
+    if not labels:
+        print("0 label(s)")
+        return 0
+    width = max(len(name) for name, _ in labels)
+    for name, path in labels:
+        print(f"{name:<{width}}  {path}")
+    print(f"{len(labels)} label(s)")
+    return 0
+
+
+def cmd_label_resolve(args) -> int:
+    """cidx label resolve TOKEN -- resolve a label name or <...>/$... token."""
+    with Storage(args.index) as db:
+        lookup = db.get_label
+        autoderive = not getattr(args, "no_autoderive_labels", False)
+        token = args.token
+        # If no < or $ in the token, treat it as a bare label name.
+        if "<" not in token and "$" not in token:
+            token = f"<{token}>"
+        result = pathx.resolve_fs_path(token, lookup=lookup, autoderive=autoderive)
+    print(result)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx", description="cidx command-line skeleton")
     ap.add_argument("--version", action="version", version=f"cidx {VERSION}")
+    ap.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="index database override (alternative to per-subcommand --db)",
+    )
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="create a blank index database")
@@ -1302,6 +1436,17 @@ def main(argv=None) -> int:
         action="store_true",
         help="use --path as-is; do not promote to the enclosing git root",
     )
+    p.add_argument(
+        "--version",
+        metavar="V",
+        default=None,
+        help="set component version to V (overrides auto-detection; '' clears)",
+    )
+    p.add_argument(
+        "--no-detect-version",
+        action="store_true",
+        help="disable trailing-segment version detection",
+    )
     p.set_defaults(fn=cmd_add_source)
 
     p = sub.add_parser("import", help="import a compile_commands.json")
@@ -1316,6 +1461,17 @@ def main(argv=None) -> int:
         action="store_true",
         help="reimport: delete the existing component (its files "
         "and indexed symbols) before importing",
+    )
+    p.add_argument(
+        "--version",
+        metavar="V",
+        default=None,
+        help="set component version to V (overrides auto-detection; '' clears)",
+    )
+    p.add_argument(
+        "--no-detect-version",
+        action="store_true",
+        help="disable trailing-segment version detection",
     )
     p.set_defaults(fn=cmd_import)
 
@@ -1334,12 +1490,87 @@ def main(argv=None) -> int:
         action="store_true",
         help="skip relationship-graph extraction (calls, inherits, …)",
     )
+    p.add_argument(
+        "--no-autoderive-labels",
+        dest="no_autoderive_labels",
+        action="store_true",
+        help="disable label autoderive fallback at parse time",
+    )
     p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser(
         "resolve", help="finalize cross-repo edges and roll up edge counts"
     )
     p.set_defaults(fn=cmd_resolve)
+
+    # -- component: show / set-version ----------------------------------------
+    p = sub.add_parser("component", help="inspect or modify a component")
+    csub = p.add_subparsers(dest="comp_action", required=True)
+
+    def _db_arg(q):
+        """Add a standard --db (index database override) argument.
+
+        Uses default=SUPPRESS so that the subcommand's absent --db does not
+        clobber a top-level --db value already captured in args.graph_db.
+        """
+        q.add_argument(
+            "--db",
+            dest="graph_db",
+            metavar="PATH",
+            default=argparse.SUPPRESS,
+            help="index database (default: the standard cache index)",
+        )
+
+    q = csub.add_parser("show", help="show details for a component")
+    q.add_argument("name", metavar="NAME", help="component name")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_component_show)
+
+    q = csub.add_parser("set-version", help="set or clear a component's version")
+    q.add_argument("name", metavar="NAME", help="component name")
+    q.add_argument(
+        "version",
+        nargs="?",
+        default="",
+        metavar="V",
+        help="version string; omit or pass '' to clear",
+    )
+    _db_arg(q)
+    q.set_defaults(fn=cmd_component_set_version)
+
+    # -- label: add / rm / list / resolve -------------------------------------
+    p = sub.add_parser("label", help="manage include/arg label registry")
+    lsub = p.add_subparsers(dest="label_action", required=True)
+
+    q = lsub.add_parser("add", help="add or update a label")
+    q.add_argument("name", metavar="NAME", help="label name (e.g. libfoo-include)")
+    q.add_argument("path", metavar="PATH", help="stored path (may contain $VAR)")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_label_add)
+
+    q = lsub.add_parser("rm", help="remove a label")
+    q.add_argument("name", metavar="NAME", help="label name")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_label_rm)
+
+    q = lsub.add_parser("list", help="list all labels")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_label_list)
+
+    q = lsub.add_parser("resolve", help="resolve a label name or <...>/$... token")
+    q.add_argument(
+        "token",
+        metavar="TOKEN",
+        help="bare label name or a token containing <...> / $...",
+    )
+    q.add_argument(
+        "--no-autoderive-labels",
+        dest="no_autoderive_labels",
+        action="store_true",
+        help="disable the /name/replace-dash autoderive fallback",
+    )
+    _db_arg(q)
+    q.set_defaults(fn=cmd_label_resolve)
 
     p = sub.add_parser("set", help="set a mutable file attribute (e.g. pending status)")
     p.add_argument(

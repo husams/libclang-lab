@@ -37,8 +37,7 @@ def main() -> None:
         # hierarchy to show. (Plain `find(kind='class')` also works.)
         cls = _first_class_in_hierarchy(g)
         if cls is None:
-            print("No class hierarchy in this index (C-only? point at a C++ "
-                  "index).")
+            print("No class hierarchy in this index (C-only? point at a C++ index).")
             return
         print(f"focus class: {cls.name}  ({cls.loc})\n")
 
@@ -84,8 +83,7 @@ def main() -> None:
         if method is None:
             print("\n(no virtual method found on this class hierarchy)")
             return
-        print(f"\n== virtual method: {method.name}  "
-              f"(pure={method.is_pure}) ==")
+        print(f"\n== virtual method: {method.name}  (pure={method.is_pure}) ==")
 
         # is_virtual_method: handles the 'pure virtual / override' detection.
         print(f"   is_virtual_method = {g.is_virtual_method(method)}")

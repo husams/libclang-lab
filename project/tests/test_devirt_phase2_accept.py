@@ -49,6 +49,7 @@ _GRAPHLAB_DIR = os.path.join(_LAB_ROOT, "manifests", "graphlab")
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_db(tmp_path, name: str = "test.db") -> tuple[Storage, str]:
     repo = str(tmp_path / "repo")
     os.makedirs(repo, exist_ok=True)
@@ -56,17 +57,37 @@ def _make_db(tmp_path, name: str = "test.db") -> tuple[Storage, str]:
     return Storage(db_path), db_path
 
 
-def _add_sym(db: Storage, usr: str, spelling: str, kind: str, file_id: int,
-             line: int, *, qual: str | None = None, parent: str | None = None,
-             is_def: bool = True, is_pure: bool = False,
-             resolved: bool = True, access: str = "public") -> int:
-    return db.add_symbol(Symbol(
-        usr=usr, spelling=spelling, kind=kind,
-        qual_name=qual or spelling,
-        file_id=file_id, line=line, col=1,
-        is_definition=is_def, is_pure=is_pure,
-        parent_usr=parent, resolved=resolved, access=access,
-    ))
+def _add_sym(
+    db: Storage,
+    usr: str,
+    spelling: str,
+    kind: str,
+    file_id: int,
+    line: int,
+    *,
+    qual: str | None = None,
+    parent: str | None = None,
+    is_def: bool = True,
+    is_pure: bool = False,
+    resolved: bool = True,
+    access: str = "public",
+) -> int:
+    return db.add_symbol(
+        Symbol(
+            usr=usr,
+            spelling=spelling,
+            kind=kind,
+            qual_name=qual or spelling,
+            file_id=file_id,
+            line=line,
+            col=1,
+            is_definition=is_def,
+            is_pure=is_pure,
+            parent_usr=parent,
+            resolved=resolved,
+            access=access,
+        )
+    )
 
 
 def _seed_abcd(db: Storage, hpp: int, cpp: int) -> dict[str, int]:
@@ -74,57 +95,118 @@ def _seed_abcd(db: Storage, hpp: int, cpp: int) -> dict[str, int]:
     C = EDGE_KINDS
     ids: dict[str, int] = {}
 
-    ids["A"]    = _add_sym(db, "c:@S@A",          "A",        "struct",   hpp, 10, qual="chain::A")
-    ids["B"]    = _add_sym(db, "c:@S@B",          "B",        "struct",   hpp, 20, qual="chain::B")
-    ids["C"]    = _add_sym(db, "c:@S@C",          "C",        "struct",   hpp, 30, qual="chain::C")
-    ids["D"]    = _add_sym(db, "c:@S@D",          "D",        "struct",   hpp, 40, qual="chain::D")
-    ids["Ar"]   = _add_sym(db, "c:@S@A@F@rank#",  "rank", "method", hpp, 12, qual="chain::A::rank", parent="c:@S@A")
-    ids["Br"]   = _add_sym(db, "c:@S@B@F@rank#",  "rank", "method", cpp,  2, qual="chain::B::rank", parent="c:@S@B")
-    ids["Cr"]   = _add_sym(db, "c:@S@C@F@rank#",  "rank", "method", cpp,  3, qual="chain::C::rank", parent="c:@S@C")
-    ids["Dr"]   = _add_sym(db, "c:@S@D@F@rank#",  "rank", "method", cpp,  4, qual="chain::D::rank", parent="c:@S@D")
-    ids["top"]  = _add_sym(db, "c:@F@top_rank",   "top_rank", "function", cpp, 6, qual="chain::top_rank")
-    ids["f"]    = _add_sym(db, "c:@F@f",          "f",        "function", cpp, 8, qual="chain::f")
-    ids["g"]    = _add_sym(db, "c:@F@g",          "g",        "function", cpp, 12, qual="chain::g")
+    ids["A"] = _add_sym(db, "c:@S@A", "A", "struct", hpp, 10, qual="chain::A")
+    ids["B"] = _add_sym(db, "c:@S@B", "B", "struct", hpp, 20, qual="chain::B")
+    ids["C"] = _add_sym(db, "c:@S@C", "C", "struct", hpp, 30, qual="chain::C")
+    ids["D"] = _add_sym(db, "c:@S@D", "D", "struct", hpp, 40, qual="chain::D")
+    ids["Ar"] = _add_sym(
+        db,
+        "c:@S@A@F@rank#",
+        "rank",
+        "method",
+        hpp,
+        12,
+        qual="chain::A::rank",
+        parent="c:@S@A",
+    )
+    ids["Br"] = _add_sym(
+        db,
+        "c:@S@B@F@rank#",
+        "rank",
+        "method",
+        cpp,
+        2,
+        qual="chain::B::rank",
+        parent="c:@S@B",
+    )
+    ids["Cr"] = _add_sym(
+        db,
+        "c:@S@C@F@rank#",
+        "rank",
+        "method",
+        cpp,
+        3,
+        qual="chain::C::rank",
+        parent="c:@S@C",
+    )
+    ids["Dr"] = _add_sym(
+        db,
+        "c:@S@D@F@rank#",
+        "rank",
+        "method",
+        cpp,
+        4,
+        qual="chain::D::rank",
+        parent="c:@S@D",
+    )
+    ids["top"] = _add_sym(
+        db, "c:@F@top_rank", "top_rank", "function", cpp, 6, qual="chain::top_rank"
+    )
+    ids["f"] = _add_sym(db, "c:@F@f", "f", "function", cpp, 8, qual="chain::f")
+    ids["g"] = _add_sym(db, "c:@F@g", "g", "function", cpp, 12, qual="chain::g")
 
     with db.transaction():
-        db.add_edge(ids["B"],  ids["A"],  C["inherits"], base_access=1)
-        db.add_edge(ids["C"],  ids["B"],  C["inherits"], base_access=1)
-        db.add_edge(ids["D"],  ids["C"],  C["inherits"], base_access=1)
-        db.add_edge(ids["Ar"], ids["A"],  C["method_of"])
-        db.add_edge(ids["Br"], ids["B"],  C["method_of"])
-        db.add_edge(ids["Cr"], ids["C"],  C["method_of"])
-        db.add_edge(ids["Dr"], ids["D"],  C["method_of"])
+        db.add_edge(ids["B"], ids["A"], C["inherits"], base_access=1)
+        db.add_edge(ids["C"], ids["B"], C["inherits"], base_access=1)
+        db.add_edge(ids["D"], ids["C"], C["inherits"], base_access=1)
+        db.add_edge(ids["Ar"], ids["A"], C["method_of"])
+        db.add_edge(ids["Br"], ids["B"], C["method_of"])
+        db.add_edge(ids["Cr"], ids["C"], C["method_of"])
+        db.add_edge(ids["Dr"], ids["D"], C["method_of"])
         db.add_edge(ids["Br"], ids["Ar"], C["overrides"])
         db.add_edge(ids["Cr"], ids["Br"], C["overrides"])
         db.add_edge(ids["Dr"], ids["Cr"], C["overrides"])
 
         # top_rank calls A::rank with recv_param_pos=0
         e_tr = db.add_edge(ids["top"], ids["Ar"], C["calls"], count=1)
-        db.add_edge_site(e_tr, cpp, 11, 18,
-                         recv_src_kind="local", recv_type_usr="c:@S@A",
-                         recv_decl_usr="a_parm_usr", recv_param_pos=0)
+        db.add_edge_site(
+            e_tr,
+            cpp,
+            11,
+            18,
+            recv_src_kind="local",
+            recv_type_usr="c:@S@A",
+            recv_decl_usr="a_parm_usr",
+            recv_param_pos=0,
+        )
         ids["e_tr"] = e_tr
 
     return ids
 
 
-def _seed_caller(db: Storage, caller_sym_id: int, callee_sym_id: int,
-                 cpp: int, line: int, col: int, pos: int,
-                 src_kind: str, type_usr: str | None,
-                 decl_usr: str | None = None) -> int:
+def _seed_caller(
+    db: Storage,
+    caller_sym_id: int,
+    callee_sym_id: int,
+    cpp: int,
+    line: int,
+    col: int,
+    pos: int,
+    src_kind: str,
+    type_usr: str | None,
+    decl_usr: str | None = None,
+) -> int:
     C = EDGE_KINDS
     e = db.add_edge(caller_sym_id, callee_sym_id, C["calls"], count=1)
     db.add_edge_site(e, cpp, line, col)
     if src_kind not in ("literal", "unknown") and type_usr is not None:
-        db.add_call_arg(e, cpp, line, col, pos,
-                        src_kind=src_kind, type_usr=type_usr,
-                        decl_usr=decl_usr)
+        db.add_call_arg(
+            e,
+            cpp,
+            line,
+            col,
+            pos,
+            src_kind=src_kind,
+            type_usr=type_usr,
+            decl_usr=decl_usr,
+        )
     return e
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def abcd_db_f_construct(tmp_path):
@@ -134,13 +216,14 @@ def abcd_db_f_construct(tmp_path):
     os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
 
     ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         _seed_caller(db, ids["f"], ids["top"], cpp, 9, 5, 0, "construct", "c:@S@B")
-    db.resolve_pass(); db.close()
+    db.resolve_pass()
+    db.close()
     yield GraphQuery(db_path), ids
 
 
@@ -152,14 +235,15 @@ def abcd_db_fg_construct(tmp_path):
     os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
 
     ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
-        _seed_caller(db, ids["f"], ids["top"], cpp,  9, 5, 0, "construct", "c:@S@B")
+        _seed_caller(db, ids["f"], ids["top"], cpp, 9, 5, 0, "construct", "c:@S@B")
         _seed_caller(db, ids["g"], ids["top"], cpp, 13, 5, 0, "construct", "c:@S@D")
-    db.resolve_pass(); db.close()
+    db.resolve_pass()
+    db.close()
     yield GraphQuery(db_path), ids
 
 
@@ -169,10 +253,10 @@ def abcd_db_fg_construct(tmp_path):
 
 _MONO_CASES = [
     # (label, caller_usr, src_kind, type_usr)
-    ("f_construct_B",     "c:@F@f", "construct", "c:@S@B"),
-    ("f_construct_D",     "c:@F@f", "construct", "c:@S@D"),
-    ("f_construct_C",     "c:@F@f", "construct", "c:@S@C"),
-    ("f_unknown",         "c:@F@f", "unknown",   None),
+    ("f_construct_B", "c:@F@f", "construct", "c:@S@B"),
+    ("f_construct_D", "c:@F@f", "construct", "c:@S@D"),
+    ("f_construct_C", "c:@F@f", "construct", "c:@S@C"),
+    ("f_unknown", "c:@F@f", "unknown", None),
 ]
 
 
@@ -184,22 +268,24 @@ def test_acc01_pruned_subset_of_phase1(tmp_path, label, caller_usr, src_kind, ty
     Tested across four distinct receiver type-sets (B, C, D, unknown).
     """
     db, db_path = _make_db(tmp_path, f"mono_{label}.db")
-    repo = str(tmp_path / "repo"); os.makedirs(repo, exist_ok=True)
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
-    ids  = _seed_abcd(db, hpp, cpp)
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         _seed_caller(db, ids["f"], ids["top"], cpp, 9, 5, 0, src_kind, type_usr)
-    db.resolve_pass(); db.close()
+    db.resolve_pass()
+    db.close()
 
-    cb   = CodeBase(GraphQuery(db_path))
-    f_e  = cb.wrap(cb.graph.get(caller_usr))
+    cb = CodeBase(GraphQuery(db_path))
+    f_e = cb.wrap(cb.graph.get(caller_usr))
     assert f_e is not None, f"Caller {caller_usr} not found"
 
     # Phase-1 candidate ids
-    p1_steps  = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=False))
+    p1_steps = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=False))
     p1_target_ids = {s.callee.id for s in p1_steps}
 
     # Phase-2 steps
@@ -217,7 +303,9 @@ def test_acc01_pruned_subset_of_phase1(tmp_path, label, caller_usr, src_kind, ty
     # Also verify pruned_candidates (when set) are a subset of dispatch_site.selections
     for step in p2_steps:
         if step.dispatch_site is not None and step.pruned_candidates is not None:
-            p1_sel_ids  = {s.target.id for s in step.dispatch_site.selections if s.target}
+            p1_sel_ids = {
+                s.target.id for s in step.dispatch_site.selections if s.target
+            }
             p2_pruned_ids = {s.target.id for s in step.pruned_candidates if s.target}
             dangling = p2_pruned_ids - p1_sel_ids
             assert not dangling, (
@@ -231,24 +319,27 @@ def test_acc01_pruned_subset_of_phase1(tmp_path, label, caller_usr, src_kind, ty
 # ACC-02  Soundness: no call_arg -> KEEP_ALL (empty Gamma)
 # ---------------------------------------------------------------------------
 
+
 def test_acc02_no_call_arg_keeps_all(tmp_path):
     """ACC-02: when there is no call_arg row for f->top_rank, Gamma is TOP
     and the dispatch at a.rank() must NOT be pruned (KEEP_ALL).
     """
     db, db_path = _make_db(tmp_path, "no_arg.db")
-    repo = str(tmp_path / "repo"); os.makedirs(repo, exist_ok=True)
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
-    ids  = _seed_abcd(db, hpp, cpp)
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         # Edge without any call_arg row
         e_f = db.add_edge(ids["f"], ids["top"], EDGE_KINDS["calls"], count=1)
         db.add_edge_site(e_f, cpp, 9, 5)
-    db.resolve_pass(); db.close()
+    db.resolve_pass()
+    db.close()
 
-    cb  = CodeBase(GraphQuery(db_path))
+    cb = CodeBase(GraphQuery(db_path))
     f_e = cb.wrap(cb.graph.get("c:@F@f"))
     assert f_e is not None
 
@@ -266,6 +357,7 @@ def test_acc02_no_call_arg_keeps_all(tmp_path):
 # ACC-03  Soundness: wrong-position arg (decl_usr mismatch) -> KEEP_ALL
 # ---------------------------------------------------------------------------
 
+
 def test_acc03_wrong_position_arg_keeps_all(tmp_path):
     """ACC-03: when the call_arg is at position 1 (not 0) for a unary callee
     whose recv_param_pos=0, the Gamma engine finds no binding at pos 0 -> KEEP_ALL.
@@ -273,21 +365,24 @@ def test_acc03_wrong_position_arg_keeps_all(tmp_path):
     This is a boundary test: a misaligned arg must NOT cause spurious pruning.
     """
     db, db_path = _make_db(tmp_path, "wrong_pos.db")
-    repo = str(tmp_path / "repo"); os.makedirs(repo, exist_ok=True)
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
-    ids  = _seed_abcd(db, hpp, cpp)
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         e_f = db.add_edge(ids["f"], ids["top"], EDGE_KINDS["calls"], count=1)
         db.add_edge_site(e_f, cpp, 9, 5)
         # Arg at position 1 only — pos 0 is absent, so Gamma has no binding
-        db.add_call_arg(e_f, cpp, 9, 5, 1,
-                        src_kind="construct", type_usr="c:@S@B", decl_usr=None)
-    db.resolve_pass(); db.close()
+        db.add_call_arg(
+            e_f, cpp, 9, 5, 1, src_kind="construct", type_usr="c:@S@B", decl_usr=None
+        )
+    db.resolve_pass()
+    db.close()
 
-    cb  = CodeBase(GraphQuery(db_path))
+    cb = CodeBase(GraphQuery(db_path))
     f_e = cb.wrap(cb.graph.get("c:@F@f"))
     assert f_e is not None
 
@@ -304,35 +399,43 @@ def test_acc03_wrong_position_arg_keeps_all(tmp_path):
 # ACC-04  Boundary: multi-arg call — only arg-0 binds param-0
 # ---------------------------------------------------------------------------
 
+
 def test_acc04_multi_arg_first_arg_binds(tmp_path):
     """ACC-04: f(top_rank(b, extra)) — a second arg at pos=1 (TOP/unknown)
     must not corrupt the pos-0 Gamma binding. The prune to B::rank still fires.
     """
     db, db_path = _make_db(tmp_path, "multi_arg.db")
-    repo = str(tmp_path / "repo"); os.makedirs(repo, exist_ok=True)
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
-    ids  = _seed_abcd(db, hpp, cpp)
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         e_f = db.add_edge(ids["f"], ids["top"], EDGE_KINDS["calls"], count=1)
         db.add_edge_site(e_f, cpp, 9, 5)
         # arg-0: construct B (should seed pos-0 binding)
-        db.add_call_arg(e_f, cpp, 9, 5, 0,
-                        src_kind="construct", type_usr="c:@S@B", decl_usr=None)
+        db.add_call_arg(
+            e_f, cpp, 9, 5, 0, src_kind="construct", type_usr="c:@S@B", decl_usr=None
+        )
         # arg-1: unknown extra arg (should NOT destroy pos-0 binding)
-        db.add_call_arg(e_f, cpp, 9, 5, 1,
-                        src_kind="unknown", type_usr=None, decl_usr=None)
-    db.resolve_pass(); db.close()
+        db.add_call_arg(
+            e_f, cpp, 9, 5, 1, src_kind="unknown", type_usr=None, decl_usr=None
+        )
+    db.resolve_pass()
+    db.close()
 
-    cb  = CodeBase(GraphQuery(db_path))
+    cb = CodeBase(GraphQuery(db_path))
     f_e = cb.wrap(cb.graph.get("c:@F@f"))
     assert f_e is not None
 
     steps = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=True))
-    pruned_steps = [s for s in steps
-                    if s.dispatch_site is not None and s.pruned_candidates is not None]
+    pruned_steps = [
+        s
+        for s in steps
+        if s.dispatch_site is not None and s.pruned_candidates is not None
+    ]
 
     assert pruned_steps, (
         "ACC-04: expected pruning with arg-0=construct(B) + arg-1=unknown"
@@ -354,6 +457,7 @@ def test_acc04_multi_arg_first_arg_binds(tmp_path):
 # ACC-05  Motivating case — hermetic (construct)
 # ---------------------------------------------------------------------------
 
+
 def test_acc05_motivating_case_construct(abcd_db_f_construct):
     """ACC-05 (BDD): GIVEN f() calls top_rank(B{}) via construct arg,
     WHEN devirtualized_callgraph(prune=True) is called on f,
@@ -366,8 +470,8 @@ def test_acc05_motivating_case_construct(abcd_db_f_construct):
     assert f_e is not None
 
     steps = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=True))
-    virtual_steps  = [s for s in steps if s.dispatch_site is not None]
-    pruned_steps   = [s for s in virtual_steps if s.pruned_candidates is not None]
+    virtual_steps = [s for s in steps if s.dispatch_site is not None]
+    pruned_steps = [s for s in virtual_steps if s.pruned_candidates is not None]
 
     assert pruned_steps, (
         "Expected at least one pruned virtual dispatch step from f()->top_rank(B{}). "
@@ -392,6 +496,7 @@ def test_acc05_motivating_case_construct(abcd_db_f_construct):
 # ACC-06  Motivating case — hermetic (local src_kind, as in developer GP-07)
 # ---------------------------------------------------------------------------
 
+
 def test_acc06_motivating_case_local_src_kind(tmp_path):
     """ACC-06: same motivating case but with src_kind='local' (the extractor
     emits 'local' for named value-typed variables, not 'construct').
@@ -400,27 +505,30 @@ def test_acc06_motivating_case_local_src_kind(tmp_path):
     extractor: void f() { B b; top_rank(b); } -> call_arg(pos=0, local, type=B).
     """
     db, db_path = _make_db(tmp_path, "local_sk.db")
-    repo = str(tmp_path / "repo"); os.makedirs(repo, exist_ok=True)
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
-    ids  = _seed_abcd(db, hpp, cpp)
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         e_f = db.add_edge(ids["f"], ids["top"], EDGE_KINDS["calls"], count=1)
         db.add_edge_site(e_f, cpp, 9, 5)
         # local src_kind with decl_usr for the named variable b
-        db.add_call_arg(e_f, cpp, 9, 5, 0,
-                        src_kind="local", type_usr="c:@S@B", decl_usr="b_var_usr")
-    db.resolve_pass(); db.close()
+        db.add_call_arg(
+            e_f, cpp, 9, 5, 0, src_kind="local", type_usr="c:@S@B", decl_usr="b_var_usr"
+        )
+    db.resolve_pass()
+    db.close()
 
-    cb  = CodeBase(GraphQuery(db_path))
+    cb = CodeBase(GraphQuery(db_path))
     f_e = cb.wrap(cb.graph.get("c:@F@f"))
     assert f_e is not None
 
     steps = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=True))
     virtual_steps = [s for s in steps if s.dispatch_site is not None]
-    pruned_steps  = [s for s in virtual_steps if s.pruned_candidates is not None]
+    pruned_steps = [s for s in virtual_steps if s.pruned_candidates is not None]
 
     assert pruned_steps, (
         "ACC-06: expected pruning with src_kind=local, type_usr=B. "
@@ -442,6 +550,7 @@ def test_acc06_motivating_case_local_src_kind(tmp_path):
 # ---------------------------------------------------------------------------
 # ACC-07  Regression guard: prune=False identical to Phase-1
 # ---------------------------------------------------------------------------
+
 
 def test_acc07_regression_prune_false_identical(abcd_db_f_construct):
     """ACC-07: prune=False default must yield byte-identical CallStep stream.
@@ -478,6 +587,7 @@ def test_acc07_regression_prune_false_identical(abcd_db_f_construct):
 # ACC-08  TOP-union: one TOP arg makes the whole position TOP -> KEEP_ALL
 # ---------------------------------------------------------------------------
 
+
 def test_acc08_top_union_disables_pruning(tmp_path):
     """ACC-08: if the SAME position has two call_arg rows (inlined/merged site),
     one with construct(B) and one with unknown, the join yields TOP -> KEEP_ALL.
@@ -486,19 +596,21 @@ def test_acc08_top_union_disables_pruning(tmp_path):
     ignores subsequent TOP entries, which would violate the monotone join rule.
     """
     db, db_path = _make_db(tmp_path, "top_union.db")
-    repo = str(tmp_path / "repo"); os.makedirs(repo, exist_ok=True)
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo, exist_ok=True)
     comp = db.add_component("chain", repo)
     root = db.add_directory(comp, "")
-    hpp  = db.add_file(root, "chain.hpp")
-    cpp  = db.add_file(root, "chain.cpp")
-    ids  = _seed_abcd(db, hpp, cpp)
+    hpp = db.add_file(root, "chain.hpp")
+    cpp = db.add_file(root, "chain.cpp")
+    ids = _seed_abcd(db, hpp, cpp)
     with db.transaction():
         e_f = db.add_edge(ids["f"], ids["top"], EDGE_KINDS["calls"], count=1)
         db.add_edge_site(e_f, cpp, 9, 5)
         # Two rows for position 0 with conflicting provenance:
         # construct(B) + unknown — the flow-insensitive join must yield TOP.
-        db.add_call_arg(e_f, cpp, 9, 5, 0,
-                        src_kind="construct", type_usr="c:@S@B", decl_usr=None)
+        db.add_call_arg(
+            e_f, cpp, 9, 5, 0, src_kind="construct", type_usr="c:@S@B", decl_usr=None
+        )
     # Insert the second 'unknown' call_arg directly via raw SQL (add_call_arg
     # uses INSERT OR REPLACE which would silently overwrite; raw insert tests the
     # engine's join logic over multiple rows returned by call_args()).
@@ -509,9 +621,10 @@ def test_acc08_top_union_disables_pruning(tmp_path):
         (e_f, cpp, 9, 6, 0, "unknown", None, None, None),  # col=6 to get a new PK
     )
     db._conn.commit()
-    db.resolve_pass(); db.close()
+    db.resolve_pass()
+    db.close()
 
-    cb  = CodeBase(GraphQuery(db_path))
+    cb = CodeBase(GraphQuery(db_path))
     f_e = cb.wrap(cb.graph.get("c:@F@f"))
     assert f_e is not None
 
@@ -521,18 +634,17 @@ def test_acc08_top_union_disables_pruning(tmp_path):
     # call_args at the matching site). We assert MONOTONICITY: Phase-2 targets
     # must be a subset of Phase-1 targets.
     p1_steps = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=False))
-    p1_ids   = {s.callee.id for s in p1_steps}
-    p2_ids   = {s.callee.id for s in steps}
-    extra    = p2_ids - p1_ids
-    assert not extra, (
-        f"ACC-08: Phase-2 added targets not in Phase-1: {extra}"
-    )
+    p1_ids = {s.callee.id for s in p1_steps}
+    p2_ids = {s.callee.id for s in steps}
+    extra = p2_ids - p1_ids
+    assert not extra, f"ACC-08: Phase-2 added targets not in Phase-1: {extra}"
     cb.close()
 
 
 # ---------------------------------------------------------------------------
 # ACC-09  Context sensitivity: g()->top_rank(D{}) prunes to D::rank
 # ---------------------------------------------------------------------------
+
 
 def test_acc09_context_sensitivity_g_prunes_to_d(abcd_db_fg_construct):
     """ACC-09: g() calls top_rank(D{}) -> prunes a.rank() to D::rank ONLY.
@@ -549,7 +661,7 @@ def test_acc09_context_sensitivity_g_prunes_to_d(abcd_db_fg_construct):
 
     steps = list(g_e.devirtualized_callgraph(expand_virtual=True, prune=True))
     virtual_steps = [s for s in steps if s.dispatch_site is not None]
-    pruned_steps  = [s for s in virtual_steps if s.pruned_candidates is not None]
+    pruned_steps = [s for s in virtual_steps if s.pruned_candidates is not None]
 
     assert pruned_steps, (
         "ACC-09: g()->top_rank(D{}) must prune a.rank() dispatch. "
@@ -581,6 +693,7 @@ def test_acc09_context_sensitivity_g_prunes_to_d(abcd_db_fg_construct):
 # ACC-10  Real-extractor end-to-end: index chain.cpp, assert B::rank only
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def chain_real_accept_cb(tmp_path_factory):
     """Index the REAL manifests/graphlab/chain.cpp into a dedicated temp DB.
@@ -596,14 +709,14 @@ def chain_real_accept_cb(tmp_path_factory):
 
     from indexer.clang import ast as A  # noqa: E402
 
-    tmp     = tmp_path_factory.mktemp("chain_accept")
+    tmp = tmp_path_factory.mktemp("chain_accept")
     db_path = str(tmp / "chain_accept.db")
 
     chain_hpp = os.path.join(_GRAPHLAB_DIR, "chain.hpp")
     chain_cpp = os.path.join(_GRAPHLAB_DIR, "chain.cpp")
 
     cpp_args = clang_args(chain_cpp) + ["-std=c++17", "-I", _GRAPHLAB_DIR]
-    idx  = cx.Index.create()
+    idx = cx.Index.create()
     tu_h = idx.parse(chain_hpp, args=cpp_args)
     tu_c = idx.parse(chain_cpp, args=cpp_args)
 
@@ -692,7 +805,7 @@ def test_acc10_real_parse_prunes_to_b_rank(chain_real_accept_cb):
 
     steps = list(f_e.devirtualized_callgraph(expand_virtual=True, prune=True))
     virtual_steps = [s for s in steps if s.dispatch_site is not None]
-    pruned_steps  = [s for s in virtual_steps if s.pruned_candidates is not None]
+    pruned_steps = [s for s in virtual_steps if s.pruned_candidates is not None]
 
     assert pruned_steps, (
         "ACC-10b: No pruned virtual steps from real chain::f(). "
@@ -800,8 +913,12 @@ def prov_real_cb(tmp_path_factory):
     idx = cx.Index.create()
 
     # (file, is_header) in dependency order: headers first, then sources.
-    layout = [("chain.hpp", True), ("prov.hpp", True),
-              ("chain.cpp", False), ("prov.cpp", False)]
+    layout = [
+        ("chain.hpp", True),
+        ("prov.hpp", True),
+        ("chain.cpp", False),
+        ("prov.cpp", False),
+    ]
     tus = {name: idx.parse(str(tmp / name), args=args) for name, _ in layout}
     for name, tu in tus.items():
         fatal = [d for d in tu.diagnostics if d.severity >= 3]
@@ -873,13 +990,16 @@ def test_acc11_real_parse_construct_prunes_to_b_rank(prov_real_cb):
     assert pruned, "ACC-11: construct arg should prune a.rank() but no step was pruned"
     kept = {
         sel.target.sym.usr
-        for step in pruned for sel in step.pruned_candidates
+        for step in pruned
+        for sel in step.pruned_candidates
         if sel.target is not None
     }
     assert any("@S@B@" in u for u in kept), f"ACC-11: B::rank missing from {kept}"
     for absent in ("A", "C", "D"):
         offenders = [u for u in kept if f"@S@{absent}@" in u]
-        assert not offenders, f"ACC-11: {absent}::rank should be pruned, found {offenders}"
+        assert not offenders, (
+            f"ACC-11: {absent}::rank should be pruned, found {offenders}"
+        )
 
 
 def test_acc12_real_parse_value_member_prunes_to_b_rank(prov_real_cb):
@@ -899,16 +1019,21 @@ def test_acc12_real_parse_value_member_prunes_to_b_rank(prov_real_cb):
 
     steps = _virtual_steps(cb, "f_member")
     pruned = [s for s in steps if s.pruned_candidates is not None]
-    assert pruned, "ACC-12: value member arg should prune a.rank() but no step was pruned"
+    assert pruned, (
+        "ACC-12: value member arg should prune a.rank() but no step was pruned"
+    )
     kept = {
         sel.target.sym.usr
-        for step in pruned for sel in step.pruned_candidates
+        for step in pruned
+        for sel in step.pruned_candidates
         if sel.target is not None
     }
     assert any("@S@B@" in u for u in kept), f"ACC-12: B::rank missing from {kept}"
     for absent in ("A", "C", "D"):
         offenders = [u for u in kept if f"@S@{absent}@" in u]
-        assert not offenders, f"ACC-12: {absent}::rank should be pruned, found {offenders}"
+        assert not offenders, (
+            f"ACC-12: {absent}::rank should be pruned, found {offenders}"
+        )
 
 
 def test_acc13_real_parse_value_global_prunes_to_b_rank(prov_real_cb):
@@ -927,16 +1052,21 @@ def test_acc13_real_parse_value_global_prunes_to_b_rank(prov_real_cb):
 
     steps = _virtual_steps(cb, "f_global")
     pruned = [s for s in steps if s.pruned_candidates is not None]
-    assert pruned, "ACC-13: value global arg should prune a.rank() but no step was pruned"
+    assert pruned, (
+        "ACC-13: value global arg should prune a.rank() but no step was pruned"
+    )
     kept = {
         sel.target.sym.usr
-        for step in pruned for sel in step.pruned_candidates
+        for step in pruned
+        for sel in step.pruned_candidates
         if sel.target is not None
     }
     assert any("@S@B@" in u for u in kept), f"ACC-13: B::rank missing from {kept}"
     for absent in ("A", "C", "D"):
         offenders = [u for u in kept if f"@S@{absent}@" in u]
-        assert not offenders, f"ACC-13: {absent}::rank should be pruned, found {offenders}"
+        assert not offenders, (
+            f"ACC-13: {absent}::rank should be pruned, found {offenders}"
+        )
 
 
 def test_acc14_real_parse_value_call_result_prunes_to_b_rank(prov_real_cb):
@@ -946,25 +1076,34 @@ def test_acc14_real_parse_value_call_result_prunes_to_b_rank(prov_real_cb):
     cb, _ = prov_real_cb
 
     row = _arg0_to_top_rank(cb, "f_callresult")
-    assert row is not None, "ACC-14: no call_arg row for f_callresult()->top_rank(make_b())"
+    assert row is not None, (
+        "ACC-14: no call_arg row for f_callresult()->top_rank(make_b())"
+    )
     src_kind, type_usr, decl_usr, callee_usr = row
-    assert src_kind == "call_result", f"ACC-14: expected 'call_result', got {src_kind!r}"
+    assert src_kind == "call_result", (
+        f"ACC-14: expected 'call_result', got {src_kind!r}"
+    )
     assert callee_usr is not None and "make_b" in callee_usr, (
         f"ACC-14: call_result callee_usr should name chain::make_b, got {callee_usr!r}"
     )
 
     steps = _virtual_steps(cb, "f_callresult")
     pruned = [s for s in steps if s.pruned_candidates is not None]
-    assert pruned, "ACC-14: by-value return arg should prune a.rank() but no step was pruned"
+    assert pruned, (
+        "ACC-14: by-value return arg should prune a.rank() but no step was pruned"
+    )
     kept = {
         sel.target.sym.usr
-        for step in pruned for sel in step.pruned_candidates
+        for step in pruned
+        for sel in step.pruned_candidates
         if sel.target is not None
     }
     assert any("@S@B@" in u for u in kept), f"ACC-14: B::rank missing from {kept}"
     for absent in ("A", "C", "D"):
         offenders = [u for u in kept if f"@S@{absent}@" in u]
-        assert not offenders, f"ACC-14: {absent}::rank should be pruned, found {offenders}"
+        assert not offenders, (
+            f"ACC-14: {absent}::rank should be pruned, found {offenders}"
+        )
 
 
 def test_acc15_real_parse_all_kinds_monotone(prov_real_cb):
@@ -975,10 +1114,16 @@ def test_acc15_real_parse_all_kinds_monotone(prov_real_cb):
         for step in _virtual_steps(cb, caller):
             if step.pruned_candidates is None:
                 continue
-            full = {sel.target.sym.usr for sel in step.dispatch_site.selections
-                    if sel.target is not None}
-            kept = {sel.target.sym.usr for sel in step.pruned_candidates
-                    if sel.target is not None}
+            full = {
+                sel.target.sym.usr
+                for sel in step.dispatch_site.selections
+                if sel.target is not None
+            }
+            kept = {
+                sel.target.sym.usr
+                for sel in step.pruned_candidates
+                if sel.target is not None
+            }
             assert kept <= full, (
                 f"ACC-15: {caller} pruned set {kept} is not a subset of Phase-1 {full}"
             )

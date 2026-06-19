@@ -48,8 +48,9 @@ def db_path():
         with open(path, "w") as fh:
             fh.write(SOURCE)
         tu = cx.Index.create().parse(path, args=clang_args(path) + ["-std=c++17"])
-        assert not [d for d in tu.diagnostics if d.severity >= 3], \
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
             "fixture source must parse cleanly"
+        )
         db = Storage(os.path.join(tmp, "i.db"))
         db.add_component("t", tmp)
         file_id = db.add_file_path(path)
@@ -70,6 +71,7 @@ def _by_spelling(conn, spelling):
 
 def test_static_member_method_is_flagged(db_path):
     import sqlite3
+
     conn = sqlite3.connect(db_path)
     row = _by_spelling(conn, "make")
     assert row is not None and row[1] == "method"
@@ -78,6 +80,7 @@ def test_static_member_method_is_flagged(db_path):
 
 def test_instance_method_is_not_static(db_path):
     import sqlite3
+
     conn = sqlite3.connect(db_path)
     row = _by_spelling(conn, "area")
     assert row is not None and row[1] == "method"
@@ -86,6 +89,7 @@ def test_instance_method_is_not_static(db_path):
 
 def test_free_functions_are_not_static(db_path):
     import sqlite3
+
     conn = sqlite3.connect(db_path)
     extern = _by_spelling(conn, "free_fn")
     hidden = _by_spelling(conn, "hidden_fn")

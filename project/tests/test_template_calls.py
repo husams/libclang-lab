@@ -62,8 +62,9 @@ def edges():
         with open(path, "w") as fh:
             fh.write(SOURCE)
         tu = cx.Index.create().parse(path, args=clang_args(path) + ["-std=c++17"])
-        assert not [d for d in tu.diagnostics if d.severity >= 3], \
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
             "fixture source must parse cleanly"
+        )
 
         db = Storage(os.path.join(tmp, "i.db"))
         db.add_component("t", tmp)
@@ -78,7 +79,8 @@ def edges():
             "SELECT a.qual_name, b.qual_name FROM edge e "
             "JOIN symbol a ON e.src_id = a.id "
             "JOIN symbol b ON e.dst_id = b.id "
-            "WHERE e.kind = 1").fetchall()        # kind 1 = calls
+            "WHERE e.kind = 1"
+        ).fetchall()  # kind 1 = calls
         out: dict[str, set[str]] = {}
         for src, dst in rows:
             out.setdefault(src, set()).add(dst)

@@ -35,9 +35,7 @@ import pytest
 
 # Resolve the manifests directory relative to this file tree so tests run
 # from any working directory.
-_REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..")
-)
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _MANIFESTS = os.path.join(_REPO_ROOT, "libclang-lab", "manifests")
 
 # Canonical clang args that parse the C manifests successfully (no headers
@@ -48,13 +46,9 @@ import subprocess as _sp
 
 def _clang_args(std: str = "c11") -> list[str]:
     """Return minimal libclang flags to parse manifests cleanly on this host."""
-    sysroot = _sp.check_output(
-        ["xcrun", "--show-sdk-path"], text=True
-    ).strip()
+    sysroot = _sp.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
     # clang resource dir (builtin headers)
-    resource_dir = _sp.check_output(
-        ["clang", "-print-resource-dir"], text=True
-    ).strip()
+    resource_dir = _sp.check_output(["clang", "-print-resource-dir"], text=True).strip()
     return [
         f"-std={std}",
         "-isysroot",
@@ -484,9 +478,7 @@ def test_cmd_locals_text_output(messy_target, capsys):
     from indexer.astcmd import _subtree
 
     var_names = [
-        c.spelling
-        for c, _, _ in _subtree(focus)
-        if c.kind == cx.CursorKind.VAR_DECL
+        c.spelling for c, _, _ in _subtree(focus) if c.kind == cx.CursorKind.VAR_DECL
     ]
     assert "Result" in var_names
 
@@ -737,11 +729,14 @@ def test_cmd_dump_geometry_cpp(capsys):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("source,std", [
-    ("calls.c", "c11"),
-    ("messy.c", "c11"),
-    ("geometry.cpp", "c++17"),
-])
+@pytest.mark.parametrize(
+    "source,std",
+    [
+        ("calls.c", "c11"),
+        ("messy.c", "c11"),
+        ("geometry.cpp", "c++17"),
+    ],
+)
 def test_cache_round_trip_multiple_sources(source, std, tmp_path):
     """Cold miss then warm hit on each manifest file -- parametrised boundary.
 

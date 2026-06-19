@@ -29,7 +29,9 @@ import sqlite3
 from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-SCHEMA_VERSION = 13
+from indexer import pathx as _pathx
+
+SCHEMA_VERSION = 14
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -64,12 +66,12 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS component (
-    id    INTEGER PRIMARY KEY,
-    name  TEXT NOT NULL,
-    path  TEXT NOT NULL UNIQUE,         -- repo root (where .git lives) or
-                                        -- header root for an external library
-    kind  TEXT NOT NULL DEFAULT 'repo'
-          CHECK (kind IN ('repo', 'external'))
+    id      INTEGER PRIMARY KEY,
+    name    TEXT NOT NULL,
+    path    TEXT NOT NULL UNIQUE,         -- base path (no version segment)
+    kind    TEXT NOT NULL DEFAULT 'repo'
+            CHECK (kind IN ('repo', 'external')),
+    version TEXT                          -- v14: nullable; NULL = unversioned
 );
 
 CREATE TABLE IF NOT EXISTS directory (
@@ -213,6 +215,12 @@ CREATE TABLE IF NOT EXISTS call_arg (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
+CREATE TABLE IF NOT EXISTS label (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,   -- label key, e.g. 'libfoo-include'
+    path TEXT NOT NULL           -- stored verbatim; may contain $VAR
+);
+
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
 
@@ -223,6 +231,7 @@ class Component:
     path: str
     kind: str = "repo"
     id: Optional[int] = None
+    version: Optional[str] = None  # v14: nullable; NULL = unversioned
 
 
 @dataclass
@@ -438,6 +447,17 @@ class Storage:
         if "call_arg" in tables and "type_is_value" not in cacols:
             self._conn.execute("ALTER TABLE call_arg ADD COLUMN type_is_value INTEGER")
             changed = True
+        # v13 -> v14: component.version column + label table.
+        compcols = {r[1] for r in self._conn.execute("PRAGMA table_info(component)")}
+        if "component" in tables and "version" not in compcols:
+            self._conn.execute("ALTER TABLE component ADD COLUMN version TEXT")
+            # No backfill -- existing components get version = NULL.
+            changed = True
+        if "label" not in tables:
+            # The schema script (run AFTER migrate) creates the table via
+            # CREATE TABLE IF NOT EXISTS; the migration only needs to flip
+            # changed so the schema_version meta is bumped.
+            changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
             # the tables + indexes + seeds edge_kind; nothing to backfill from
@@ -481,18 +501,85 @@ class Storage:
 
     # -- components ----------------------------------------------------------
 
-    def add_component(self, name: str, path: str, kind: str = "repo") -> int:
-        """Insert a component; idempotent on path. Returns the component id."""
-        path = os.path.abspath(path)
+    def add_component(
+        self, name: str, path: str, kind: str = "repo", version: Optional[str] = None
+    ) -> int:
+        """Insert a component; idempotent on path. Returns the component id.
+
+        On conflict (same path), updates name and kind; updates version only
+        when the caller supplies a non-None value (COALESCE: a re-import that
+        passes no version does NOT wipe an existing stored version).
+        """
+        # Preserve indirected (portable) paths verbatim; absolutize plain paths.
+        if "$" not in path and "<" not in path:
+            path = os.path.abspath(path)
         cur = self._conn.execute(
-            "INSERT INTO component (name, path, kind) VALUES (?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET name = excluded.name, kind = excluded.kind "
+            "INSERT INTO component (name, path, kind, version) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET "
+            "  name    = excluded.name, "
+            "  kind    = excluded.kind, "
+            "  version = COALESCE(excluded.version, component.version) "
             "RETURNING id",
-            (name, path, kind),
+            (name, path, kind, version),
         )
         cid = cur.fetchone()["id"]
         self._commit()
         return cid
+
+    def set_component_version(self, name: str, version: Optional[str]) -> bool:
+        """Set (or clear when version=None) a component's version by name.
+
+        Returns False when no component with that name exists.
+        """
+        cur = self._conn.execute(
+            "UPDATE component SET version = ? WHERE name = ?", (version, name)
+        )
+        self._commit()
+        return cur.rowcount > 0
+
+    @staticmethod
+    def effective_root(comp: "Component") -> str:
+        """Stored effective root (NOT resolved): version joined onto path.
+
+        Returns normpath(join(path, version)) when versioned, else path.
+        """
+        if comp.version:
+            return os.path.normpath(os.path.join(comp.path, comp.version))
+        return comp.path
+
+    # -- labels (v14) --------------------------------------------------------
+
+    def add_label(self, name: str, path: str) -> int:
+        """Upsert a label by name. Returns the label id."""
+        cur = self._conn.execute(
+            "INSERT INTO label (name, path) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET path = excluded.path "
+            "RETURNING id",
+            (name, path),
+        )
+        lid = cur.fetchone()["id"]
+        self._commit()
+        return lid
+
+    def remove_label(self, name: str) -> bool:
+        """Delete a label by name. Returns False if it did not exist."""
+        cur = self._conn.execute("DELETE FROM label WHERE name = ?", (name,))
+        self._commit()
+        return cur.rowcount > 0
+
+    def get_label(self, name: str) -> Optional[str]:
+        """Return the stored path for a label, or None if absent."""
+        row = self._conn.execute(
+            "SELECT path FROM label WHERE name = ?", (name,)
+        ).fetchone()
+        return row["path"] if row else None
+
+    def list_labels(self) -> list[tuple[str, str]]:
+        """All labels sorted by name; returns (name, stored_path) pairs."""
+        return [
+            (r["name"], r["path"])
+            for r in self._conn.execute("SELECT name, path FROM label ORDER BY name")
+        ]
 
     def get_component_by_name(self, name: str) -> Optional[Component]:
         row = self._conn.execute(
@@ -501,10 +588,26 @@ class Storage:
         return _row_to(Component, row)
 
     def get_component(self, path: str) -> Optional[Component]:
+        """Look up a component by root path.
+
+        Two-step lookup for version-split safety (§4.4):
+          1. Exact match on the stored BASE path.
+          2. If that misses, match where effective_root(comp) == abspath(path).
+        """
+        abs_path = os.path.abspath(path)
         row = self._conn.execute(
-            "SELECT * FROM component WHERE path = ?", (os.path.abspath(path),)
+            "SELECT * FROM component WHERE path = ?", (abs_path,)
         ).fetchone()
-        return _row_to(Component, row)
+        if row is not None:
+            return _row_to(Component, row)
+        # Fallback: match effective root (handles the version-split case where the
+        # user registered /src/v8 but the stored base is /src with version=v8).
+        for row in self._conn.execute("SELECT * FROM component"):
+            comp = _row_to(Component, row)
+            eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(comp)))
+            if eff == abs_path:
+                return comp
+        return None
 
     def get_component_by_id(self, component_id: int) -> Optional[Component]:
         row = self._conn.execute(
@@ -513,15 +616,25 @@ class Storage:
         return _row_to(Component, row)
 
     def component_for_path(self, abs_path: str) -> Optional[Component]:
-        """Longest-prefix match: which component owns this absolute path?"""
+        """Longest-prefix match: which component owns this absolute path?
+
+        Uses the effective root (base+version, resolved) for prefix matching,
+        so a versioned component stored as (path=/opt/libfoo, version=1.2.3)
+        correctly claims /opt/libfoo/1.2.3/include/... .
+        """
         abs_path = os.path.abspath(abs_path)
-        best = None
+        best: Optional[Component] = None
+        best_root_len = -1
         for row in self._conn.execute("SELECT * FROM component"):
-            root = row["path"].rstrip(os.sep)
+            comp = _row_to(Component, row)
+            root = os.path.abspath(
+                _pathx.resolve_fs_path(Storage.effective_root(comp))
+            ).rstrip(os.sep)
             if abs_path == root or abs_path.startswith(root + os.sep):
-                if best is None or len(root) > len(best["path"]):
-                    best = row
-        return _row_to(Component, best)
+                if len(root) > best_root_len:
+                    best = comp
+                    best_root_len = len(root)
+        return best
 
     def delete_component(self, component_id: int) -> None:
         """Remove a component and everything derived from it.
@@ -752,17 +865,23 @@ class Storage:
     def files(self) -> list[tuple[File, str]]:
         """Every file row with its reconstructed absolute path, sorted by path."""
         rows = self._conn.execute(
-            "SELECT f.*, c.path AS root, d.path AS rel "
+            "SELECT f.*, c.path AS root, c.version AS comp_version, d.path AS rel "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id "
             "ORDER BY c.path, d.path, f.name"
         ).fetchall()
         out = []
         for row in rows:
+            comp_stub = Component(
+                name="", path=row["root"], version=row["comp_version"]
+            )
+            eff = os.path.abspath(
+                _pathx.resolve_fs_path(Storage.effective_root(comp_stub))
+            )
             abs_path = (
-                os.path.join(row["root"], row["rel"], row["name"])
+                os.path.join(eff, row["rel"], row["name"])
                 if row["rel"]
-                else os.path.join(row["root"], row["name"])
+                else os.path.join(eff, row["name"])
             )
             out.append((_row_to(File, row), abs_path))
         return out
@@ -777,7 +896,7 @@ class Storage:
         """Like files(), with optional filters: component, directory subtree,
         fuzzy file name, and indexed state."""
         sql = (
-            "SELECT f.*, c.path AS root, d.path AS rel "
+            "SELECT f.*, c.path AS root, c.version AS comp_version, d.path AS rel "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id"
         )
@@ -798,10 +917,16 @@ class Storage:
         sql += " ORDER BY c.path, d.path, f.name"
         out = []
         for row in self._conn.execute(sql, args):
+            comp_stub = Component(
+                name="", path=row["root"], version=row["comp_version"]
+            )
+            eff = os.path.abspath(
+                _pathx.resolve_fs_path(Storage.effective_root(comp_stub))
+            )
             abs_path = (
-                os.path.join(row["root"], row["rel"], row["name"])
+                os.path.join(eff, row["rel"], row["name"])
                 if row["rel"]
-                else os.path.join(row["root"], row["name"])
+                else os.path.join(eff, row["name"])
             )
             out.append((_row_to(File, row), abs_path))
         return out
@@ -867,31 +992,36 @@ class Storage:
         return True
 
     def file_abs_path(self, file_id: int) -> Optional[str]:
-        """component.path / directory.path / file.name for a file id."""
+        """Reconstructed absolute path for a file id (uses effective root)."""
         row = self._conn.execute(
-            "SELECT c.path AS root, d.path AS rel, f.name AS name "
+            "SELECT c.path AS root, c.version AS version, d.path AS rel, f.name AS name "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id WHERE f.id = ?",
             (file_id,),
         ).fetchone()
         if row is None:
             return None
+        # Reconstruct via the effective root (base + version, resolved).
+        comp_stub = Component(name="", path=row["root"], version=row["version"])
+        eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(comp_stub)))
         return (
-            os.path.join(row["root"], row["rel"], row["name"])
+            os.path.join(eff, row["rel"], row["name"])
             if row["rel"]
-            else os.path.join(row["root"], row["name"])
+            else os.path.join(eff, row["name"])
         )
 
     def directory_abs_path(self, directory_id: int) -> Optional[str]:
-        """component.path / directory.path for a directory id."""
+        """Reconstructed absolute path for a directory id (uses effective root)."""
         row = self._conn.execute(
-            "SELECT c.path AS root, d.path AS rel FROM directory d "
+            "SELECT c.path AS root, c.version AS version, d.path AS rel FROM directory d "
             "JOIN component c ON c.id = d.component_id WHERE d.id = ?",
             (directory_id,),
         ).fetchone()
         if row is None:
             return None
-        return os.path.join(row["root"], row["rel"]) if row["rel"] else row["root"]
+        comp_stub = Component(name="", path=row["root"], version=row["version"])
+        eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(comp_stub)))
+        return os.path.join(eff, row["rel"]) if row["rel"] else eff
 
     def _split_path(self, abs_path: str) -> tuple[int, str, str]:
         """Absolute path -> (component_id, relative dir, file name)."""
@@ -899,7 +1029,10 @@ class Storage:
         comp = self.component_for_path(abs_path)
         if comp is None or comp.id is None:
             raise KeyError(f"no component owns {abs_path} (add_component first)")
-        rel = os.path.relpath(abs_path, comp.path)
+        resolved_root = os.path.abspath(
+            _pathx.resolve_fs_path(Storage.effective_root(comp))
+        )
+        rel = os.path.relpath(abs_path, resolved_root)
         rel_dir, name = os.path.split(rel)
         if rel_dir == ".":
             rel_dir = ""

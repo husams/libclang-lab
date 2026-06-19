@@ -14,8 +14,18 @@ import pytest
 from indexer.storage import Storage, Symbol
 from indexer.query import GraphQuery, EDGE_KINDS
 from indexer.model import (
-    CodeBase, Function, Method, Class, Field, Variable, Type, Location,
-    Reference, _parse_signature, _base_type_name, _split_top_level,
+    CodeBase,
+    Function,
+    Method,
+    Class,
+    Field,
+    Variable,
+    Type,
+    Location,
+    Reference,
+    _parse_signature,
+    _base_type_name,
+    _split_top_level,
 )
 
 
@@ -30,14 +40,27 @@ def _build_callgraph_db(db_path: str, repo: str, edges):
         comp = db.add_component("lab", repo)
         root = db.add_directory(comp, "")
         f = db.add_file(root, "m.c")
-        ids = {n: db.add_symbol(Symbol(
-            usr=f"c:@F@{n}", spelling=n, kind="function", qual_name=n,
-            file_id=f, line=1, col=1, is_definition=True, resolved=True))
-            for n in names}
+        ids = {
+            n: db.add_symbol(
+                Symbol(
+                    usr=f"c:@F@{n}",
+                    spelling=n,
+                    kind="function",
+                    qual_name=n,
+                    file_id=f,
+                    line=1,
+                    col=1,
+                    is_definition=True,
+                    resolved=True,
+                )
+            )
+            for n in names
+        }
         with db.transaction():
             for caller, callee, sites in edges:
-                e = db.add_edge(ids[caller], ids[callee], EDGE_KINDS["calls"],
-                                count=len(sites))
+                e = db.add_edge(
+                    ids[caller], ids[callee], EDGE_KINDS["calls"], count=len(sites)
+                )
                 for line, col in sites:
                     db.add_edge_site(e, f, line, col)
     return ids
@@ -54,6 +77,7 @@ def cb(resolved_db):
 # --------------------------------------------------------------------------- #
 # factory: kind -> entity class
 # --------------------------------------------------------------------------- #
+
 
 def test_wrap_maps_kinds_to_classes(cb, ids):
     assert isinstance(cb.get(ids["main"]), Function)
@@ -75,12 +99,13 @@ def test_find_returns_typed_entities(cb):
 def test_escape_hatch_to_low_level(cb, ids):
     fn = cb.get(ids["main"])
     assert fn.sym.id == ids["main"]
-    assert isinstance(cb.graph, GraphQuery)        # underlying handle reachable
+    assert isinstance(cb.graph, GraphQuery)  # underlying handle reachable
 
 
 # --------------------------------------------------------------------------- #
 # callables: call graph
 # --------------------------------------------------------------------------- #
+
 
 def test_function_callers_callees(cb, ids):
     main = cb.get(ids["main"])
@@ -100,15 +125,16 @@ def test_callgraph_unbounded(cb, ids):
     assert reached == {
         ids["helper"]: 1,
         ids["compute"]: 2,
-        ids["ext_fn"]: 2,        # external stub: reached, then a leaf
+        ids["ext_fn"]: 2,  # external stub: reached, then a leaf
     }
 
 
 def test_callgraph_is_lazy_generator(cb, ids):
     import types
+
     gen = cb.get(ids["main"]).callgraph()
     assert isinstance(gen, types.GeneratorType)
-    first, depth = next(gen)            # only the first level is computed so far
+    first, depth = next(gen)  # only the first level is computed so far
     assert first.id == ids["helper"] and depth == 1
 
 
@@ -118,7 +144,10 @@ def test_callgraph_depth_bound(cb, ids):
     assert {e.id for e, _ in main.callgraph(depth=1)} == {ids["helper"]}
     # depth=2 reaches the leaves
     assert {e.id for e, _ in main.callgraph(depth=2)} == {
-        ids["helper"], ids["compute"], ids["ext_fn"]}
+        ids["helper"],
+        ids["compute"],
+        ids["ext_fn"],
+    }
 
 
 def test_callgraph_leaf_has_empty_walk(cb, ids):
@@ -146,10 +175,14 @@ def test_callees_ordered_by_source_not_count(tmp_path):
     # A is called ONCE at line 10; B is called TWICE at line 20. Count order
     # would put B first; source order must put A (earlier line) first.
     db_path = str(tmp_path / "i.db")
-    ids = _build_callgraph_db(db_path, str(tmp_path / "r"), [
-        ("f", "A", [(10, 5)]),
-        ("f", "B", [(20, 5), (25, 5)]),
-    ])
+    ids = _build_callgraph_db(
+        db_path,
+        str(tmp_path / "r"),
+        [
+            ("f", "A", [(10, 5)]),
+            ("f", "B", [(20, 5), (25, 5)]),
+        ],
+    )
     with CodeBase(GraphQuery(db_path)) as cb:
         names = [e.name for e in cb.get(ids["f"]).callees()]
         assert names == ["A", "B"]
@@ -160,11 +193,15 @@ def test_callgraph_is_dfs_preorder_call_sequence(tmp_path):
     #   source order of f's calls: A (10) before B (30)
     #   execution/DFS pre-order: A, C (A's callee), B
     db_path = str(tmp_path / "i.db")
-    ids = _build_callgraph_db(db_path, str(tmp_path / "r"), [
-        ("f", "B", [(30, 5)]),
-        ("f", "A", [(10, 5)]),
-        ("A", "C", [(5, 5)]),
-    ])
+    ids = _build_callgraph_db(
+        db_path,
+        str(tmp_path / "r"),
+        [
+            ("f", "B", [(30, 5)]),
+            ("f", "A", [(10, 5)]),
+            ("A", "C", [(5, 5)]),
+        ],
+    )
     with CodeBase(GraphQuery(db_path)) as cb:
         seq = [(e.name, d) for e, d in cb.get(ids["f"]).callgraph()]
         assert seq == [("A", 1), ("C", 2), ("B", 1)]
@@ -173,11 +210,15 @@ def test_callgraph_is_dfs_preorder_call_sequence(tmp_path):
 def test_callgraph_dfs_depth_bound(tmp_path):
     # same shape; depth=1 stops before descending into A's callee C
     db_path = str(tmp_path / "i.db")
-    ids = _build_callgraph_db(db_path, str(tmp_path / "r"), [
-        ("f", "A", [(10, 5)]),
-        ("f", "B", [(30, 5)]),
-        ("A", "C", [(5, 5)]),
-    ])
+    ids = _build_callgraph_db(
+        db_path,
+        str(tmp_path / "r"),
+        [
+            ("f", "A", [(10, 5)]),
+            ("f", "B", [(30, 5)]),
+            ("A", "C", [(5, 5)]),
+        ],
+    )
     with CodeBase(GraphQuery(db_path)) as cb:
         seq = [(e.name, d) for e, d in cb.get(ids["f"]).callgraph(depth=1)]
         assert seq == [("A", 1), ("B", 1)]
@@ -186,6 +227,7 @@ def test_callgraph_dfs_depth_bound(tmp_path):
 # --------------------------------------------------------------------------- #
 # methods: owner / virtual / dispatch
 # --------------------------------------------------------------------------- #
+
 
 def test_method_owner_and_pure(cb, ids):
     draw = cb.get(ids["Base::draw"])
@@ -216,6 +258,7 @@ def test_dispatch_targets_excludes_pure_root(cb, ids):
 # records: members / inheritance / abstractness
 # --------------------------------------------------------------------------- #
 
+
 def test_record_fields_and_methods(cb, ids):
     base = cb.get(ids["Base"])
     assert cb.get(ids["Base::x"]) in base.fields
@@ -226,7 +269,7 @@ def test_record_member_access_filter(cb, ids):
     base = cb.get(ids["Base"])
     private = base.members(access="private")
     assert cb.get(ids["Base::x"]) in private
-    assert cb.get(ids["Base::draw"]) not in private   # draw is public
+    assert cb.get(ids["Base::draw"]) not in private  # draw is public
 
 
 def test_inheritance_parents_children(cb, ids):
@@ -253,6 +296,7 @@ def test_is_abstract(cb, ids):
 # references
 # --------------------------------------------------------------------------- #
 
+
 def test_references_calls_and_uses(cb, ids):
     compute = cb.get(ids["compute"])
     refs = compute.references()
@@ -273,6 +317,7 @@ def test_references_calls_and_uses(cb, ids):
 # locations: definition vs declaration
 # --------------------------------------------------------------------------- #
 
+
 def test_definition_only_has_no_separate_declaration(cb, ids):
     main = cb.get(ids["main"])
     assert main.definition is not None
@@ -291,12 +336,23 @@ def test_distinct_decl_and_def(tmp_path):
         f_h = db.add_file(root, "m.h")
         f_c = db.add_file(root, "m.c")
         # prototype in header (decl), body in .c (def): both sites recorded
-        db.add_symbol(Symbol(
-            usr="c:@F@multiply", spelling="multiply", kind="function",
-            qual_name="multiply", file_id=f_c, line=40, col=1,
-            decl_file_id=f_h, decl_line=3, decl_col=1,
-            is_definition=True, resolved=True,
-            type_info="int (int, int)"))
+        db.add_symbol(
+            Symbol(
+                usr="c:@F@multiply",
+                spelling="multiply",
+                kind="function",
+                qual_name="multiply",
+                file_id=f_c,
+                line=40,
+                col=1,
+                decl_file_id=f_h,
+                decl_line=3,
+                decl_col=1,
+                is_definition=True,
+                resolved=True,
+                type_info="int (int, int)",
+            )
+        )
     with CodeBase(GraphQuery(db_path)) as cb:
         fn = cb.by_name("multiply")[0]
         assert isinstance(fn, Function)
@@ -312,16 +368,26 @@ def test_distinct_decl_and_def(tmp_path):
 # signature / type parsing units
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("sig, ret, args", [
-    ("int (void)", "int", []),
-    ("int (int, int)", "int", ["int", "int"]),
-    ("std::list<std::string> *()", "std::list<std::string> *", []),
-    ("RdKafka::Conf *(ConfType)", "RdKafka::Conf *", ["ConfType"]),
-    ("Error *(ErrorCode, const std::string *)", "Error *",
-     ["ErrorCode", "const std::string *"]),
-    ("void (const std::pair<int, int> &)", "void",
-     ["const std::pair<int, int> &"]),       # comma inside <> not a separator
-])
+
+@pytest.mark.parametrize(
+    "sig, ret, args",
+    [
+        ("int (void)", "int", []),
+        ("int (int, int)", "int", ["int", "int"]),
+        ("std::list<std::string> *()", "std::list<std::string> *", []),
+        ("RdKafka::Conf *(ConfType)", "RdKafka::Conf *", ["ConfType"]),
+        (
+            "Error *(ErrorCode, const std::string *)",
+            "Error *",
+            ["ErrorCode", "const std::string *"],
+        ),
+        (
+            "void (const std::pair<int, int> &)",
+            "void",
+            ["const std::pair<int, int> &"],
+        ),  # comma inside <> not a separator
+    ],
+)
 def test_parse_signature(sig, ret, args):
     assert _parse_signature(sig) == (ret, args)
 
@@ -331,13 +397,16 @@ def test_parse_signature_non_function():
     assert _parse_signature(None) == (None, None)
 
 
-@pytest.mark.parametrize("spelling, base", [
-    ("const std::string &", "std::string"),
-    ("Foo<int> *", "Foo"),
-    ("unsigned int", "int"),
-    ("struct error", "error"),
-    ("uint32_t[8][256]", "uint32_t"),
-])
+@pytest.mark.parametrize(
+    "spelling, base",
+    [
+        ("const std::string &", "std::string"),
+        ("Foo<int> *", "Foo"),
+        ("unsigned int", "int"),
+        ("struct error", "error"),
+        ("uint32_t[8][256]", "uint32_t"),
+    ],
+)
 def test_base_type_name(spelling, base):
     assert _base_type_name(spelling) == base
 
@@ -349,6 +418,7 @@ def test_split_top_level_respects_brackets():
 # --------------------------------------------------------------------------- #
 # type resolution
 # --------------------------------------------------------------------------- #
+
 
 def test_type_resolves_to_declaration(cb, ids):
     # a Type naming Base resolves to the Base class entity

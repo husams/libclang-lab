@@ -79,8 +79,9 @@ def cb():
         with open(path, "w") as fh:
             fh.write(SOURCE)
         tu = cx.Index.create().parse(path, args=clang_args(path) + ["-std=c++17"])
-        assert not [d for d in tu.diagnostics if d.severity >= 3], \
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
             "fixture source must parse cleanly"
+        )
 
         db = Storage(os.path.join(tmp, "i.db"))
         db.add_component("t", tmp)
@@ -105,6 +106,7 @@ def _box_template(cb):
 # template parameters
 # --------------------------------------------------------------------------- #
 
+
 def test_class_template_parameters(cb):
     box = _box_template(cb)
     params = box.parameters
@@ -117,23 +119,27 @@ def test_class_template_parameters(cb):
 # instantiation vs specialization
 # --------------------------------------------------------------------------- #
 
+
 def test_explicit_instantiation_is_instance_not_specialization(cb):
     box = _box_template(cb)
     # The explicit instantiation `template class Box<int>;` is a concrete
     # instance: it must show up under instantiations(), NOT specializations().
-    inst_args = {tuple(a.literal for a in i.template_arguments)
-                 for i in box.instantiations()}
+    inst_args = {
+        tuple(a.literal for a in i.template_arguments) for i in box.instantiations()
+    }
     assert ("int",) in inst_args
-    spec_args = {tuple(a.literal for a in s.template_arguments)
-                 for s in box.specializations()}
+    spec_args = {
+        tuple(a.literal for a in s.template_arguments) for s in box.specializations()
+    }
     assert ("int",) not in spec_args
 
 
 def test_explicit_specialization_is_specialization(cb):
     box = _box_template(cb)
     # `template <> class Box<bool>` is a true specialization.
-    spec_args = {tuple(a.literal for a in s.template_arguments)
-                 for s in box.specializations()}
+    spec_args = {
+        tuple(a.literal for a in s.template_arguments) for s in box.specializations()
+    }
     assert ("bool",) in spec_args
 
 
@@ -153,6 +159,7 @@ def test_instantiation_sites_are_the_using_functions(cb):
 # --------------------------------------------------------------------------- #
 # template arguments carry the type spelling (Box<bool> != Box<int>)
 # --------------------------------------------------------------------------- #
+
 
 def test_type_args_record_spelling_for_builtins(cb):
     box = _box_template(cb)

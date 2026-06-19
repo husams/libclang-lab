@@ -41,7 +41,6 @@ def main() -> None:
     #
     # Use it as a context manager so the DB handle is always closed.
     with open_query() as g:
-
         # ------------------------------------------------------------------- #
         # 2. SIZE IT UP
         # ------------------------------------------------------------------- #
@@ -59,8 +58,10 @@ def main() -> None:
         # so the rest of the output isn't mysteriously blank.
         if g.edge_count() == 0:
             print("\n  !! this index has NO edges — callers/callees/etc. will be")
-            print("     empty. Regenerate: cidx set pending=True; cidx index; "
-                  "cidx resolve\n")
+            print(
+                "     empty. Regenerate: cidx set pending=True; cidx index; "
+                "cidx resolve\n"
+            )
 
         # ------------------------------------------------------------------- #
         # 3. LOOK A SYMBOL UP — three ways
@@ -86,7 +87,7 @@ def main() -> None:
         #     pass a Sym straight through (handy when you accept "either" in a
         #     helper). Returns None if nothing matches.
         if hits:
-            same = g.get(hits[0].usr)        # look the first hit back up by USR
+            same = g.get(hits[0].usr)  # look the first hit back up by USR
             print(f"\n== get({hits[0].usr!r}) ==")
             if same:
                 _print_sym(same)
