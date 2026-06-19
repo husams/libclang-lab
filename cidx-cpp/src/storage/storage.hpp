@@ -319,14 +319,23 @@ public:
   std::optional<std::string> get_label(const std::string &name);
   // Sorted by name; returns (name, stored path) pairs.
   std::vector<std::pair<std::string, std::string>> list_labels();
-  // Encode registry for include-path aliasing: explicit labels PLUS every
-  // UNIQUELY-named component (value = its stored effective root). Labels win
-  // on a name collision; a duplicated component name is skipped. Decode mirror
-  // = get_alias. Sorted by name. (Python Storage.list_alias_pairs.)
-  std::vector<std::pair<std::string, std::string>> list_alias_pairs();
-  // Decode an alias name: explicit label first, then a UNIQUELY-named
-  // component (-> its stored effective root); nullopt otherwise (a duplicated
-  // component name is ambiguous). (Python Storage.get_alias.)
+  // Version-agnostic component alias map: name -> (base, max_version,
+  // bumpable). Effective root is split into (base, version); rows grouped by
+  // name; a name is kept only when all rows share ONE base (else ambiguous).
+  // max_version = "" when none. bumpable = true only for a single row whose
+  // stored path carries no embedded version (safe to set_component_version).
+  // (Python Storage.component_alias_index.)
+  std::map<std::string, std::tuple<std::string, std::string, bool>>
+  component_alias_index();
+  // Encode registry for include-path aliasing as (name, match_path, versioned)
+  // triples: explicit labels (exact) PLUS components (version-stripped base,
+  // version-agnostic). Labels win on a name collision; components with
+  // conflicting bases are skipped. Decode mirror = get_alias. Sorted by name.
+  // (Python Storage.list_alias_pairs.)
+  std::vector<std::tuple<std::string, std::string, bool>> list_alias_pairs();
+  // Decode an alias name: explicit label -> stored path; else a uniquely-based
+  // component -> base joined with its highest version; nullopt otherwise.
+  // (Python Storage.get_alias.)
   std::optional<std::string> get_alias(const std::string &name);
 
   // Raw connection — exposed for tests (schema assertions on :memory: DBs)

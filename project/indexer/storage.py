@@ -581,36 +581,81 @@ class Storage:
             for r in self._conn.execute("SELECT name, path FROM label ORDER BY name")
         ]
 
-    def list_alias_pairs(self) -> list[tuple[str, str]]:
-        """Encode registry for include-path aliasing: explicit labels PLUS
-        every UNIQUELY-named component (value = its stored effective root).
+    def component_alias_index(
+        self,
+    ) -> dict[str, tuple[str, Optional[str], bool]]:
+        """Version-agnostic component alias map: name -> (base, max_version,
+        bumpable).
 
-        Component names are not UNIQUE in the schema, so only names that occur
-        exactly once are eligible — a duplicated name has no deterministic
-        decode and is skipped. Explicit labels win on a name collision. The
-        decode side of this same registry is `get_alias`. Returned sorted by
-        name; `build_label_map` re-sorts by resolved length for longest-match.
+        For each component the resolved effective root is split into
+        (base, version) by trailing-segment detection, so matching is done on
+        the VERSION-STRIPPED base. Rows are grouped by name; a name is included
+        only when all its rows share ONE base (conflicting bases = ambiguous,
+        skipped). `max_version` is the numeric-max trailing version across the
+        rows (None if none). `bumpable` is True only when the name has exactly
+        one row whose stored `path` carries no embedded version segment (pure
+        version-as-property) — so `set_component_version` is safe and
+        non-destructive; otherwise version-bump-on-import is skipped for it.
         """
-        pairs: dict[str, str] = dict(self.list_labels())  # labels win
-        comps = self.list_components()
-        counts: dict[str, int] = {}
-        for c in comps:
-            counts[c.name] = counts.get(c.name, 0) + 1
-        for c in comps:
-            if counts[c.name] == 1 and c.name not in pairs:
-                pairs[c.name] = Storage.effective_root(c)
-        return sorted(pairs.items())
+        by_name: dict[str, list[tuple[str, Optional[str], bool]]] = {}
+        for c in self.list_components():
+            eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(c)))
+            base, ver = _pathx.split_base_version(eff)
+            _, path_ver = _pathx.split_base_version(
+                os.path.abspath(_pathx.resolve_fs_path(c.path))
+            )
+            by_name.setdefault(c.name, []).append((base, ver, path_ver is None))
+        out: dict[str, tuple[str, Optional[str], bool]] = {}
+        for name, rows in by_name.items():
+            bases = {b for b, _v, _p in rows}
+            if len(bases) != 1:
+                continue  # ambiguous: same name, different base dirs
+            base = next(iter(bases))
+            vers = [v for _b, v, _p in rows if v]
+            maxver = max(vers, key=_pathx.version_key) if vers else None
+            bumpable = len(rows) == 1 and rows[0][2]
+            out[name] = (base, maxver, bumpable)
+        return out
+
+    def list_alias_pairs(self) -> list[tuple[str, str, bool]]:
+        """Encode registry for include-path aliasing as (name, match_path,
+        versioned) triples:
+
+          - explicit labels -> (name, stored_path, False): exact match, no
+            version handling.
+          - components -> (name, version-stripped base, True): version-agnostic
+            match; the version segment after the base is dropped at encode and
+            re-injected at decode (`get_alias` -> base + highest version).
+
+        Labels win on a name collision; component names with conflicting bases
+        are skipped (ambiguous). Sorted by name; `build_label_map` re-sorts by
+        resolved length for longest-match. Decode mirror = `get_alias`.
+        """
+        triples: list[tuple[str, str, bool]] = []
+        label_names: set[str] = set()
+        for name, stored in self.list_labels():
+            triples.append((name, stored, False))
+            label_names.add(name)
+        for name, (base, _ver, _bump) in self.component_alias_index().items():
+            if name not in label_names:
+                triples.append((name, base, True))
+        triples.sort(key=lambda t: t[0])
+        return triples
 
     def get_alias(self, name: str) -> Optional[str]:
-        """Decode an alias name: explicit label first, then a UNIQUELY-named
-        component (-> its stored effective root). None if neither applies (a
-        duplicated component name is ambiguous and resolves to None). Mirror of
-        the `list_alias_pairs` encode registry."""
+        """Decode an alias name: explicit label -> stored path; else a
+        uniquely-based component -> its base joined with the highest known
+        version (= effective root at the max version). None if neither applies
+        (or an ambiguous duplicate-based component name). Mirror of the
+        `list_alias_pairs` encode registry."""
         path = self.get_label(name)
         if path is not None:
             return path
-        matches = [c for c in self.list_components() if c.name == name]
-        return Storage.effective_root(matches[0]) if len(matches) == 1 else None
+        entry = self.component_alias_index().get(name)
+        if entry is None:
+            return None
+        base, maxver, _bump = entry
+        return os.path.join(base, maxver) if maxver else base
 
     def get_component_by_name(self, name: str) -> Optional[Component]:
         row = self._conn.execute(
