@@ -1176,6 +1176,18 @@ void Storage::set_file_compile_options(
   }
 }
 
+void Storage::update_file_compile_options(
+    int64_t file_id, const std::vector<std::string> &options) {
+  // UPDATE compile_options WITHOUT setting args_overridden (realias semantics).
+  // Port of storage.py update_file_compile_options.
+  const std::string opts = json_min::encode_string_array(options);
+  auto st =
+      db_.prepare("UPDATE file SET compile_options = ? WHERE id = ?");
+  st.bind(1, std::string_view(opts));
+  st.bind(2, file_id);
+  st.step_done();
+}
+
 bool Storage::is_file_indexed(const std::string &abs_path,
                               const std::optional<double> &mtime,
                               const std::optional<std::string> &md5) {

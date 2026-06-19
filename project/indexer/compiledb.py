@@ -12,6 +12,7 @@ import tempfile
 
 from clang.cindex import CompilationDatabase
 
+from indexer.pathx import resolve_fs_path  # noqa: F401
 from indexer.pathx import split_base_version  # re-exported for CLI use  # noqa: F401
 
 
@@ -182,3 +183,100 @@ def driver(cmd) -> str:
     """
     argv0 = list(cmd.arguments)[0]
     return _abs(argv0, cmd.directory) if os.sep in argv0 else argv0
+
+
+# ---------------------------------------------------------------------------
+# Include-path aliasing (v0.6.0): encode absolute -I dirs <-> <label> tokens.
+#
+# Two paired transforms over the -I/-isystem/-iquote VALUES only (both the
+# 'space' form `-I path` and the 'glued' form `-Ipath`); every other token
+# passes through untouched:
+#
+#   alias_options   ENCODE  absolute dir  -> <label>   (registry, longest match)
+#   resolve_options DECODE  <label>/$VAR  -> absolute  (parse-time, for libclang)
+#
+# Stored compile_options keep the indirected (aliased) form so the index is
+# portable; resolve_options is applied just before handing args to libclang.
+# ---------------------------------------------------------------------------
+
+_INCLUDE_FLAGS = ("-I", "-isystem", "-iquote")
+
+
+def _map_include_values(options, fn) -> list[str]:
+    """Return a copy of *options* with *fn* applied to each include-path value.
+
+    Handles `-I path` (two tokens) and `-Ipath` (glued); all other tokens are
+    copied verbatim. fn receives the bare path value and returns its rewrite.
+    """
+    out: list[str] = []
+    it = iter(options)
+    for tok in it:
+        matched = False
+        for flag in _INCLUDE_FLAGS:
+            if tok == flag:  # space form: -I path
+                out += [flag, fn(next(it, ""))]
+                matched = True
+                break
+            if tok.startswith(flag) and len(tok) > len(flag):  # glued: -Ipath
+                out.append(flag + fn(tok[len(flag) :]))
+                matched = True
+                break
+        if not matched:
+            out.append(tok)
+    return out
+
+
+def resolve_options(options, lookup=None, autoderive: bool = True) -> list[str]:
+    """DECODE: resolve <label>/$VAR/~ in include-path values to absolute paths.
+
+    Only values that look indirected (contain '<' or '$' or start with '~') are
+    resolved (via the full resolution chain + abspath); already-absolute plain
+    paths are left untouched. Used at parse/index time so libclang sees real
+    directories.
+    """
+
+    def _fn(val: str) -> str:
+        if "<" in val or "$" in val or val.startswith("~"):
+            return os.path.abspath(
+                resolve_fs_path(val, lookup=lookup, autoderive=autoderive)
+            )
+        return val
+
+    return _map_include_values(options, _fn)
+
+
+def build_label_map(labels, lookup=None) -> list[tuple[str, str]]:
+    """Build the encode lookup from (name, stored_path) pairs.
+
+    Each stored path is resolved to an absolute directory (env-vars expanded,
+    NO autoderive — a label's own value is taken literally). Returned sorted
+    most-specific first (longest resolved path, then name) so the longest
+    prefix wins deterministically in both Python and C++.
+    """
+    out: list[tuple[str, str]] = []
+    for name, stored in labels:
+        rp = os.path.abspath(resolve_fs_path(stored, lookup=lookup, autoderive=False))
+        out.append((name, rp))
+    out.sort(key=lambda nr: (-len(nr[1]), nr[0]))
+    return out
+
+
+def alias_options(options, label_map) -> list[str]:
+    """ENCODE: rewrite absolute include-path values to <label> tokens.
+
+    *label_map* is the output of build_label_map (sorted longest-first). A value
+    equal to or under a label's resolved directory becomes `<name>` + remainder
+    (longest match wins). Values already indirected ('<' or '$') and relative
+    values are left unchanged.
+    """
+
+    def _fn(val: str) -> str:
+        if "<" in val or "$" in val or not os.path.isabs(val):
+            return val
+        absval = os.path.normpath(val)
+        for name, rp in label_map:
+            if absval == rp or absval.startswith(rp + os.sep):
+                return "<" + name + ">" + absval[len(rp) :]
+        return val
+
+    return _map_include_values(options, _fn)

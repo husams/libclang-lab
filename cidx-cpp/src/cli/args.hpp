@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.5.1";
+inline constexpr const char *kVersion = "0.6.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -100,6 +100,9 @@ struct ParsedArgs {
   bool no_autoderive_labels = false;       // --no-autoderive-labels (index)
   std::optional<std::string> label_token; // label add/rm/resolve NAME
   std::optional<std::string> label_path;  // label add PATH
+
+  // -- aliasing (v0.6.0) fields ----------------------------------------------
+  bool no_alias = false; // import --no-alias (skip alias_options encoding)
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

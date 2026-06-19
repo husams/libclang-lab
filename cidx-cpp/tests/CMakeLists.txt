@@ -14,6 +14,7 @@ set(CIDX_DEFAULT_TESTS
   graph_parity_boundary_test
   fuzzy_match_test
   repo_test
+  include_aliasing_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)

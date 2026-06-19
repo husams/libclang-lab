@@ -17,6 +17,7 @@
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
 #include "cli/kind_names.hpp"
+#include "compiledb/compiledb.hpp"
 #include "storage/storage.hpp"
 #include "util/pathutil.hpp"
 
@@ -463,10 +464,12 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
         }
         AstTarget t;
         t.abspath = abs_path;
-        t.flags = rec->compile_options ? std::vector<std::string>(
-                                             rec->compile_options->begin(),
-                                             rec->compile_options->end())
-                                       : std::vector<std::string>{};
+        t.flags = CompileDb::resolve_options(
+            rec->compile_options
+                ? std::vector<std::string>(rec->compile_options->begin(),
+                                           rec->compile_options->end())
+                : std::vector<std::string>{},
+            [&db](const std::string &n) { return db.get_label(n); });
         t.driver = rec->driver;
         t.focus_usr = focus_usr;
         t.focus_name = focus_name;
@@ -498,10 +501,12 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
       if (rec) {
         AstTarget t;
         t.abspath = abs_path;
-        t.flags = rec->compile_options ? std::vector<std::string>(
-                                             rec->compile_options->begin(),
-                                             rec->compile_options->end())
-                                       : std::vector<std::string>{};
+        t.flags = CompileDb::resolve_options(
+            rec->compile_options
+                ? std::vector<std::string>(rec->compile_options->begin(),
+                                           rec->compile_options->end())
+                : std::vector<std::string>{},
+            [&db](const std::string &n) { return db.get_label(n); });
         t.driver = rec->driver;
         t.focus_usr = focus_usr;
         t.focus_name = focus_name;
@@ -599,11 +604,12 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
 
     AstTarget t;
     t.abspath = *path;
-    t.flags =
+    t.flags = CompileDb::resolve_options(
         rec->compile_options
             ? std::vector<std::string>(rec->compile_options->begin(),
                                        rec->compile_options->end())
-            : std::vector<std::string>{};
+            : std::vector<std::string>{},
+        [&db](const std::string &n) { return db.get_label(n); });
     t.driver = rec->driver;
     t.focus_usr = sym.usr;
     return {std::move(t), 0};
