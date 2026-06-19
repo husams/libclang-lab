@@ -974,6 +974,18 @@ class Storage:
             )
         self._commit()
 
+    def update_file_compile_options(self, file_id: int, options: list[str]) -> None:
+        """Replace a file's stored compile flags WITHOUT marking args_overridden.
+
+        Used by `cidx realias`, which rewrites include paths to <label> tokens as
+        a portability transform (not a manual edit) -- a later `import` should be
+        free to re-strip + re-alias these files."""
+        self._conn.execute(
+            "UPDATE file SET compile_options = ? WHERE id = ?",
+            (json.dumps(options), file_id),
+        )
+        self._commit()
+
     def is_file_indexed(
         self, abs_path: str, mtime: Optional[float] = None, md5: Optional[str] = None
     ) -> bool:

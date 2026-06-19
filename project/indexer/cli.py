@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 
 
 def cache_dir() -> str:
@@ -201,6 +201,13 @@ def cmd_import(args) -> int:
 
     imported, skipped = 0, 0
     with Storage(args.index) as db:
+        # Encode include paths against the label registry unless --no-alias.
+        # Labels must be pre-registered (cidx label add) before import.
+        label_map = (
+            []
+            if getattr(args, "no_alias", False)
+            else compiledb.build_label_map(db.list_labels(), lookup=db.get_label)
+        )
         if args.force:
             existing = db.get_component(root)
             if existing is not None:
@@ -230,15 +237,50 @@ def cmd_import(args) -> int:
                         skipped += 1
                         continue
                 mtime = os.path.getmtime(src) if os.path.exists(src) else None
+                opts = compiledb.strip_for_libclang(cmd)
+                if label_map:
+                    opts = compiledb.alias_options(opts, label_map)
                 db.add_file_path(
                     src,
                     mtime=mtime,
                     md5=md5_of(src),
-                    compile_options=compiledb.strip_for_libclang(cmd),
+                    compile_options=opts,
                     driver=compiledb.driver(cmd),
                 )
                 imported += 1
     print(f"imported {imported} file(s), skipped {skipped}")
+    return 0
+
+
+def cmd_realias(args) -> int:
+    """cidx realias [COMPONENT] -- rewrite stored include paths to <label> tokens.
+
+    Applies the label registry (longest match) to every file's stored
+    compile_options, in place, so an index imported before labels were
+    registered becomes portable without a re-import."""
+    with Storage(args.index) as db:
+        label_map = compiledb.build_label_map(db.list_labels(), lookup=db.get_label)
+        if not label_map:
+            print("error: no labels registered (use 'cidx label add')", file=sys.stderr)
+            return 1
+        cid = None
+        if args.component:
+            comp = _lookup_component(db, args.component)
+            if comp is None:
+                print(f"error: no component named '{args.component}'", file=sys.stderr)
+                return 1
+            cid = comp.id
+        changed, scanned = 0, 0
+        for rec, _path in db.list_files(component_id=cid):
+            if not rec.compile_options or rec.id is None:
+                continue
+            scanned += 1
+            cur = list(rec.compile_options)
+            new = compiledb.alias_options(cur, label_map)
+            if new != cur:
+                db.update_file_compile_options(rec.id, new)
+                changed += 1
+    print(f"realias: {changed} file(s) updated, {scanned} scanned")
     return 0
 
 
@@ -268,7 +310,9 @@ def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int
         result = index_source(
             db,
             path,
-            compiledb.sanitize(rec.compile_options or []),
+            compiledb.resolve_options(
+                compiledb.sanitize(rec.compile_options or []), db.get_label
+            ),
             rec.id,
             driver=rec.driver,
             no_graph=no_graph,
@@ -1471,7 +1515,31 @@ def main(argv=None) -> int:
         action="store_true",
         help="disable trailing-segment version detection",
     )
+    p.add_argument(
+        "--no-alias",
+        dest="no_alias",
+        action="store_true",
+        help="do not rewrite include paths to <label> tokens via the registry",
+    )
     p.set_defaults(fn=cmd_import)
+
+    p = sub.add_parser(
+        "realias",
+        help="rewrite stored include paths to <label> tokens via the registry",
+    )
+    p.add_argument(
+        "component",
+        nargs="?",
+        metavar="COMPONENT",
+        help="restrict to one component (default: all files)",
+    )
+    p.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="index database (default: the standard cache index)",
+    )
+    p.set_defaults(fn=cmd_realias)
 
     p = sub.add_parser("index", help="index imported C/C++ files")
     p.add_argument(

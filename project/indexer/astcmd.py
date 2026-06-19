@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import clang.cindex as cx
 
+from . import compiledb
 from .clang.ast import _COND_KINDS, _FUNCTION_KINDS, _file_cursors
 from .storage import Storage, Symbol
 
@@ -128,7 +129,9 @@ def resolve_target(args) -> tuple[Target | None, int]:
                     return None, 1
                 return Target(
                     abspath=abs_path,
-                    flags=list(rec.compile_options or []),
+                    flags=compiledb.resolve_options(
+                        list(rec.compile_options or []), db.get_label
+                    ),
                     driver=rec.driver,
                     focus_usr=focus_usr,
                     focus_name=focus_name,
@@ -147,7 +150,9 @@ def resolve_target(args) -> tuple[Target | None, int]:
             if rec is not None:
                 return Target(
                     abspath=abs_path,
-                    flags=list(rec.compile_options or []),
+                    flags=compiledb.resolve_options(
+                        list(rec.compile_options or []), db.get_label
+                    ),
                     driver=rec.driver,
                     focus_usr=focus_usr,
                     focus_name=focus_name,
@@ -193,7 +198,9 @@ def resolve_target(args) -> tuple[Target | None, int]:
             return None, 1
         return Target(
             abspath=path,
-            flags=list(rec.compile_options or []),
+            flags=compiledb.resolve_options(
+                list(rec.compile_options or []), db.get_label
+            ),
             driver=rec.driver,
             focus_usr=sym.usr,
             symbol=sym,
