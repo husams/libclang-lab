@@ -10,10 +10,17 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace cidx {
+
+// Encode-registry entry: (name, match_path, versioned). `versioned` marks a
+// component (version-agnostic match — the version segment after the base is
+// stripped at encode and re-injected at decode); labels are exact (false).
+// Mirrors the Python (name, path, versioned) tuples.
+using AliasEntry = std::tuple<std::string, std::string, bool>;
 
 struct CompileCommand {
   std::string directory; // cmd.directory as reported by libclang
@@ -65,6 +72,15 @@ public:
   static std::pair<std::string, std::string>
   split_base_version(const std::string &root);
 
+  // True iff seg matches the version regex ^v?[0-9]+([._-][0-9]+)*$.
+  static bool is_version_segment(const std::string &seg);
+
+  // Numeric per-segment sort key for a version string (drops a leading 'v',
+  // splits on '.','_','-', keeps numeric fields). Lexicographic compare of the
+  // returned vector matches Python's tuple-of-ints version_key, so
+  // 18-0-0-275 > 18-0-0-100 > 18-0-0-11.
+  static std::vector<long long> version_key(const std::string &version);
+
   // ---------------------------------------------------------------------------
   // Include-path aliasing (v0.6.0): encode absolute -I dirs <-> <label> tokens
   // (compiledb.py alias_options / resolve_options / build_label_map).
@@ -81,25 +97,40 @@ public:
                       lookup = nullptr,
                   bool autoderive = true);
 
-  // Build the encode label map from (name, stored_path) pairs.
+  // Build the encode label map from (name, stored_path, versioned) entries.
   // Each stored path is resolved to an absolute directory (env-vars expanded,
   // NO autoderive). Sorted longest-resolved-path first, then name, so the
-  // longest prefix wins deterministically.
+  // longest prefix wins deterministically. The versioned flag passes through.
   // lookup: used to resolve labels within stored paths (rarely needed).
-  static std::vector<std::pair<std::string, std::string>>
+  static std::vector<AliasEntry>
   build_label_map(
-      const std::vector<std::pair<std::string, std::string>> &labels,
+      const std::vector<AliasEntry> &labels,
       std::function<std::optional<std::string>(const std::string &)> lookup =
           nullptr);
 
+  // Longest-match an absolute path against label_map. Returns
+  // (name, version_segment, remainder) for the first (longest) matching entry,
+  // else nullopt. For a versioned (component) entry the segment after the base,
+  // if it looks like a version, is captured as version_segment and excluded
+  // from remainder (empty string = none). Mirrors compiledb.py:match_alias.
+  static std::optional<std::tuple<std::string, std::string, std::string>>
+  match_alias(const std::string &absval,
+              const std::vector<AliasEntry> &label_map);
+
+  // Yield each include-path VALUE (both `-I path` and `-Ipath`), skipping every
+  // other token. Read-only counterpart of the encode walk; used by the import
+  // version-bump scan. Mirrors compiledb.py:include_values.
+  static std::vector<std::string>
+  include_values(const std::vector<std::string> &options);
+
   // ENCODE: rewrite absolute include-path values to <label> tokens.
   // label_map is the output of build_label_map (sorted longest-first).
-  // A value equal to or under a label's resolved directory becomes
-  // "<name>" + remainder (longest match wins).
+  // A value equal to or under an entry's resolved directory becomes
+  // "<name>" + remainder (longest match wins; component entries strip version).
   // Values already indirected ('<' or '$') and relative values are unchanged.
   static std::vector<std::string>
   alias_options(const std::vector<std::string> &options,
-                const std::vector<std::pair<std::string, std::string>> &label_map);
+                const std::vector<AliasEntry> &label_map);
 };
 
 } // namespace cidx

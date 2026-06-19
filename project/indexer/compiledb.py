@@ -12,6 +12,7 @@ import tempfile
 
 from clang.cindex import CompilationDatabase
 
+from indexer import pathx as _pathx
 from indexer.pathx import resolve_fs_path  # noqa: F401
 from indexer.pathx import split_base_version  # re-exported for CLI use  # noqa: F401
 
@@ -226,6 +227,21 @@ def _map_include_values(options, fn) -> list[str]:
     return out
 
 
+def include_values(options):
+    """Yield each include-path VALUE from *options* (both `-I path` and `-Ipath`
+    forms), skipping every other token. Read-only counterpart of
+    _map_include_values, used by the import version-bump scan."""
+    it = iter(options)
+    for tok in it:
+        for flag in _INCLUDE_FLAGS:
+            if tok == flag:
+                yield next(it, "")
+                break
+            if tok.startswith(flag) and len(tok) > len(flag):
+                yield tok[len(flag) :]
+                break
+
+
 def resolve_options(options, lookup=None, autoderive: bool = True) -> list[str]:
     """DECODE: resolve <label>/$VAR/~ in include-path values to absolute paths.
 
@@ -245,38 +261,69 @@ def resolve_options(options, lookup=None, autoderive: bool = True) -> list[str]:
     return _map_include_values(options, _fn)
 
 
-def build_label_map(labels, lookup=None) -> list[tuple[str, str]]:
-    """Build the encode lookup from (name, stored_path) pairs.
+def build_label_map(labels, lookup=None) -> list[tuple[str, str, bool]]:
+    """Build the encode lookup from (name, stored_path[, versioned]) entries.
 
-    Each stored path is resolved to an absolute directory (env-vars expanded,
-    NO autoderive — a label's own value is taken literally). Returned sorted
-    most-specific first (longest resolved path, then name) so the longest
-    prefix wins deterministically in both Python and C++.
+    Accepts 2-tuples (label, exact match) or 3-tuples (the *versioned* flag, set
+    for components — version-agnostic match). Each stored path is resolved to an
+    absolute directory (env-vars expanded, NO autoderive). Returned as
+    (name, resolved_path, versioned) sorted most-specific first (longest
+    resolved path, then name) so the longest prefix wins deterministically in
+    both Python and C++.
     """
-    out: list[tuple[str, str]] = []
-    for name, stored in labels:
+    out: list[tuple[str, str, bool]] = []
+    for entry in labels:
+        if len(entry) == 3:
+            name, stored, versioned = entry
+        else:
+            name, stored = entry
+            versioned = False
         rp = os.path.abspath(resolve_fs_path(stored, lookup=lookup, autoderive=False))
-        out.append((name, rp))
+        out.append((name, rp, versioned))
     out.sort(key=lambda nr: (-len(nr[1]), nr[0]))
     return out
+
+
+def match_alias(absval, label_map):
+    """Longest-match an absolute path against *label_map*.
+
+    Returns (name, version_segment, remainder) for the first (longest) entry
+    whose resolved dir equals or contains *absval*, else None. For a *versioned*
+    (component) entry the segment immediately after the base, if it looks like a
+    version, is captured as *version_segment* and excluded from *remainder* (so
+    the stored portable token carries NO version — it is re-injected at decode
+    by get_alias -> base + highest version). For label entries version_segment
+    is always None.
+    """
+    for name, rp, versioned in label_map:
+        if absval == rp or absval.startswith(rp + os.sep):
+            rem = absval[len(rp) :]
+            vseg = None
+            if versioned and rem.startswith(os.sep):
+                head = rem[1:].split(os.sep, 1)
+                if head[0] and _pathx.is_version_segment(head[0]):
+                    vseg = head[0]
+                    rem = (os.sep + head[1]) if len(head) > 1 else ""
+            return name, vseg, rem
+    return None
 
 
 def alias_options(options, label_map) -> list[str]:
     """ENCODE: rewrite absolute include-path values to <label> tokens.
 
     *label_map* is the output of build_label_map (sorted longest-first). A value
-    equal to or under a label's resolved directory becomes `<name>` + remainder
-    (longest match wins). Values already indirected ('<' or '$') and relative
-    values are left unchanged.
+    equal to or under an entry's resolved directory becomes `<name>` + remainder
+    (longest match wins; for component entries the version segment is stripped).
+    Values already indirected ('<' or '$') and relative values are unchanged.
     """
 
     def _fn(val: str) -> str:
         if "<" in val or "$" in val or not os.path.isabs(val):
             return val
-        absval = os.path.normpath(val)
-        for name, rp in label_map:
-            if absval == rp or absval.startswith(rp + os.sep):
-                return "<" + name + ">" + absval[len(rp) :]
-        return val
+        m = match_alias(os.path.normpath(val), label_map)
+        if m is None:
+            return val
+        name, _vseg, rem = m
+        return "<" + name + ">" + rem
 
     return _map_include_values(options, _fn)

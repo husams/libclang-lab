@@ -30,6 +30,18 @@ def is_version_segment(segment: str) -> bool:
     return bool(_VERSION_RE.match(segment))
 
 
+def version_key(version: str) -> tuple[int, ...]:
+    """Numeric per-segment sort key for a version string.
+
+    Strips an optional leading 'v', splits on '.', '_' and '-', and maps each
+    numeric field to an int so 18-0-0-275 > 18-0-0-100 > 18-0-0-11 (NOT a
+    string compare). Non-numeric fields are dropped. Used to pick the highest
+    version among same-named components / incoming compile-command paths.
+    """
+    v = version[1:] if version.startswith("v") else version
+    return tuple(int(p) for p in re.split(r"[._-]", v) if p.isdigit())
+
+
 def split_base_version(root: str) -> tuple[str, str | None]:
     """Split a component root into (base, version) by trailing-segment detection.
 

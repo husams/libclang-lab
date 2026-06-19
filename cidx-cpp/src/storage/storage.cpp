@@ -13,6 +13,7 @@
 #include <map>
 #include <string>
 
+#include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
 #include "util/json_min.hpp"
 #include "util/pathutil.hpp"
@@ -2108,25 +2109,75 @@ std::vector<std::pair<std::string, std::string>> Storage::list_labels() {
   return out;
 }
 
-std::vector<std::pair<std::string, std::string>> Storage::list_alias_pairs() {
-  // Explicit labels PLUS uniquely-named components (value = effective root).
-  // Labels win on a name collision; duplicated component names are skipped.
-  // std::map keeps the result sorted by name (== Python sorted(pairs.items())).
-  std::map<std::string, std::string> pairs;
+std::map<std::string, std::tuple<std::string, std::string, bool>>
+Storage::component_alias_index() {
+  // Group components by name; split the resolved effective root into
+  // (base, version) so matching is version-agnostic. Mirrors
+  // Python Storage.component_alias_index.
+  struct Row {
+    std::string base;
+    std::string ver;       // "" = none
+    bool path_unversioned; // stored path carries no embedded version
+  };
+  std::map<std::string, std::vector<Row>> by_name;
+  for (const auto &c : list_components()) {
+    const std::string eff =
+        pathutil::abspath(pathutil::resolve_fs_path(effective_root(c)));
+    const auto [base, ver] = CompileDb::split_base_version(eff);
+    const auto [pbase, pver] = CompileDb::split_base_version(
+        pathutil::abspath(pathutil::resolve_fs_path(c.path)));
+    (void)pbase;
+    by_name[c.name].push_back({base, ver, pver.empty()});
+  }
+  std::map<std::string, std::tuple<std::string, std::string, bool>> out;
+  for (const auto &[name, rows] : by_name) {
+    std::string base = rows.front().base;
+    bool one_base = true;
+    for (const auto &r : rows) {
+      if (r.base != base) {
+        one_base = false;
+        break;
+      }
+    }
+    if (!one_base) {
+      continue; // ambiguous: same name, different base dirs
+    }
+    std::string maxver;
+    for (const auto &r : rows) {
+      if (r.ver.empty()) {
+        continue;
+      }
+      if (maxver.empty() ||
+          CompileDb::version_key(r.ver) > CompileDb::version_key(maxver)) {
+        maxver = r.ver;
+      }
+    }
+    const bool bumpable = rows.size() == 1 && rows.front().path_unversioned;
+    out.emplace(name, std::make_tuple(base, maxver, bumpable));
+  }
+  return out;
+}
+
+std::vector<std::tuple<std::string, std::string, bool>>
+Storage::list_alias_pairs() {
+  // Explicit labels (exact) PLUS components (version-stripped base,
+  // version-agnostic). Labels win on a name collision. std::map keeps the
+  // result sorted by name (== Python sorted). Mirrors Python list_alias_pairs.
+  std::map<std::string, std::tuple<std::string, bool>> pairs; // name->(path,ver)
   for (const auto &nv : list_labels()) {
-    pairs[nv.first] = nv.second; // labels first / win
+    pairs[nv.first] = {nv.second, false}; // labels first / win
   }
-  const std::vector<Component> comps = list_components();
-  std::map<std::string, int> counts;
-  for (const auto &c : comps) {
-    counts[c.name] += 1;
-  }
-  for (const auto &c : comps) {
-    if (counts[c.name] == 1 && pairs.find(c.name) == pairs.end()) {
-      pairs[c.name] = effective_root(c);
+  for (const auto &[name, entry] : component_alias_index()) {
+    if (pairs.find(name) == pairs.end()) {
+      pairs[name] = {std::get<0>(entry), true}; // version-stripped base
     }
   }
-  return {pairs.begin(), pairs.end()};
+  std::vector<std::tuple<std::string, std::string, bool>> out;
+  out.reserve(pairs.size());
+  for (const auto &[name, pv] : pairs) {
+    out.emplace_back(name, std::get<0>(pv), std::get<1>(pv));
+  }
+  return out;
 }
 
 std::optional<std::string> Storage::get_alias(const std::string &name) {
@@ -2134,21 +2185,14 @@ std::optional<std::string> Storage::get_alias(const std::string &name) {
   if (lab.has_value()) {
     return lab;
   }
-  // Exact-match over ALL components (NOT the fuzzy list_components(name) LIKE
-  // filter) — mirrors Python `[c for c in list_components() if c.name == name]`.
-  const std::vector<Component> comps = list_components();
-  const Component *hit = nullptr;
-  int n = 0;
-  for (const auto &c : comps) {
-    if (c.name == name) {
-      hit = &c;
-      ++n;
-    }
+  const auto idx = component_alias_index();
+  const auto it = idx.find(name);
+  if (it == idx.end()) {
+    return std::nullopt;
   }
-  if (n == 1) {
-    return effective_root(*hit);
-  }
-  return std::nullopt;
+  const auto &[base, maxver, bump] = it->second;
+  (void)bump;
+  return maxver.empty() ? base : pathutil::join(base, maxver);
 }
 
 } // namespace cidx

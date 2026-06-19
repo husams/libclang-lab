@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 
 def cache_dir() -> str:
@@ -174,6 +174,38 @@ def cmd_add_source(args) -> int:
     return 0
 
 
+def _bump_component_versions(db: Storage, commands, label_map) -> None:
+    """Advance a component's stored version when a ported compile command's -I
+    sits under its version-stripped base and carries a numerically HIGHER
+    version segment than the one registered. Only 'bumpable' components (single
+    row, version-as-property) are updated — destructive cases (version embedded
+    in the path, or duplicate rows) are left untouched. Mirrors the C++ port."""
+    idx = db.component_alias_index()
+    seen: dict[str, str] = {}
+    for cmd in commands:
+        for val in compiledb.include_values(compiledb.strip_for_libclang(cmd)):
+            if "<" in val or "$" in val or not os.path.isabs(val):
+                continue
+            m = compiledb.match_alias(os.path.normpath(val), label_map)
+            if m is None:
+                continue
+            name, vseg, _rem = m
+            if vseg is None:
+                continue
+            cur = seen.get(name)
+            if cur is None or pathx.version_key(vseg) > pathx.version_key(cur):
+                seen[name] = vseg
+    for name, vseg in seen.items():
+        entry = idx.get(name)
+        if entry is None:
+            continue
+        _base, maxver, bumpable = entry
+        if not bumpable:
+            continue
+        if maxver is None or pathx.version_key(vseg) > pathx.version_key(maxver):
+            db.set_component_version(name, vseg)
+
+
 def cmd_import(args) -> int:
     try:
         commands = compiledb.load_commands(args.db)
@@ -213,6 +245,12 @@ def cmd_import(args) -> int:
             if getattr(args, "no_alias", False)
             else compiledb.build_label_map(db.list_alias_pairs(), lookup=db.get_alias)
         )
+        # Version-agnostic port: a ported -I under a versioned component base may
+        # carry a HIGHER version than the one registered — advance the stored
+        # component version so <name> decodes to it. Only bumpable components
+        # (single row, version-as-property) are touched.
+        if label_map:
+            _bump_component_versions(db, commands, label_map)
         if args.force:
             existing = db.get_component(root)
             if existing is not None:

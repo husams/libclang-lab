@@ -296,38 +296,86 @@ CompileDb::resolve_options(
   });
 }
 
-// Build the encode label map from (name, stored_path) pairs.
-std::vector<std::pair<std::string, std::string>>
+// Build the encode label map from (name, stored_path, versioned) entries.
+std::vector<AliasEntry>
 CompileDb::build_label_map(
-    const std::vector<std::pair<std::string, std::string>> &labels,
+    const std::vector<AliasEntry> &labels,
     std::function<std::optional<std::string>(const std::string &)> lookup) {
   // NO autoderive — a label's own stored value is taken literally.
   pathutil::LabelResolver resolver(lookup ? std::move(lookup) : nullptr,
                                    /*autoderive=*/false);
-  std::vector<std::pair<std::string, std::string>> out;
+  std::vector<AliasEntry> out;
   out.reserve(labels.size());
-  for (const auto &[name, stored] : labels) {
+  for (const auto &[name, stored, versioned] : labels) {
     const std::string rp =
         pathutil::abspath(pathutil::resolve_fs_path(stored, resolver));
-    out.emplace_back(name, rp);
+    out.emplace_back(name, rp, versioned);
   }
   // Sort: longest resolved path first; on tie, by name ascending.
   std::sort(out.begin(), out.end(),
-            [](const std::pair<std::string, std::string> &a,
-               const std::pair<std::string, std::string> &b) {
-              if (a.second.size() != b.second.size()) {
-                return a.second.size() > b.second.size(); // longer first
+            [](const AliasEntry &a, const AliasEntry &b) {
+              if (std::get<1>(a).size() != std::get<1>(b).size()) {
+                return std::get<1>(a).size() > std::get<1>(b).size(); // longer
               }
-              return a.first < b.first; // then name ascending
+              return std::get<0>(a) < std::get<0>(b); // then name ascending
             });
+  return out;
+}
+
+// Longest-match an absolute path against label_map (compiledb.py:match_alias).
+std::optional<std::tuple<std::string, std::string, std::string>>
+CompileDb::match_alias(const std::string &absval,
+                       const std::vector<AliasEntry> &label_map) {
+  for (const auto &[name, rp, versioned] : label_map) {
+    if (absval == rp || absval.starts_with(rp + "/")) {
+      std::string rem = absval.substr(rp.size()); // "" or "/seg/..."
+      std::string vseg;
+      if (versioned && rem.starts_with("/")) {
+        const std::string tail = rem.substr(1);
+        const std::size_t slash = tail.find('/');
+        const std::string head =
+            slash == std::string::npos ? tail : tail.substr(0, slash);
+        if (!head.empty() && is_version_segment(head)) {
+          vseg = head;
+          rem = slash == std::string::npos ? "" : tail.substr(slash);
+        }
+      }
+      return std::make_tuple(name, vseg, rem);
+    }
+  }
+  return std::nullopt;
+}
+
+// Yield each include-path value (compiledb.py:include_values).
+std::vector<std::string>
+CompileDb::include_values(const std::vector<std::string> &options) {
+  std::vector<std::string> out;
+  size_t i = 0;
+  while (i < options.size()) {
+    const std::string &tok = options[i++];
+    for (const char *flag : kIncludeFlags) {
+      const size_t flen = std::strlen(flag);
+      if (tok == flag) {
+        if (i < options.size()) {
+          out.push_back(options[i++]);
+        } else {
+          out.emplace_back();
+        }
+        break;
+      }
+      if (tok.size() > flen && tok.starts_with(flag)) {
+        out.push_back(tok.substr(flen));
+        break;
+      }
+    }
+  }
   return out;
 }
 
 // ENCODE: rewrite absolute include-path values to <label> tokens.
 std::vector<std::string>
-CompileDb::alias_options(
-    const std::vector<std::string> &options,
-    const std::vector<std::pair<std::string, std::string>> &label_map) {
+CompileDb::alias_options(const std::vector<std::string> &options,
+                         const std::vector<AliasEntry> &label_map) {
   return map_include_values(options, [&](const std::string &val) -> std::string {
     // Already indirected, or relative: leave unchanged.
     if (val.find('<') != std::string::npos ||
@@ -335,14 +383,48 @@ CompileDb::alias_options(
         !pathutil::isabs(val)) {
       return val;
     }
-    const std::string absval = pathutil::normpath(val);
-    for (const auto &[name, rp] : label_map) {
-      if (absval == rp || absval.starts_with(rp + "/")) {
-        return "<" + name + ">" + absval.substr(rp.size());
-      }
+    const auto m = match_alias(pathutil::normpath(val), label_map);
+    if (!m.has_value()) {
+      return val;
     }
-    return val;
+    return "<" + std::get<0>(*m) + ">" + std::get<2>(*m);
   });
+}
+
+// True iff seg matches the version regex (compiledb.py:is_version_segment).
+bool CompileDb::is_version_segment(const std::string &seg) {
+  static const std::regex kVersionRe(R"(^v?[0-9]+([._\-][0-9]+)*$)");
+  return std::regex_match(seg, kVersionRe);
+}
+
+// Numeric per-segment version key (compiledb.py / pathx.version_key).
+std::vector<long long> CompileDb::version_key(const std::string &version) {
+  std::string v = version;
+  if (!v.empty() && v[0] == 'v') {
+    v = v.substr(1);
+  }
+  std::vector<long long> out;
+  std::string cur;
+  const auto flush = [&]() {
+    if (!cur.empty()) {
+      const bool digits = std::all_of(cur.begin(), cur.end(), [](char c) {
+        return c >= '0' && c <= '9';
+      });
+      if (digits) {
+        out.push_back(std::stoll(cur));
+      }
+      cur.clear();
+    }
+  };
+  for (char c : v) {
+    if (c == '.' || c == '_' || c == '-') {
+      flush();
+    } else {
+      cur += c;
+    }
+  }
+  flush();
+  return out;
 }
 
 } // namespace cidx

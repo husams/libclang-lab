@@ -355,6 +355,54 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// Advance a component's stored version when a ported compile command's -I sits
+// under its version-stripped base and carries a numerically HIGHER version than
+// the one registered. Only 'bumpable' components (single row, version-as-
+// property) are updated. Mirrors Python cli._bump_component_versions.
+void bump_component_versions(Storage &db,
+                             const std::vector<CompileCommand> &commands,
+                             const std::vector<AliasEntry> &label_map) {
+  const auto idx = db.component_alias_index();
+  std::map<std::string, std::string> seen; // name -> highest version seen
+  for (const CompileCommand &cmd : commands) {
+    for (const std::string &val : CompileDb::include_values(cmd.args)) {
+      if (val.find('<') != std::string::npos ||
+          val.find('$') != std::string::npos || !pathutil::isabs(val)) {
+        continue;
+      }
+      const auto m = CompileDb::match_alias(pathutil::normpath(val), label_map);
+      if (!m.has_value()) {
+        continue;
+      }
+      const std::string &name = std::get<0>(*m);
+      const std::string &vseg = std::get<1>(*m);
+      if (vseg.empty()) {
+        continue;
+      }
+      auto it = seen.find(name);
+      if (it == seen.end() ||
+          CompileDb::version_key(vseg) > CompileDb::version_key(it->second)) {
+        seen[name] = vseg;
+      }
+    }
+  }
+  for (const auto &[name, vseg] : seen) {
+    const auto it = idx.find(name);
+    if (it == idx.end()) {
+      continue;
+    }
+    const auto &[base, maxver, bumpable] = it->second;
+    (void)base;
+    if (!bumpable) {
+      continue;
+    }
+    if (maxver.empty() ||
+        CompileDb::version_key(vseg) > CompileDb::version_key(maxver)) {
+      db.set_component_version(name, vseg);
+    }
+  }
+}
+
 int cmd_import(const ParsedArgs &args, Context &ctx) {
   // A missing/unloadable libclang is NOT a compilation-database failure:
   // let it propagate to main()'s generic CidxError handler (exit 1 with the
@@ -412,7 +460,7 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   // a component root auto-aliases to <component-name> with no `cidx label add`
   // needed; decode (get_alias) mirrors this same registry.
   // Mirrors Python cmd_import: build_label_map(db.list_alias_pairs(), db.get_alias).
-  std::vector<std::pair<std::string, std::string>> label_map;
+  std::vector<AliasEntry> label_map;
   if (!args.no_alias) {
     const auto pairs = db.list_alias_pairs();
     if (!pairs.empty()) {
@@ -420,6 +468,12 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
           pairs,
           [&db](const std::string &n) { return db.get_alias(n); });
     }
+  }
+  // Version-agnostic port: a ported -I under a versioned component base may
+  // carry a HIGHER version than the registered one — advance the stored
+  // component version so <name> decodes to it (bumpable components only).
+  if (!label_map.empty()) {
+    bump_component_versions(db, commands, label_map);
   }
 
   if (args.force) {
