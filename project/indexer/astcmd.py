@@ -130,7 +130,7 @@ def resolve_target(args) -> tuple[Target | None, int]:
                 return Target(
                     abspath=abs_path,
                     flags=compiledb.resolve_options(
-                        list(rec.compile_options or []), db.get_label
+                        list(rec.compile_options or []), db.get_alias
                     ),
                     driver=rec.driver,
                     focus_usr=focus_usr,
@@ -151,7 +151,7 @@ def resolve_target(args) -> tuple[Target | None, int]:
                 return Target(
                     abspath=abs_path,
                     flags=compiledb.resolve_options(
-                        list(rec.compile_options or []), db.get_label
+                        list(rec.compile_options or []), db.get_alias
                     ),
                     driver=rec.driver,
                     focus_usr=focus_usr,
@@ -199,7 +199,7 @@ def resolve_target(args) -> tuple[Target | None, int]:
         return Target(
             abspath=path,
             flags=compiledb.resolve_options(
-                list(rec.compile_options or []), db.get_label
+                list(rec.compile_options or []), db.get_alias
             ),
             driver=rec.driver,
             focus_usr=sym.usr,

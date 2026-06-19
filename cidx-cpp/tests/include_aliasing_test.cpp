@@ -197,3 +197,60 @@ TEST_CASE("update_file_compile_options does not set args_overridden") {
   CHECK(*rec->compile_options == std::vector<std::string>{"-I<inc>"});
   CHECK(rec->args_overridden == 0); // realias is not a manual override
 }
+
+// ---------------------------------------------------------------------------
+// v0.8.0: component-aware alias registry (list_alias_pairs / get_alias)
+// (mirrors test_alias_registry_* in test_include_aliasing.py)
+// ---------------------------------------------------------------------------
+TEST_CASE("alias registry includes unique-named components") {
+  Storage db(":memory:");
+  db.add_component("Numactl", "/opt/osp/Numactl");
+  db.add_component("memhog", "/opt/osp/Numactl/memhog", "repo",
+                   std::optional<std::string>{"1.2.0"});
+  const auto pairs = db.list_alias_pairs();
+  // std::map -> sorted by name: Numactl, memhog
+  CHECK(pairs == std::vector<std::pair<std::string, std::string>>{
+                     {"Numactl", "/opt/osp/Numactl"},
+                     {"memhog", "/opt/osp/Numactl/memhog/1.2.0"}});
+  CHECK(db.get_alias("Numactl") == std::optional<std::string>{"/opt/osp/Numactl"});
+  CHECK(db.get_alias("memhog") ==
+        std::optional<std::string>{"/opt/osp/Numactl/memhog/1.2.0"});
+  const auto lm = CompileDb::build_label_map(
+      db.list_alias_pairs(),
+      [&db](const std::string &n) { return db.get_alias(n); });
+  // Longest match wins (memhog under Numactl).
+  CHECK(CompileDb::alias_options({"-I/opt/osp/Numactl/memhog/1.2.0/inc"}, lm) ==
+        std::vector<std::string>{"-I<memhog>/inc"});
+  CHECK(CompileDb::alias_options({"-I/opt/osp/Numactl/src"}, lm) ==
+        std::vector<std::string>{"-I<Numactl>/src"});
+  // Round-trip decode resolves the component name back to the abs dir.
+  CHECK(CompileDb::resolve_options(
+            {"-I<memhog>/inc"},
+            [&db](const std::string &n) { return db.get_alias(n); }) ==
+        std::vector<std::string>{"-I/opt/osp/Numactl/memhog/1.2.0/inc"});
+}
+
+TEST_CASE("alias registry skips duplicate component names") {
+  Storage db(":memory:");
+  db.add_component("dup", "/a/dup");
+  db.add_component("dup", "/b/dup");
+  for (const auto &[name, path] : db.list_alias_pairs()) {
+    CHECK(name != "dup");
+  }
+  CHECK(db.get_alias("dup") == std::nullopt);
+}
+
+TEST_CASE("alias registry: explicit label wins over component") {
+  Storage db(":memory:");
+  db.add_component("foo", "/component/foo");
+  db.add_label("foo", "/label/foo");
+  bool found = false;
+  for (const auto &[name, path] : db.list_alias_pairs()) {
+    if (name == "foo") {
+      found = true;
+      CHECK(path == "/label/foo");
+    }
+  }
+  CHECK(found);
+  CHECK(db.get_alias("foo") == std::optional<std::string>{"/label/foo"});
+}

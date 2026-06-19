@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 
 def cache_dir() -> str:
@@ -203,12 +203,15 @@ def cmd_import(args) -> int:
 
     imported, skipped = 0, 0
     with Storage(args.index) as db:
-        # Encode include paths against the label registry unless --no-alias.
-        # Labels must be pre-registered (cidx label add) before import.
+        # Encode include paths against the alias registry unless --no-alias.
+        # The registry is explicit labels PLUS uniquely-named components, so
+        # an -I under a component root auto-aliases to <component-name> with no
+        # `cidx label add` needed; labels cover non-component (toolchain/system)
+        # prefixes. Decode (get_alias) mirrors this same registry.
         label_map = (
             []
             if getattr(args, "no_alias", False)
-            else compiledb.build_label_map(db.list_labels(), lookup=db.get_label)
+            else compiledb.build_label_map(db.list_alias_pairs(), lookup=db.get_alias)
         )
         if args.force:
             existing = db.get_component(root)
@@ -257,13 +260,20 @@ def cmd_import(args) -> int:
 def cmd_realias(args) -> int:
     """cidx realias [COMPONENT] -- rewrite stored include paths to <label> tokens.
 
-    Applies the label registry (longest match) to every file's stored
-    compile_options, in place, so an index imported before labels were
-    registered becomes portable without a re-import."""
+    Applies the alias registry (explicit labels + uniquely-named components,
+    longest match) to every file's stored compile_options, in place, so an
+    index imported before labels/components existed becomes portable without a
+    re-import."""
     with Storage(args.index) as db:
-        label_map = compiledb.build_label_map(db.list_labels(), lookup=db.get_label)
+        label_map = compiledb.build_label_map(
+            db.list_alias_pairs(), lookup=db.get_alias
+        )
         if not label_map:
-            print("error: no labels registered (use 'cidx label add')", file=sys.stderr)
+            print(
+                "error: no aliases available (register a label with "
+                "'cidx label add', or add a component)",
+                file=sys.stderr,
+            )
             return 1
         cid = None
         if args.component:
@@ -314,7 +324,7 @@ def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int
             db,
             path,
             compiledb.resolve_options(
-                compiledb.sanitize(rec.compile_options or []), db.get_label
+                compiledb.sanitize(rec.compile_options or []), db.get_alias
             ),
             rec.id,
             driver=rec.driver,
@@ -1452,9 +1462,12 @@ def cmd_label_list(args) -> int:
 
 
 def cmd_label_resolve(args) -> int:
-    """cidx label resolve TOKEN -- resolve a label name or <...>/$... token."""
+    """cidx label resolve TOKEN -- resolve a label/component name or <...>/$... token.
+
+    Uses the same alias lookup as parse-time decode (get_alias): explicit
+    labels first, then uniquely-named components."""
     with Storage(args.index) as db:
-        lookup = db.get_label
+        lookup = db.get_alias
         autoderive = not getattr(args, "no_autoderive_labels", False)
         token = args.token
         # If no < or $ in the token, treat it as a bare label name.

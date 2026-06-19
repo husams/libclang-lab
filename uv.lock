@@ -115,7 +115,7 @@ wheels = [
 
 [[package]]
 name = "libclang-lab"
-version = "0.5.1"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "clang", marker = "sys_platform != 'darwin'" },

@@ -10,6 +10,7 @@
 #include <cctype>
 #include <exception>
 #include <filesystem>
+#include <map>
 #include <string>
 
 #include "util/errors.hpp"
@@ -2105,6 +2106,49 @@ std::vector<std::pair<std::string, std::string>> Storage::list_labels() {
     out.emplace_back(st.col_text(0), st.col_text(1));
   }
   return out;
+}
+
+std::vector<std::pair<std::string, std::string>> Storage::list_alias_pairs() {
+  // Explicit labels PLUS uniquely-named components (value = effective root).
+  // Labels win on a name collision; duplicated component names are skipped.
+  // std::map keeps the result sorted by name (== Python sorted(pairs.items())).
+  std::map<std::string, std::string> pairs;
+  for (const auto &nv : list_labels()) {
+    pairs[nv.first] = nv.second; // labels first / win
+  }
+  const std::vector<Component> comps = list_components();
+  std::map<std::string, int> counts;
+  for (const auto &c : comps) {
+    counts[c.name] += 1;
+  }
+  for (const auto &c : comps) {
+    if (counts[c.name] == 1 && pairs.find(c.name) == pairs.end()) {
+      pairs[c.name] = effective_root(c);
+    }
+  }
+  return {pairs.begin(), pairs.end()};
+}
+
+std::optional<std::string> Storage::get_alias(const std::string &name) {
+  std::optional<std::string> lab = get_label(name);
+  if (lab.has_value()) {
+    return lab;
+  }
+  // Exact-match over ALL components (NOT the fuzzy list_components(name) LIKE
+  // filter) — mirrors Python `[c for c in list_components() if c.name == name]`.
+  const std::vector<Component> comps = list_components();
+  const Component *hit = nullptr;
+  int n = 0;
+  for (const auto &c : comps) {
+    if (c.name == name) {
+      hit = &c;
+      ++n;
+    }
+  }
+  if (n == 1) {
+    return effective_root(*hit);
+  }
+  return std::nullopt;
 }
 
 } // namespace cidx
