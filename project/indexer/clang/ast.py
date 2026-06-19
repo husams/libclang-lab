@@ -348,6 +348,14 @@ def index_headers(
         ignore_system = _ignore_system_headers()
     counts = {"indexed": 0, "symbols": 0, "already": 0, "system": 0, "unowned": 0}
     seen: set[str] = set()
+    # Two passes over this TU's headers. A header may reference a symbol declared
+    # in a header it includes (which appears LATER in include order) -- e.g. a
+    # function template whose body calls a member function template in a deeper
+    # header. That call is dependent/recovered and only LINKS to an
+    # already-indexed target (no stub is minted), so the target symbol must
+    # already exist. Pass 1 mints symbols for every not-yet-indexed header;
+    # pass 2 then extracts edges with all header symbols present.
+    pending: list[tuple[str, int, Optional[float], int]] = []
     for inc in tu.get_includes():
         path = os.path.abspath(inc.include.name)
         if path in seen:
@@ -365,13 +373,15 @@ def index_headers(
             continue
         mtime = os.path.getmtime(path) if os.path.exists(path) else None
         file_id = db.add_file_path(path, mtime=mtime, md5=md5)
-        # M4: ONE transaction covers symbols + edges for this header.
+        # Pass 1: symbols only (each in its own transaction).
         with db.transaction():
             stored, _ = _index_file_notxn(db, tu, inc.include.name, file_id)
-            # QD-1: extract declaration-level edges for this header from the SAME
-            # TU's AST. Symbol rows must exist first (_index_file_notxn ran above).
+        pending.append((inc.include.name, file_id, mtime, stored))
+    # Pass 2: edges for those headers, now that every header symbol is in the DB.
+    for inc_name, file_id, mtime, stored in pending:
+        with db.transaction():
             db.delete_edges_for_file(file_id)
-            _index_edges_notxn(db, tu, inc.include.name, file_id)
+            _index_edges_notxn(db, tu, inc_name, file_id)
         db.mark_file_indexed(file_id, mtime=mtime)
         counts["indexed"] += 1
         counts["symbols"] += stored
@@ -924,6 +934,23 @@ def _body_descent(
                     # std::move) never mints a stub.
                     if recovered:
                         _dst = db.lookup_symbol(callee_usr)
+                        if _dst is None:
+                            # libclang emits an INCONSISTENT USR for a member
+                            # function template referenced in a dependent
+                            # template body (parameter types collapse, e.g.
+                            # `const std::string&` -> `I`), so the declaration
+                            # USR never matches. Recover via the stable
+                            # fully-qualified name + kind; only link when the
+                            # match is unambiguous (exactly one candidate) so
+                            # overloaded member templates are left unresolved
+                            # rather than mislinked.
+                            _qn = _qualified_name(ref)
+                            if _qn:
+                                _cands = db.lookup_symbols_by_qual_name(
+                                    _qn, _KIND_MAP.get(ref.kind, "function")
+                                )
+                                if len(_cands) == 1:
+                                    _dst = _cands[0]
                         dst_id = _dst.id if _dst is not None else None
                     else:
                         _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
@@ -1420,6 +1447,24 @@ def _index_edges_notxn(
             tmpl_sym = db.lookup_symbol(tmpl_usr)
             if tmpl_sym is None:
                 continue
+            # A member function template (FUNCTION_TEMPLATE whose semantic parent
+            # is a record/class-template) is a method too, but the CXX_METHOD
+            # method_of block above never sees it (its cursor kind is
+            # FUNCTION_TEMPLATE), so it would lack a method_of edge and be
+            # invisible to method-oriented queries. Emit method_of here.
+            if ck == cx.CursorKind.FUNCTION_TEMPLATE:
+                owner = cursor.semantic_parent
+                if owner is not None and owner.kind in (
+                    cx.CursorKind.CLASS_DECL,
+                    cx.CursorKind.STRUCT_DECL,
+                    cx.CursorKind.CLASS_TEMPLATE,
+                    cx.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+                ):
+                    owner_usr = owner.get_usr()
+                    if owner_usr:
+                        owner_sym = db.lookup_symbol(owner_usr)
+                        if owner_sym is not None:
+                            db.add_edge(tmpl_sym.id, owner_sym.id, 9)  # method_of
             _PARAM_KIND_MAP = {
                 cx.CursorKind.TEMPLATE_TYPE_PARAMETER: 1,
                 cx.CursorKind.TEMPLATE_NON_TYPE_PARAMETER: 2,

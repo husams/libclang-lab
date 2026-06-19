@@ -1359,6 +1359,29 @@ Storage::lookup_symbols_by_name(const std::string &spelling,
 }
 
 std::vector<Symbol>
+Storage::lookup_symbols_by_qual_name(const std::string &qual_name,
+                                     const std::optional<std::string> &kind) {
+  std::string sql =
+      std::string("SELECT ") + kSymbolCols + " FROM symbol WHERE qual_name = ?";
+  std::vector<SqlValue> args;
+  args.emplace_back(qual_name);
+  if (kind) {
+    sql += " AND kind = ?";
+    args.emplace_back(*kind);
+  }
+  sql += " ORDER BY usr";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+std::vector<Symbol>
 Storage::search_symbols(const std::string &pattern,
                         const std::optional<std::string> &kind) {
   // '%seg%seg%' on qual_name: each '::'-separated segment must appear, in
