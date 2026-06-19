@@ -999,8 +999,9 @@ def test_import_detects_version(tmp_path, capsys, monkeypatch):
     assert comp.version == "1.0.0"
 
 
-def test_import_no_detect_version(tmp_path, capsys, monkeypatch):
-    """--no-detect-version disables splitting."""
+def test_import_rejects_version_flags(tmp_path, capsys, monkeypatch):
+    """import no longer accepts --version / --no-detect-version (version is a
+    per-component property, managed via `component set-version`)."""
     import json
 
     comp_root = str(tmp_path / "myproject" / "1.0.0")
@@ -1013,17 +1014,11 @@ def test_import_no_detect_version(tmp_path, capsys, monkeypatch):
     with open(cdb_path, "w") as fh:
         json.dump(cdb, fh)
     db_path = str(tmp_path / "idx.db")
-    # Use monkeypatch to redirect the standard index path to our tmp DB.
     monkeypatch.setattr(cli, "index_path", lambda: db_path)
-    rc, out, err = run(
-        ["import", "--db", cdb_path, "--no-detect-version"], capsys
-    )
-    assert rc == 0
-    with Storage(db_path) as db:
-        comps = db.list_components()
-        # No component should have version set (detection was disabled)
-        for c in comps:
-            assert c.version is None, f"unexpected version on {c.name}: {c.version}"
+    for flag in (["--no-detect-version"], ["--version", "9.9.9"]):
+        with pytest.raises(SystemExit) as exc:
+            run(["import", "--db", cdb_path, *flag], capsys)
+        assert exc.value.code == 2  # argparse: unrecognized argument
 
 
 # ---------------------------------------------------------------------------
