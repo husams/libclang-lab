@@ -1,8 +1,10 @@
 #include "compiledb/compiledb.hpp"
 
 #include <cstring>
+#include <regex>
 #include <set>
 #include <string>
+#include <utility>
 
 #include "clangx/libclang.hpp"
 #include "util/errors.hpp"
@@ -137,12 +139,27 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
       if (tok == flag) { // space form: -I path
         const std::string arg = i < argv.size() ? argv[i++] : std::string();
         out.push_back(flag);
-        out.push_back(abs_against(arg, directory));
+        // Preserve rule (portable-paths §5): if the value contains '<' or '$'
+        // it is a template/env-var reference — emit verbatim, not absolutized.
+        if (arg.find('<') != std::string::npos ||
+            arg.find('$') != std::string::npos) {
+          out.push_back(arg);
+        } else {
+          out.push_back(abs_against(arg, directory));
+        }
         matched = true;
         break;
       }
       if (tok.size() > flen && tok.starts_with(flag)) { // glued
-        out.push_back(flag + abs_against(tok.substr(flen), directory));
+        const std::string val = tok.substr(flen);
+        // Preserve rule: if the value portion contains '<' or '$', emit the
+        // entire original token verbatim (flag + value, already glued).
+        if (val.find('<') != std::string::npos ||
+            val.find('$') != std::string::npos) {
+          out.push_back(tok); // verbatim: e.g. "-I<libfoo-include>/include"
+        } else {
+          out.push_back(flag + abs_against(val, directory));
+        }
         matched = true;
         break;
       }
@@ -187,6 +204,26 @@ std::string CompileDb::driver(const std::vector<std::string> &argv,
     return argv0; // bare name: PATH resolution at parse time
   }
   return abs_against(argv0, directory);
+}
+
+// Version detection regex: ^v?[0-9]+([._-][0-9]+)*$
+// Explicit [0-9] (not \d) to be locale-independent (contract §2).
+std::pair<std::string, std::string>
+CompileDb::split_base_version(const std::string &root) {
+  // Step 1: normpath.
+  const std::string normed = pathutil::normpath(root);
+  // Step 2: split → (base, seg).
+  const auto [base, seg] = pathutil::split(normed);
+  // Step 3: match seg against version regex.
+  if (seg.empty() || base.empty() || base == "/") {
+    return {normed, ""};
+  }
+  // ^v?[0-9]+([._-][0-9]+)*$
+  static const std::regex kVersionRe(R"(^v?[0-9]+([._\-][0-9]+)*$)");
+  if (std::regex_match(seg, kVersionRe)) {
+    return {base, seg};
+  }
+  return {normed, ""};
 }
 
 } // namespace cidx

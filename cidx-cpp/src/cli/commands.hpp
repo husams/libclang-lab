@@ -57,6 +57,14 @@ int cmd_ast_cache_build(const ParsedArgs &args, Context &ctx);
 int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx);
 int cmd_ast_cache_clear(const ParsedArgs &args, Context &ctx);
 
+// Portable-paths commands (v14): component show/set-version, label add/rm/list/resolve
+int cmd_component_show(const ParsedArgs &args, Context &ctx);
+int cmd_component_set_version(const ParsedArgs &args, Context &ctx);
+int cmd_label_add(const ParsedArgs &args, Context &ctx);
+int cmd_label_rm(const ParsedArgs &args, Context &ctx);
+int cmd_label_list(const ParsedArgs &args, Context &ctx);
+int cmd_label_resolve(const ParsedArgs &args, Context &ctx);
+
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
 //                            hierarchy|dispatch)
 int cmd_graph_callers(const ParsedArgs &args, Context &ctx);

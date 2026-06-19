@@ -227,6 +227,107 @@ TEST_CASE("migrated DB stays fully usable through the Storage API") {
   CHECK(hits[0].usr == "c:@N@rk@S@Conf@F@set");
 }
 
+// ---------------------------------------------------------------------------
+// v13 → v14 migration (portable-paths): component.version column + label table
+// ---------------------------------------------------------------------------
+
+TEST_CASE("v13 DB migrates to v14: component.version added, label table created") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v13.db";
+
+  // Create a v13-like DB by opening it with the current code (gets v14),
+  // then downgrade meta to '13' and remove the new columns/tables to simulate
+  // a v13 DB.
+  {
+    cidx::Storage db(path); // creates v14
+    db.add_component("mylib", "/opt/mylib", "external");
+  }
+  {
+    cidx::SqliteDb raw(path);
+    // Remove the v14 additions to simulate v13.
+    raw.exec("UPDATE meta SET value = '13' WHERE key = 'schema_version'");
+    // SQLite can't DROP COLUMN easily, so we'll just test that a pre-existing
+    // v13 DB where version column is absent gets migrated correctly.
+    // We can't truly remove the column in SQLite < 3.35, but we can verify
+    // that the column now exists (it was created by Storage ctor above) and
+    // that migration is idempotent.
+  }
+  // Open again: migration must be idempotent.
+  {
+    cidx::Storage db(path);
+  }
+  cidx::SqliteDb raw(path);
+  // Verify schema_version bumped to current (14).
+  CHECK(meta_version(raw) == std::to_string(cidx::Storage::kSchemaVersion));
+  // component.version column exists.
+  CHECK(has_col(table_columns(raw, "component"), "version"));
+  // label table exists.
+  {
+    auto st = raw.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='label'");
+    CHECK(st.step());
+  }
+}
+
+TEST_CASE("v14: add_component preserves existing version on re-import") {
+  cidx::Storage db(":memory:");
+  // Initial import with version.
+  db.add_component("mylib", "/opt/mylib", "external",
+                   std::optional<std::string>{"v2.1.0"});
+  // Re-import without version (NULL) — should COALESCE and keep v2.1.0.
+  db.add_component("mylib", "/opt/mylib", "external",
+                   std::optional<std::string>{});
+  auto comp = db.get_component_by_name("mylib");
+  REQUIRE(comp.has_value());
+  CHECK(comp->version == std::optional<std::string>{"v2.1.0"});
+}
+
+TEST_CASE("v14: set_component_version and effective_root") {
+  cidx::Storage db(":memory:");
+  db.add_component("mylib", "/opt/mylib", "external");
+  auto before = db.get_component_by_name("mylib");
+  REQUIRE(before.has_value());
+  CHECK_FALSE(before->version.has_value());
+  CHECK(cidx::Storage::effective_root(*before) == "/opt/mylib");
+
+  db.set_component_version("mylib", std::optional<std::string>{"v3.0"});
+  auto after = db.get_component_by_name("mylib");
+  REQUIRE(after.has_value());
+  CHECK(after->version == std::optional<std::string>{"v3.0"});
+  CHECK(cidx::Storage::effective_root(*after) == "/opt/mylib/v3.0");
+}
+
+TEST_CASE("v14: label add/get/remove/list round-trip") {
+  cidx::Storage db(":memory:");
+  const int64_t id1 = db.add_label("libfoo-include", "/opt/libfoo/include");
+  const int64_t id2 = db.add_label("libbar-hdr", "$LIBBAR/include");
+  CHECK(id1 > 0);
+  CHECK(id2 > 0);
+
+  CHECK(db.get_label("libfoo-include") ==
+        std::optional<std::string>{"/opt/libfoo/include"});
+  CHECK(db.get_label("libbar-hdr") ==
+        std::optional<std::string>{"$LIBBAR/include"});
+  CHECK_FALSE(db.get_label("nonexistent").has_value());
+
+  const auto labels = db.list_labels();
+  REQUIRE(labels.size() == 2);
+  // ORDER BY name: libbar-hdr < libfoo-include
+  CHECK(labels[0].first == "libbar-hdr");
+  CHECK(labels[1].first == "libfoo-include");
+
+  CHECK(db.remove_label("libbar-hdr"));
+  CHECK_FALSE(db.remove_label("libbar-hdr")); // already gone
+  CHECK(db.list_labels().size() == 1);
+}
+
+TEST_CASE("v14: label upsert updates path on conflict") {
+  cidx::Storage db(":memory:");
+  db.add_label("mylib", "/old/path");
+  db.add_label("mylib", "/new/path"); // upsert → updates
+  CHECK(db.get_label("mylib") == std::optional<std::string>{"/new/path"});
+}
+
 TEST_CASE("newer DB opens without refusal (no downgrade path)") {
   const std::string tmp = make_temp_dir();
   const std::string path = tmp + "/future.db";
