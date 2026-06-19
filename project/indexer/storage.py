@@ -1146,6 +1146,24 @@ class Storage:
         sql += " ORDER BY usr"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
+    def lookup_symbols_by_qual_name(
+        self, qual_name: str, kind: Optional[str] = None
+    ) -> list[Symbol]:
+        """All symbols with this fully-qualified name (overloads give several).
+
+        Used to resolve a callee whose USR cannot be matched directly -- e.g. a
+        member function template referenced in a dependent template body, where
+        libclang emits an inconsistent USR (parameter types collapse). The
+        qualified name + kind are stable, so an unambiguous (single) match
+        recovers the target."""
+        sql = "SELECT * FROM symbol WHERE qual_name = ?"
+        args: list[Any] = [qual_name]
+        if kind is not None:
+            sql += " AND kind = ?"
+            args.append(kind)
+        sql += " ORDER BY usr"
+        return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
+
     def search_symbols(self, pattern: str, kind: Optional[str] = None) -> list[Symbol]:
         """Fuzzy match against the qualified name (case-insensitive).
 

@@ -571,8 +571,25 @@ AstIndexer::index_headers(const ParsedTu &tu,
     std::rethrow_exception(ctx.error);
   }
 
+  // Two passes over this TU's headers. A header may reference a symbol
+  // declared in a header it includes (which appears LATER in include order)
+  // -- e.g. a function template whose body calls a member function template in
+  // a deeper header. That call is dependent/recovered and only LINKS to an
+  // already-indexed target (no stub is minted), so the target symbol must
+  // already exist. Pass 1 mints symbols for every not-yet-indexed header;
+  // pass 2 then extracts edges with all header symbols present.
+  struct PendingHeader {
+    std::string inc_name;   // inclusion spelling (for cursor matching, G23)
+    int64_t file_id = -1;
+    std::optional<double> mtime;
+    int stored = 0;
+  };
+
   HeaderStats counts;
   std::unordered_set<std::string> seen;
+  std::vector<PendingHeader> pending;
+
+  // Pass 1: mint symbols for every not-yet-indexed header.
   for (const InclusionRec &inc : ctx.inclusions) {
     const std::string path = pathutil::abspath(inc.name);
     if (!seen.insert(path).second) {
@@ -594,26 +611,32 @@ AstIndexer::index_headers(const ParsedTu &tu,
     const std::optional<double> mtime = file_mtime(path);
     // Header file rows carry mtime + md5 but NULL options/driver (G20).
     const int64_t file_id = db_.add_file_path(path, mtime, md5);
-    // M4: ONE transaction covers symbols + edges for this header (prevents
-    // partial writes if graph extraction fails mid-header).
+    // Extract this header's symbols out of THIS TU's AST (no separate
+    // parse), matching cursors against the include SPELLING, not the
+    // abspath (G23: cursors' location-file names agree with the spelling).
     std::pair<int, int> result;
     {
       Transaction txn = db_.transaction();
-      // Extract this header's symbols out of THIS TU's AST (no separate
-      // parse), matching cursors against the include SPELLING, not the
-      // abspath (G23: cursors' location-file names agree with the spelling).
       result = index_file_notxn(tu, inc.name, file_id);
-      // QD-1: extract declaration-level edges for this header from the SAME
-      // TU's AST. Symbol rows must exist first (index_file_notxn runs above).
+      txn.commit();
+    }
+    pending.push_back({inc.name, file_id, mtime, result.first});
+  }
+
+  // Pass 2: extract edges for those headers, now that every header symbol is
+  // in the DB (QD-1). Symbol rows must all exist before edge extraction begins.
+  for (const PendingHeader &ph : pending) {
+    {
+      Transaction txn = db_.transaction();
       if (graph_enabled_) {
-        db_.delete_edges_for_file(file_id);
-        index_edges_notxn(tu, inc.name, file_id);
+        db_.delete_edges_for_file(ph.file_id);
+        index_edges_notxn(tu, ph.inc_name, ph.file_id);
       }
       txn.commit();
     }
-    db_.mark_file_indexed(file_id, mtime);
+    db_.mark_file_indexed(ph.file_id, ph.mtime);
     ++counts.indexed;
-    counts.symbols += result.first;
+    counts.symbols += ph.stored;
   }
   return counts;
 }
@@ -1224,6 +1247,23 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
             if (const auto dst = ctx->db->lookup_symbol(callee_usr)) {
               dst_id = dst->id;
             }
+            // libclang emits an INCONSISTENT USR for a member function template
+            // referenced in a dependent template body (parameter types collapse,
+            // e.g. `const std::string&` -> `I`), so the declaration USR may not
+            // match what was indexed. Fall back to the stable qualified name +
+            // kind; only link when the match is unambiguous (exactly one
+            // candidate) to avoid mislinks on overloaded member templates.
+            if (dst_id < 0) {
+              const std::string qn = qualified_name(lib, ref);
+              if (!qn.empty()) {
+                const std::string sk = stub_kind(lib, ref);
+                const auto cands =
+                    ctx->db->lookup_symbols_by_qual_name(qn, sk);
+                if (cands.size() == 1) {
+                  dst_id = cands[0].id;
+                }
+              }
+            }
           } else {
             const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);
             // Pre-check: is this an instantiation member? Set is_instantiation=1
@@ -1768,6 +1808,34 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       const auto tmpl_sym = db_.lookup_symbol(tmpl_usr);
       if (!tmpl_sym) {
         return;
+      }
+      // A member function template (FUNCTION_TEMPLATE whose semantic parent is
+      // a record/class-template) is a method too, but the CXX_METHOD method_of
+      // block above never sees it (its cursor kind is FUNCTION_TEMPLATE), so it
+      // would lack a method_of edge. Emit method_of here for this case.
+      if (ck == CXCursor_FunctionTemplate) {
+        const CXCursor owner = lib.clang_getCursorSemanticParent(cursor);
+        if (!lib.clang_Cursor_isNull(owner) &&
+            !is_invalid_kind(lib.clang_getCursorKind(owner))) {
+          const CXCursorKind ok = lib.clang_getCursorKind(owner);
+          if (ok == CXCursor_ClassDecl || ok == CXCursor_StructDecl ||
+              ok == CXCursor_ClassTemplate ||
+              ok == CXCursor_ClassTemplatePartialSpecialization) {
+            const std::string owner_usr =
+                CxString(lib, lib.clang_getCursorUSR(owner)).str();
+            if (!owner_usr.empty()) {
+              const auto owner_sym = db_.lookup_symbol(owner_usr);
+              if (owner_sym) {
+                Edge mo;
+                mo.src_id = tmpl_sym->id;
+                mo.dst_id = owner_sym->id;
+                mo.kind = 9; // method_of
+                mo.count = 1;
+                db_.add_edge(mo);
+              }
+            }
+          }
+        }
       }
       // Enumerate template parameters (TEMPLATE_TYPE_PARAMETER,
       // TEMPLATE_NON_TYPE_PARAMETER, TEMPLATE_TEMPLATE_PARAMETER children).

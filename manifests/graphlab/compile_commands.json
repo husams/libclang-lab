@@ -43,5 +43,10 @@
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
     "command": "c++ -std=c++17 -I. -c devirt3_caller.cpp -o devirt3_caller.o",
     "file": "devirt3_caller.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c UseCache.cpp -o UseCache.o",
+    "file": "UseCache.cpp"
   }
 ]

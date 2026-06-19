@@ -162,6 +162,13 @@ public:
   std::vector<Symbol>
   lookup_symbols_by_name(const std::string &spelling,
                          const std::optional<std::string> &kind = std::nullopt);
+  // Exact match on qual_name column; mirrors lookup_symbols_by_name but keyed
+  // on qual_name instead of spelling. Used to recover a callee whose USR is
+  // inconsistent (member function template in a dependent template body).
+  std::vector<Symbol>
+  lookup_symbols_by_qual_name(const std::string &qual_name,
+                              const std::optional<std::string> &kind =
+                                  std::nullopt);
   // '::'-segment fuzzy match on qual_name, ordered LENGTH(qual_name) first.
   std::vector<Symbol>
   search_symbols(const std::string &pattern,
