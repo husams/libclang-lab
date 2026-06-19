@@ -506,14 +506,15 @@ TEST_CASE("args: missing required option -> exit 2 (add-source, import)") {
   CHECK(f.msg ==
         "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
         "{repo,external}]\n"
-        "                       [--no-git]\n"
+        "                       [--no-git] [--version V] [--no-detect-version]\n"
         "cidx add-source: error: the following arguments are required: "
         "--path\n");
   // $ python3 -m indexer import
   f = parse_fail({"import"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
+        "usage: cidx import [-h] --db DB [--name NAME] [--force] [--version V]\n"
+        "                   [--no-detect-version] [--no-alias]\n"
         "cidx import: error: the following arguments are required: "
         "--db\n");
 }
@@ -559,7 +560,7 @@ TEST_CASE("args: invalid choice -> exit 2 (both kind sets)") {
   CHECK(f.msg ==
         "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
         "{repo,external}]\n"
-        "                       [--no-git]\n"
+        "                       [--no-git] [--version V] [--no-detect-version]\n"
         "cidx add-source: error: argument --kind: invalid choice: 'bogus' "
         "(choose from repo, external)\n");
 }

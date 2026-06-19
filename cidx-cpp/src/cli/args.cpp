@@ -79,12 +79,12 @@ const char kInitHelp[] =
 const char kAddSourceUsage[] =
     "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
     "{repo,external}]\n"
-    "                       [--no-git]\n";
+    "                       [--no-git] [--version V] [--no-detect-version]\n";
 
 const char kAddSourceHelp[] =
     "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
     "{repo,external}]\n"
-    "                       [--no-git]\n"
+    "                       [--no-git] [--version V] [--no-detect-version]\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
@@ -93,22 +93,35 @@ const char kAddSourceHelp[] =
     "  --kind {repo,external}\n"
     "  --no-git              use --path as-is; do not promote to the enclosing "
     "git\n"
-    "                        root\n";
+    "                        root\n"
+    "  --version V           set component version to V (overrides "
+    "auto-detection;\n"
+    "                        '' clears)\n"
+    "  --no-detect-version   disable trailing-segment version detection\n";
 
 const char kImportUsage[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n";
+    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--version V]\n"
+    "                   [--no-detect-version] [--no-alias]\n";
 
 const char kImportHelp[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
+    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--version V]\n"
+    "                   [--no-detect-version] [--no-alias]\n"
     "\n"
     "options:\n"
-    "  -h, --help   show this help message and exit\n"
-    "  --db DB      compile_commands.json (or the directory holding it)\n"
-    "  --name NAME  component name override\n"
-    "  --force      reimport: delete the existing component (its files and\n"
-    "               indexed symbols) before importing\n"
-    "  --no-alias   do not rewrite include paths to <label> tokens via the\n"
-    "               registry\n";
+    "  -h, --help           show this help message and exit\n"
+    "  --db DB              compile_commands.json (or the directory holding "
+    "it)\n"
+    "  --name NAME          component name override\n"
+    "  --force              reimport: delete the existing component (its files "
+    "and\n"
+    "                       indexed symbols) before importing\n"
+    "  --version V          set component version to V (overrides "
+    "auto-detection;\n"
+    "                       '' clears)\n"
+    "  --no-detect-version  disable trailing-segment version detection\n"
+    "  --no-alias           do not rewrite include paths to <label> tokens via "
+    "the\n"
+    "                       registry\n";
 
 const char kRealiasUsage[] =
     "usage: cidx realias [-h] [--db PATH] [COMPONENT]\n";
