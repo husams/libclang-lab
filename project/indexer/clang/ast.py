@@ -85,7 +85,7 @@ def _get_overridden_cursors(cursor: cx.Cursor) -> list[cx.Cursor]:
 
 
 from ..utils import md5_of  # noqa: E402
-from .util import parse  # noqa: E402
+from .util import collect_diagnostics, parse  # noqa: E402
 
 #: Set to "false" / "0" / "no" / "off" to index system headers too.
 IGNORE_SYSTEM_HEADERS_ENV: str = "INDEXER_IGNORE_SYSTEM_HEADERS"
@@ -1783,6 +1783,10 @@ def index_source(
     """
     tu = parse(filename, args, driver=driver)
     try:
+        # Parse diagnostics (warnings + tolerated errors) captured while the TU
+        # is live, before the AST is freed; persisted by the caller against
+        # this file's row.
+        diagnostics = collect_diagnostics(tu)
         stored, skipped = index_symbols(db, tu, file_id)
         headers = index_headers(
             db,
@@ -1795,4 +1799,9 @@ def index_source(
             index_edges(db, tu, filename, file_id)
     finally:
         del tu  # last reference -> native AST freed NOW
-    return {"symbols": stored, "skipped": skipped, "headers": headers}
+    return {
+        "symbols": stored,
+        "skipped": skipped,
+        "headers": headers,
+        "diagnostics": diagnostics,
+    }

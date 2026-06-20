@@ -400,6 +400,39 @@ def fatal_diagnostics(
     return [d for d in tu.diagnostics if d.severity >= level]
 
 
+def collect_diagnostics(
+    tu: cx.TranslationUnit, level: int | None = None
+) -> list[dict]:
+    """Plain-data diagnostics at/above `level` (default: severity >= WARNING),
+    in TU order, for persistence in the index.
+
+    Each entry is a dict: severity (int) / spelling / file_path / line / col.
+    A locationless diagnostic stores NULL file_path/line/col so the row is
+    identical regardless of binding (the C++ port mirrors this)."""
+    if level is None:
+        level = cx.Diagnostic.Warning
+    out: list[dict] = []
+    for d in tu.diagnostics:
+        if d.severity < level:
+            continue
+        loc = d.location
+        f = loc.file
+        if f is None:
+            file_path, line, col = None, None, None
+        else:
+            file_path, line, col = f.name, loc.line, loc.column
+        out.append(
+            {
+                "severity": int(d.severity),
+                "spelling": d.spelling,
+                "file_path": file_path,
+                "line": line,
+                "col": col,
+            }
+        )
+    return out
+
+
 def _abort_level() -> int:
     """Severity that aborts a parse.
 

@@ -384,7 +384,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v14 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v15 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -399,11 +399,12 @@ TEST_CASE("fresh Storage produces schema v14 (file-backed and :memory:)") {
       tables.insert(st.col_text(0));
     }
   }
-  // v14 adds the label table
+  // v14 adds the label table; v15 adds the diagnostic table
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "edge_kind", "edge",
                                         "edge_site", "template_param",
-                                        "template_arg", "call_arg", "label"});
+                                        "template_arg", "call_arg", "label",
+                                        "diagnostic"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -433,7 +434,7 @@ TEST_CASE("fresh Storage produces schema v14 (file-backed and :memory:)") {
                               "is_pure", "is_static", "is_instantiation",
                               "linkage", "access", "parent_usr", "resolved"});
 
-  // the 7 indexes (5 symbol + 2 edge)
+  // the indexes (5 symbol + 2 edge + 1 call_arg + 1 diagnostic)
   std::set<std::string> indexes;
   {
     auto st = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' "
@@ -447,14 +448,15 @@ TEST_CASE("fresh Storage produces schema v14 (file-backed and :memory:)") {
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
                                          "idx_edge_src", "idx_edge_dst",
-                                         "idx_call_arg_edge"});
+                                         "idx_call_arg_edge",
+                                         "idx_diagnostic_file"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "14");
+    CHECK(st.col_text(0) == "15");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");
@@ -569,6 +571,61 @@ TEST_CASE("commit() propagates failure — not silently swallowed (R2)") {
 // (ON DELETE CASCADE) and every symbol indexed from those files (explicit --
 // symbol file refs are ON DELETE SET NULL) must vanish, leaving other
 // components fully intact.
+TEST_CASE("diagnostics: replace/get/counts, refresh, locationless, cascade") {
+  cidx::Storage db(":memory:");
+  const int64_t comp = db.add_component("d", "/repo/d");
+  const int64_t dir = db.add_directory(comp, "");
+  const int64_t fid = db.add_file(dir, "a.c");
+
+  auto mk = [](int sev, std::string spelling,
+               std::optional<std::string> path, std::optional<int64_t> line,
+               std::optional<int64_t> col) {
+    cidx::Diagnostic d;
+    d.severity = sev;
+    d.spelling = std::move(spelling);
+    d.file_path = std::move(path);
+    d.line = line;
+    d.col = col;
+    return d;
+  };
+
+  // Round-trip in TU (insertion) order; counts grouped by severity.
+  db.replace_diagnostics(
+      fid, {mk(2, "unused 'x'", std::string("/r/a.c"), 3, 5),
+            mk(3, "implicit decl", std::string("/r/a.c"), 7, 1),
+            mk(2, "shadow", std::string("/r/a.c"), 9, 2)});
+  auto got = db.get_diagnostics(fid);
+  REQUIRE(got.size() == 3);
+  CHECK(got[0].severity == 2);
+  CHECK(got[0].spelling == "unused 'x'");
+  CHECK(got[0].line == 3);
+  CHECK(got[1].severity == 3);
+  CHECK(got[0].id < got[1].id); // ids follow TU order
+  CHECK(db.diagnostic_counts() ==
+        std::map<int64_t, std::map<int, int64_t>>{{fid, {{2, 2}, {3, 1}}}});
+
+  // Locationless diagnostic stores NULL file_path/line/col.
+  db.replace_diagnostics(
+      fid, {mk(2, "linker input unused", std::nullopt, std::nullopt,
+               std::nullopt)});
+  got = db.get_diagnostics(fid);
+  REQUIRE(got.size() == 1); // wholesale refresh dropped the old three
+  CHECK_FALSE(got[0].file_path.has_value());
+  CHECK_FALSE(got[0].line.has_value());
+  CHECK_FALSE(got[0].col.has_value());
+
+  // Re-index of a now-clean file drops every row.
+  db.replace_diagnostics(fid, {});
+  CHECK(db.get_diagnostics(fid).empty());
+  CHECK(db.diagnostic_counts().empty());
+
+  // ON DELETE CASCADE: deleting the file removes its diagnostics.
+  db.replace_diagnostics(fid, {mk(3, "e", std::nullopt, std::nullopt,
+                                  std::nullopt)});
+  db.delete_file(fid);
+  CHECK(db.diagnostic_counts().empty());
+}
+
 TEST_CASE("delete_component removes files (cascade) and symbols (explicit)") {
   cidx::Storage db(":memory:");
 

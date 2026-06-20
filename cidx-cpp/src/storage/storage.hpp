@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 14;
+constexpr int kSchemaVersion = 15;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
 // SQL CHECK and by an application-side StorageError (§3.2).
@@ -153,6 +153,17 @@ public:
   bool is_file_indexed(const std::string &abs_path,
                        const std::optional<double> &mtime = std::nullopt,
                        const std::optional<std::string> &md5 = std::nullopt);
+
+  // -- diagnostics (v15) -------------------------------------------------
+  // Replace a file's (TU's) stored parse diagnostics wholesale; called on
+  // every (re)index so a now-clean file drops its stale rows. Rows are
+  // inserted in order so their ids follow TU diagnostic order.
+  void replace_diagnostics(int64_t file_id,
+                           const std::vector<Diagnostic> &diags);
+  // Stored parse diagnostics for a file, in insertion (TU) order.
+  std::vector<Diagnostic> get_diagnostics(int64_t file_id);
+  // Per-file diagnostic counts grouped by severity: {file_id: {severity: n}}.
+  std::map<int64_t, std::map<int, int64_t>> diagnostic_counts();
 
   // -- symbols -----------------------------------------------------------
   // Upsert keyed by USR; throws StorageError on a bad kind. Definition wins

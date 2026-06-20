@@ -27,11 +27,12 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass, fields
+from collections.abc import Sequence
 from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -221,6 +222,22 @@ CREATE TABLE IF NOT EXISTS label (
     path TEXT NOT NULL           -- stored verbatim; may contain $VAR
 );
 
+-- ---- v15: per-file parse diagnostics (errors/warnings) ---------------------
+-- Clang diagnostics (severity >= warning) emitted while parsing a TU, keyed by
+-- the TU's file row. Refreshed wholesale on every (re)index of that file. A
+-- diagnostic located in an #included header keeps its own file_path/line/col,
+-- but is owned by the TU that surfaced it.
+CREATE TABLE IF NOT EXISTS diagnostic (
+    id        INTEGER PRIMARY KEY,
+    file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    severity  INTEGER NOT NULL,   -- clang severity: 2=warning 3=error 4=fatal
+    spelling  TEXT NOT NULL,      -- the diagnostic message
+    file_path TEXT,               -- diagnostic location file (NULL if locationless)
+    line      INTEGER,            -- NULL when locationless
+    col       INTEGER             -- NULL when locationless
+);
+CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
+
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
 
@@ -252,6 +269,17 @@ class File:
     indexed: bool = False
     indexed_at: Optional[str] = None
     args_overridden: bool = False
+    id: Optional[int] = None
+
+
+@dataclass
+class Diagnostic:
+    file_id: int
+    severity: int  # clang: 2=warning, 3=error, 4=fatal
+    spelling: str
+    file_path: Optional[str] = None
+    line: Optional[int] = None
+    col: Optional[int] = None
     id: Optional[int] = None
 
 
@@ -457,6 +485,11 @@ class Storage:
             # The schema script (run AFTER migrate) creates the table via
             # CREATE TABLE IF NOT EXISTS; the migration only needs to flip
             # changed so the schema_version meta is bumped.
+            changed = True
+        if "diagnostic" not in tables:
+            # v14 -> v15: per-file parse diagnostics. Created by the schema
+            # script (CREATE TABLE IF NOT EXISTS); no backfill possible -- a
+            # reindex repopulates it from each TU's diagnostics.
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -1025,6 +1058,50 @@ class Storage:
             (int(bool(indexed)), file_id),
         )
         self._commit()
+
+    # -- diagnostics (v15) ---------------------------------------------------
+
+    def replace_diagnostics(
+        self, file_id: int, diags: Sequence[dict[str, Any]]
+    ) -> None:
+        """Replace the stored parse diagnostics for a file (TU) wholesale.
+
+        Called on every (re)index so a now-clean file drops its stale rows.
+        Each diag is a dict with severity/spelling/file_path/line/col; rows are
+        inserted in the given order so their ids follow TU diagnostic order."""
+        self._conn.execute("DELETE FROM diagnostic WHERE file_id = ?", (file_id,))
+        for d in diags:
+            self._conn.execute(
+                "INSERT INTO diagnostic "
+                "(file_id, severity, spelling, file_path, line, col) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    file_id,
+                    d["severity"],
+                    d["spelling"],
+                    d.get("file_path"),
+                    d.get("line"),
+                    d.get("col"),
+                ),
+            )
+        self._commit()
+
+    def get_diagnostics(self, file_id: int) -> list[Diagnostic]:
+        """Stored parse diagnostics for a file, in insertion (TU) order."""
+        rows = self._conn.execute(
+            "SELECT * FROM diagnostic WHERE file_id = ? ORDER BY id", (file_id,)
+        ).fetchall()
+        return [_row_to(Diagnostic, r) for r in rows]
+
+    def diagnostic_counts(self) -> dict[int, dict[int, int]]:
+        """Per-file diagnostic counts grouped by severity: {file_id: {sev: n}}."""
+        out: dict[int, dict[int, int]] = {}
+        for fid, sev, n in self._conn.execute(
+            "SELECT file_id, severity, COUNT(*) FROM diagnostic "
+            "GROUP BY file_id, severity"
+        ):
+            out.setdefault(fid, {})[sev] = n
+        return out
 
     def set_file_compile_options(
         self,
