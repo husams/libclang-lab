@@ -1435,6 +1435,176 @@ TEST_SUITE("clang") {
     CHECK(cs.count("mm::Cache::get") == 1); // single-overload member template
   }
 
+  // --- cross-TU wrong-order indexing (USR-keyed stub + backfill) ----------- #
+  //
+  // Mirror of Python test_cross_tu_wrong_order_stub_backfill. A dependent call
+  // to a member function template whose DEFINING TU is indexed AFTER the
+  // consuming TU must still link, because the callee USR is TU-invariant: the
+  // consuming TU mints a USR-keyed stub, and the later index of the cache TU
+  // backfills the same USR. Covers BOTH the single-candidate recovered path
+  // (`get`) and the multi-candidate overloaded path (`set`, two overloads).
+  TEST_CASE("cross-TU wrong order: the consuming TU indexed BEFORE the cache TU "
+            "mints USR-keyed stubs that backfill on a later index + resolve "
+            "(order independence; regression for v0.14.2)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string use_dir = f.tmp + "/use";
+    const std::string lib_dir = f.tmp + "/lib";
+    // The cache header lives under lib/, which is UNOWNED at first index time.
+    write_file(lib_dir + "/cache.hpp",
+               "#ifndef MM_CACHE_HPP\n"
+               "#define MM_CACHE_HPP\n"
+               "#include <string>\n"
+               "namespace mm {\n"
+               "class Cache {\n"
+               "  int n_ = 0;\n"
+               "public:\n"
+               "  template <class T> void set(const std::string& k, T v) { n_ "
+               "+= (int)sizeof(v); }\n"
+               "  template <class T> void set(const std::string& k, const T* p) "
+               "{ n_ += (int)k.size(); }\n"
+               "  template <class T> T get(const std::string&) const { return "
+               "T(); }\n"
+               "};\n"
+               "}  // namespace mm\n"
+               "#endif\n");
+    write_file(lib_dir + "/cache.cpp", "#include \"cache.hpp\"\n");
+    write_file(use_dir + "/use.hpp",
+               "#ifndef MM_USE_HPP\n"
+               "#define MM_USE_HPP\n"
+               "#include \"cache.hpp\"\n"
+               "namespace mm {\n"
+               "template <class T>\n"
+               "T cache_roundtrip(Cache& c, const std::string& k, T v) {\n"
+               "  c.set(k, v);          // overloaded -> multi-candidate "
+               "dependent call\n"
+               "  return c.get<T>(k);   // single-candidate dependent call\n"
+               "}\n"
+               "}  // namespace mm\n"
+               "#endif\n");
+    write_file(use_dir + "/use.cpp",
+               "#include \"use.hpp\"\n"
+               "namespace mm {\n"
+               "int exercise(Cache& c) { return cache_roundtrip<int>(c, \"k\", "
+               "1); }\n"
+               "}  // namespace mm\n");
+
+    auto callees_of = [&](const std::string &src_qual) {
+      std::unordered_set<std::string> out;
+      auto &raw = f.db.raw_db();
+      auto st = raw.prepare("SELECT b.qual_name FROM edge e "
+                            "JOIN symbol a ON a.id = e.src_id "
+                            "JOIN symbol b ON b.id = e.dst_id "
+                            "WHERE e.kind = 1 AND a.qual_name = ?");
+      st.bind(1, std::string_view{src_qual});
+      while (st.step()) {
+        out.insert(st.col_text(0));
+      }
+      return out;
+    };
+    auto unresolved_count = [&](const std::string &qual) {
+      auto &raw = f.db.raw_db();
+      auto st = raw.prepare("SELECT COUNT(*) FROM symbol "
+                            "WHERE qual_name = ? AND resolved = 0");
+      st.bind(1, std::string_view{qual});
+      REQUIRE(st.step());
+      return st.col_int64(0);
+    };
+
+    // Only the use/ directory is a registered component: cache.hpp under lib/
+    // is unowned when use.cpp is indexed.
+    f.db.add_component("use", use_dir, "external");
+    const std::string use_cpp = use_dir + "/use.cpp";
+    const int64_t use_fid = f.db.add_file_path(use_cpp);
+    const std::vector<std::string> use_opts = {"-I" + use_dir, "-I" + lib_dir,
+                                               "-std=c++17"};
+    {
+      // index_one's body (symbols -> headers two-pass -> edges) inline; the TU
+      // is freed before the assertions, mirroring A.index_source.
+      const ParsedTu tu = f.parser.parse(use_cpp, use_opts, std::nullopt);
+      REQUIRE(f.indexer.index_symbols(tu, use_cpp, use_fid) >= 0);
+      f.indexer.index_headers(tu);
+      f.indexer.index_edges(tu, use_cpp, use_fid);
+    }
+
+    // Before the cache TU is indexed, the calls already exist as edges to
+    // (unresolved) USR-keyed stubs -- order-independence depends on this.
+    const auto pre = callees_of("mm::cache_roundtrip");
+    CHECK(pre.count("mm::Cache::set") == 1); // overloaded dependent call stub
+    CHECK(pre.count("mm::Cache::get") == 1); // single dependent call stub
+    CHECK(unresolved_count("mm::Cache::set") ==
+          2); // both set overloads as unresolved stubs
+
+    // Now index the defining TU: same USRs backfill the stubs to resolved.
+    f.db.add_component("lib", lib_dir, "external");
+    const std::string cache_cpp = lib_dir + "/cache.cpp";
+    const int64_t cache_fid = f.db.add_file_path(cache_cpp);
+    {
+      const ParsedTu tu = f.parser.parse(
+          cache_cpp, {"-I" + lib_dir, "-std=c++17"}, std::nullopt);
+      f.indexer.index_symbols(tu, cache_cpp, cache_fid);
+      f.indexer.index_headers(tu);
+      f.indexer.index_edges(tu, cache_cpp, cache_fid);
+    }
+    f.db.resolve_pass();
+
+    const auto post = callees_of("mm::cache_roundtrip");
+    CHECK(post.count("mm::Cache::set") == 1);
+    CHECK(post.count("mm::Cache::get") == 1);
+    CHECK(unresolved_count("mm::Cache::set") == 0); // backfilled to resolved
+    CHECK(unresolved_count("mm::Cache::get") == 0);
+  }
+
+  // --- system-header gating (no stub for stdlib/ADL overload sets) --------- #
+  //
+  // Mirror of Python test_system_overload_set_makes_no_stub. The stub-minting
+  // that makes wrong-order indexing work is GATED to non-system headers: a
+  // dependent call to a STDLIB overload set (`std::swap`) must NOT mint a
+  // USR-keyed stub, or every TU touching the standard library would accumulate
+  // permanent unresolved externals. `std::swap(a, b)` on dependent operands is
+  // a multi-candidate dependent overload set whose every candidate lives in
+  // <utility>, so it exercises the emit_overloaded_calls system-header skip.
+  TEST_CASE("system-header gating: a dependent call to a std overload set "
+            "(std::swap) mints no stub and adds no edge (regression for "
+            "v0.14.2 gating)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/swapstd.cpp";
+    write_file(path, "#include <utility>\n"
+                     "namespace nn {\n"
+                     "template <class T>\n"
+                     "void swap_them(T& a, T& b) {\n"
+                     "  std::swap(a, b);   // multi-candidate dependent overload "
+                     "set, all in <utility>\n"
+                     "}\n"
+                     "}  // namespace nn\n");
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {"-std=c++17"}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    auto &raw = f.db.raw_db();
+    // No std:: symbol row was minted at all (resolved or not).
+    {
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM symbol WHERE qual_name LIKE 'std::%'");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 0);
+    }
+    // And no calls edge points at a std:: target.
+    {
+      auto st = raw.prepare("SELECT COUNT(*) FROM edge e "
+                            "JOIN symbol b ON b.id = e.dst_id "
+                            "WHERE e.kind = 1 AND b.qual_name LIKE 'std::%'");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 0);
+    }
+  }
+
 } // TEST_SUITE("clang") — S06
 
 int main(int argc, char **argv) {
