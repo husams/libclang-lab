@@ -390,7 +390,9 @@ TEST_SUITE("clang") {
     }
     const std::string manifests = CIDX_MANIFESTS_DIR;
     const auto cmds = CompileDb::load(manifests + "/compile_commands.json");
-    REQUIRE(cmds.size() == 2);
+    // Unified DB: every manifests TU lives here, so match by name rather than
+    // a fixed count (fixtures are added over time — see CLAUDE.md).
+    REQUIRE(cmds.size() >= 2);
 
     const CompileCommand &shapes = find_command(cmds, "shapes.c");
     CHECK(shapes.directory == manifests);
@@ -409,10 +411,13 @@ TEST_SUITE("clang") {
     if (!require_manifests()) {
       return;
     }
-    const std::string project = std::string(CIDX_MANIFESTS_DIR) + "/project";
-    const auto cmds = CompileDb::load(project); // no trailing json filename
-    REQUIRE(cmds.size() == 2);
+    const std::string manifests = CIDX_MANIFESTS_DIR;
+    const std::string project = manifests + "/project";
+    const auto cmds = CompileDb::load(manifests); // directory form, no json name
+    REQUIRE(cmds.size() >= 2);
 
+    // mathlib.c/app.c live under project/ in the unified DB; their per-entry
+    // directory + -I. still resolve against project/.
     const CompileCommand &mathlib = find_command(cmds, "mathlib.c");
     CHECK(mathlib.directory == project);
     CHECK(mathlib.driver == "cc");

@@ -1,7 +1,0 @@
-[
-  {
-    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/lib/1.2.0",
-    "command": "cc -c mathx.c -o mathx.o",
-    "file": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/lib/1.2.0/mathx.c"
-  }
-]

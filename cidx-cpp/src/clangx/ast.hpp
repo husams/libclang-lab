@@ -70,11 +70,18 @@ public:
   // (ast.py:183-226). For each header not yet indexed (file row missing,
   // never indexed, or md5 changed) its symbols are read out of THIS TU's AST
   // — no separate parse — then the file row is marked indexed. The header's
-  // file row records mtime + md5 but NULL compile_options/driver (G20).
+  // file row is stamped with the SAME (encoded) compile options + driver as
+  // its including TU (header_options/header_driver), so the header is
+  // standalone-reparseable (e.g. `cidx ast dump <header>`) with the TU's full
+  // -I/-std/-D context instead of bare defaults; options stay in their
+  // portable <label>/$VAR form (decoded at parse time), mirroring TU rows.
   // ignore_system defaults to the $INDEXER_IGNORE_SYSTEM_HEADERS policy.
-  HeaderStats
-  index_headers(const ParsedTu &tu,
-                const std::optional<bool> &ignore_system = std::nullopt);
+  HeaderStats index_headers(
+      const ParsedTu &tu,
+      const std::optional<bool> &ignore_system = std::nullopt,
+      const std::optional<std::vector<std::string>> &header_options =
+          std::nullopt,
+      const std::optional<std::string> &header_driver = std::nullopt);
 
   // Enable or disable graph extraction (default: enabled). Set false via
   // --no-graph.
