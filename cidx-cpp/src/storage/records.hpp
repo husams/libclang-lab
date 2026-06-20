@@ -45,6 +45,18 @@ struct File {
   bool args_overridden = false; // flags hand-edited via `cidx file`
 };
 
+// v15: one captured parse diagnostic (severity >= warning), keyed by the TU's
+// file row. Locationless diagnostics leave file_path/line/col unset (NULL).
+struct Diagnostic {
+  int64_t id = -1;
+  int64_t file_id = -1;
+  int severity = 0; // clang: 2=warning, 3=error, 4=fatal
+  std::string spelling;
+  std::optional<std::string> file_path;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+};
+
 struct Symbol {
   std::string usr;
   std::string spelling;

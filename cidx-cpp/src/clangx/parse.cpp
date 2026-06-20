@@ -187,6 +187,41 @@ Parser::final_args(const std::string &path,
   return flags;
 }
 
+// util.py collect_diagnostics -- plain-data diagnostics at/above WARNING, in
+// TU order, for the index. A locationless diagnostic leaves file_path/line/col
+// unset (NULL) so the stored row matches the Python binding byte-for-byte.
+std::vector<Diagnostic> Parser::collect_diagnostics(const ParsedTu &tu) {
+  LibClang &lib = LibClang::instance();
+  std::vector<Diagnostic> out;
+  if (tu.tu == nullptr) {
+    return out;
+  }
+  const unsigned n = lib.clang_getNumDiagnostics(tu.tu);
+  for (unsigned i = 0; i < n; ++i) {
+    CXDiagnostic d = lib.clang_getDiagnostic(tu.tu, i);
+    const int severity = static_cast<int>(lib.clang_getDiagnosticSeverity(d));
+    if (severity >= CXDiagnostic_Warning) {
+      Diagnostic info;
+      info.severity = severity;
+      info.spelling = CxString(lib, lib.clang_getDiagnosticSpelling(d)).str();
+      CXFile file = nullptr;
+      unsigned line = 0;
+      unsigned column = 0;
+      unsigned offset = 0;
+      lib.clang_getExpansionLocation(lib.clang_getDiagnosticLocation(d), &file,
+                                     &line, &column, &offset);
+      if (file != nullptr) {
+        info.file_path = CxString(lib, lib.clang_getFileName(file)).str();
+        info.line = static_cast<int64_t>(line);
+        info.col = static_cast<int64_t>(column);
+      }
+      out.push_back(std::move(info));
+    }
+    lib.clang_disposeDiagnostic(d);
+  }
+  return out;
+}
+
 ParsedTu Parser::parse(const std::string &abs_path,
                        const std::vector<std::string> &args,
                        const std::optional<std::string> &driver) {

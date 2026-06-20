@@ -66,6 +66,61 @@ bool is_directory(const std::string &path) {
   return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+// clang diagnostic severity labels (cli.py _DIAG_SEVERITY_LABELS).
+const char *diag_severity_label(int severity) {
+  switch (severity) {
+  case 2:
+    return "warning";
+  case 3:
+    return "error";
+  case 4:
+    return "fatal";
+  default:
+    return nullptr;
+  }
+}
+
+// cli.py _diag_flag: compact `list files` indicator from {severity: n}: "-"
+// when clean, else e.g. "2E"/"3W"/"1E2W" (errors+fatals fold into E).
+std::string diag_flag(const std::map<int, int64_t> &counts) {
+  int64_t errs = 0;
+  int64_t warns = 0;
+  for (const auto &[sev, n] : counts) {
+    if (sev >= 3) {
+      errs += n;
+    } else if (sev == 2) {
+      warns += n;
+    }
+  }
+  if (errs == 0 && warns == 0) {
+    return "-";
+  }
+  std::string out;
+  if (errs != 0) {
+    out += std::to_string(errs) + "E";
+  }
+  if (warns != 0) {
+    out += std::to_string(warns) + "W";
+  }
+  return out;
+}
+
+// cli.py _diag_summary: "2 error(s), 1 warning(s)" — severity desc, nonzero.
+std::string diag_summary(const std::map<int, int64_t> &counts) {
+  std::string out;
+  for (int sev : {4, 3, 2}) {
+    const auto it = counts.find(sev);
+    if (it == counts.end() || it->second == 0) {
+      continue;
+    }
+    if (!out.empty()) {
+      out += ", ";
+    }
+    out += std::to_string(it->second) + " " + diag_severity_label(sev) + "(s)";
+  }
+  return out;
+}
+
 // os.path.exists parity: any stat success (file or directory).
 bool path_exists(const std::string &path) {
   struct stat st{};
@@ -130,6 +185,7 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
               const std::string &path, Context &ctx) {
   int stored = 0;
   HeaderStats hs;
+  std::vector<Diagnostic> diags;
   try {
     // Stored options are re-sanitize()d at index time (G11) — heals DBs
     // imported by an older cidx whose drop list was shorter.
@@ -143,6 +199,9 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
     // parse() receives the reconstructed absolute path (G24) and assembles
     // opts + toolchain_flags(is_cpp, driver) + -ferror-limit=0 itself.
     const ParsedTu tu = parser.parse(path, opts, rec.driver);
+    // Capture parse diagnostics (warnings + tolerated errors) while the TU is
+    // live; persisted against this file's row after the AST is freed.
+    diags = Parser::collect_diagnostics(tu);
     stored = indexer.index_symbols(tu, path, rec.id);
     // Stamp each indexed header with this TU's (encoded) options + driver so
     // the header is standalone-reparseable (e.g. `cidx ast dump <header>`).
@@ -156,6 +215,7 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
     *ctx.err << "error: " << e.what() << "\n";
     return 1;
   }
+  db.replace_diagnostics(rec.id, diags);
   db.mark_file_indexed(rec.id, file_mtime(path));
   // cli.py:194-196 — byte-frozen per-file line (analysis §1.2).
   *ctx.out << "  -> " << stored << " symbols; headers: " << hs.indexed
@@ -660,12 +720,27 @@ int cmd_list_files(const ParsedArgs &args, Context &ctx) {
     vw = std::max(vw, v.size());
     vers.push_back(v);
   }
+  // Parse-diagnostic indicator: "-" clean, else e.g. "2E"/"3W"/"1E2W".
+  const auto diag_counts = db.diagnostic_counts();
+  std::vector<std::string> flags;
+  flags.reserve(rows.size());
+  std::size_t fw = 1;
+  for (const auto &row : rows) {
+    std::string flag = "-";
+    const auto dit = diag_counts.find(row.first.id);
+    if (dit != diag_counts.end()) {
+      flag = diag_flag(dit->second);
+    }
+    fw = std::max(fw, flag.size());
+    flags.push_back(flag);
+  }
   for (std::size_t k = 0; k < rows.size(); ++k) {
     const File &rec = rows[k].first;
     const char *mark = rec.indexed ? "idx " : "pend";
-    // f"{rec.id:>4}  {mark}  {ver:<{vw}}  {path}"
+    // f"{rec.id:>4}  {mark}  {flag:<{fw}}  {ver:<{vw}}  {path}"
     *ctx.out << fmt::rjust(std::to_string(rec.id), 4) << "  " << mark << "  "
-             << fmt::ljust(vers[k], vw) << "  " << rows[k].second << "\n";
+             << fmt::ljust(flags[k], fw) << "  " << fmt::ljust(vers[k], vw)
+             << "  " << rows[k].second << "\n";
   }
   *ctx.out << rows.size() << " file(s)\n";
   return rows.empty() ? 1 : 0;
@@ -828,6 +903,11 @@ int cmd_show_file(const ParsedArgs &args, Context &ctx) {
     }
     ++by_kind[s.kind];
   }
+  const std::vector<Diagnostic> diags = db.get_diagnostics(rec->id);
+  std::map<int, int64_t> diag_counts;
+  for (const Diagnostic &dg : diags) {
+    ++diag_counts[dg.severity];
+  }
   std::optional<std::string> by_kind_field;
   if (!by_kind.empty()) { // std::map iterates sorted — Python sorted(items)
     std::string joined;
@@ -879,11 +959,27 @@ int cmd_show_file(const ParsedArgs &args, Context &ctx) {
                           std::to_string(defined) + " defined here, " +
                           std::to_string(declared) + " declared here)"},
           {"by kind", by_kind_field},
+          {"diagnostics", diags.empty()
+                              ? std::nullopt
+                              : std::optional<std::string>(
+                                    diag_summary(diag_counts))},
       };
   for (const auto &field : fields) {
     if (field.second) {
       fmt::print_field(*ctx.out, field.first, *field.second);
     }
+  }
+  // Each captured parse diagnostic, in TU order, under the summary.
+  for (const Diagnostic &dg : diags) {
+    const char *lbl = diag_severity_label(dg.severity);
+    const std::string label =
+        lbl != nullptr ? std::string(lbl) : std::to_string(dg.severity);
+    const std::string locstr =
+        dg.file_path ? (*dg.file_path + ":" + std::to_string(*dg.line) + ":" +
+                        std::to_string(*dg.col))
+                     : std::string("<no location>");
+    *ctx.out << "  " << fmt::ljust(label, 7) << " " << locstr << ": "
+             << dg.spelling << "\n";
   }
   return 0;
 }

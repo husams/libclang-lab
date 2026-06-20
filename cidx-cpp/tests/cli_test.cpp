@@ -33,6 +33,7 @@
 #include "util/errors.hpp"
 #include "util/logger.hpp"
 
+using cidx::Diagnostic;
 using cidx::Storage;
 using cidx::Symbol;
 using cidx::UsageError;
@@ -783,7 +784,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.13.0");
+  CHECK(std::string(cli::kVersion) == "0.14.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1257,6 +1258,51 @@ TEST_CASE("show file: by path and id; G31 time formats; G20 placeholder") {
   ::tzset();
 }
 
+TEST_CASE("diagnostics: list-files indicator + show-file section (v15)") {
+  const GoldFixture g;
+  // Inject one error + one warning on file 1 (src/a.c) via the storage API.
+  {
+    Storage db(g.cache + "/index.db");
+    std::vector<Diagnostic> diags;
+    Diagnostic e;
+    e.severity = 3;
+    e.spelling = "boom";
+    e.file_path = g.root + "/src/a.c";
+    e.line = 10;
+    e.col = 2;
+    diags.push_back(e);
+    Diagnostic w;
+    w.severity = 2;
+    w.spelling = "meh";
+    w.file_path = g.root + "/src/a.c";
+    w.line = 12;
+    w.col = 3;
+    diags.push_back(w);
+    db.replace_diagnostics(1, diags);
+  }
+
+  // list files: a.c shows the '1E1W' indicator; the clean header shows '-'.
+  CmdResult r = run_cli({"list", "files"}, g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out.find("1E1W") != std::string::npos);
+  CHECK(r.out.find(g.expect("{ROOT}/src/a.c")) != std::string::npos);
+
+  // show file 1: summary field + one line per diagnostic, in TU order.
+  r = run_cli({"show", "file", "1"}, g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out.find("diagnostics  1 error(s), 1 warning(s)\n") !=
+        std::string::npos);
+  CHECK(r.out.find(g.expect("  error   {ROOT}/src/a.c:10:2: boom\n")) !=
+        std::string::npos);
+  CHECK(r.out.find(g.expect("  warning {ROOT}/src/a.c:12:3: meh\n")) !=
+        std::string::npos);
+
+  // A clean file shows no diagnostics field.
+  r = run_cli({"show", "file", "2"}, g.cache);
+  CHECK(r.rc == 0);
+  CHECK(r.out.find("diagnostics") == std::string::npos);
+}
+
 TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   const GoldFixture g;
   // $ python3 -m indexer list components
@@ -1308,24 +1354,24 @@ TEST_CASE("list files: idx/pend marks, --indexed/--pending, --dir scope") {
   // $ python3 -m indexer list files
   CmdResult r = run_cli({"list", "files"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   2  pend  -  {ROOT}/include/a.h\n"
-                          "   1  idx   -  {ROOT}/src/a.c\n"
+  CHECK(r.out == g.expect("   2  pend  -  -  {ROOT}/include/a.h\n"
+                          "   1  idx   -  -  {ROOT}/src/a.c\n"
                           "2 file(s)\n"));
 
   // $ python3 -m indexer list files --pending
   r = run_cli({"list", "files", "--pending"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   2  pend  -  {ROOT}/include/a.h\n1 file(s)\n"));
+  CHECK(r.out == g.expect("   2  pend  -  -  {ROOT}/include/a.h\n1 file(s)\n"));
 
   // $ python3 -m indexer list files --indexed
   r = run_cli({"list", "files", "--indexed"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  idx   -  {ROOT}/src/a.c\n1 file(s)\n"));
+  CHECK(r.out == g.expect("   1  idx   -  -  {ROOT}/src/a.c\n1 file(s)\n"));
 
   // $ python3 -m indexer list files -c gold -d src
   r = run_cli({"list", "files", "-c", "gold", "-d", "src"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  idx   -  {ROOT}/src/a.c\n1 file(s)\n"));
+  CHECK(r.out == g.expect("   1  idx   -  -  {ROOT}/src/a.c\n1 file(s)\n"));
 }
 
 TEST_CASE("list files/symbols: --dir without --component -> exit 1") {

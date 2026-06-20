@@ -124,7 +124,8 @@ void check_migrated(const std::string &db_path) {
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
                                          "idx_edge_src", "idx_edge_dst",
-                                         "idx_call_arg_edge"});
+                                         "idx_call_arg_edge",
+                                         "idx_diagnostic_file"});
 }
 
 } // namespace

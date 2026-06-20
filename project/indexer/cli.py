@@ -65,7 +65,37 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.13.0"
+VERSION = "0.14.0"
+
+
+# clang diagnostic severities (clang.cindex.Diagnostic.Warning/Error/Fatal).
+_DIAG_SEVERITY_LABELS = {2: "warning", 3: "error", 4: "fatal"}
+
+
+def _diag_flag(counts: dict[int, int]) -> str:
+    """Compact `list files` indicator from {severity: n}: '-' when clean, else
+    e.g. '2E', '3W', '1E2W' (errors+fatals fold into E, warnings into W)."""
+    errs = counts.get(3, 0) + counts.get(4, 0)
+    warns = counts.get(2, 0)
+    if not errs and not warns:
+        return "-"
+    out = ""
+    if errs:
+        out += f"{errs}E"
+    if warns:
+        out += f"{warns}W"
+    return out
+
+
+def _diag_summary(counts: dict[int, int]) -> str:
+    """Human summary for `show file`: '2 error(s), 1 warning(s)' (severity
+    desc, nonzero buckets only)."""
+    parts = [
+        f"{counts[sev]} {_DIAG_SEVERITY_LABELS[sev]}(s)"
+        for sev in (4, 3, 2)
+        if counts.get(sev)
+    ]
+    return ", ".join(parts)
 
 
 def cache_dir() -> str:
@@ -373,6 +403,7 @@ def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int
         print(f"error: {e}", file=sys.stderr)
         return 1
     mtime = os.path.getmtime(path) if os.path.exists(path) else None
+    db.replace_diagnostics(rec.id, result["diagnostics"])
     db.mark_file_indexed(rec.id, mtime=mtime)
     h = result["headers"]
     print(
@@ -785,9 +816,13 @@ def cmd_list_files(args) -> int:
         dir_comp = {d.id: d.component_id for d, _ in db.list_directories()}
         vers = [comp_ver.get(dir_comp.get(rec.directory_id)) or "-" for rec, _ in rows]
         vw = max((len(v) for v in vers), default=1)
-        for (rec, path), ver in zip(rows, vers):
+        # Parse-diagnostic indicator: '-' clean, else e.g. '2E'/'3W'/'1E2W'.
+        diag_counts = db.diagnostic_counts()
+        flags = [_diag_flag(diag_counts.get(rec.id, {})) for rec, _ in rows]
+        fw = max((len(f) for f in flags), default=1)
+        for (rec, path), ver, flag in zip(rows, vers, flags):
             mark = "idx " if rec.indexed else "pend"
-            print(f"{rec.id:>4}  {mark}  {ver:<{vw}}  {path}")
+            print(f"{rec.id:>4}  {mark}  {flag:<{fw}}  {ver:<{vw}}  {path}")
     print(f"{len(rows)} file(s)")
     return 0 if rows else 1
 
@@ -915,6 +950,11 @@ def cmd_show_file(args) -> int:
         for s in syms:
             by_kind[s.kind] = by_kind.get(s.kind, 0) + 1
 
+        diags = db.get_diagnostics(rec.id)
+        diag_counts: dict[int, int] = {}
+        for dg in diags:
+            diag_counts[dg.severity] = diag_counts.get(dg.severity, 0) + 1
+
         def ts(epoch):
             if epoch is None:
                 return None
@@ -949,10 +989,20 @@ def cmd_show_file(args) -> int:
                 if by_kind
                 else None,
             ),
+            ("diagnostics", _diag_summary(diag_counts) if diags else None),
         ]
         for key, value in fields:
             if value is not None:
                 print(f"{key:<12} {value}")
+        # Each captured parse diagnostic, in TU order, under the summary.
+        for dg in diags:
+            label = _DIAG_SEVERITY_LABELS.get(dg.severity, str(dg.severity))
+            locstr = (
+                f"{dg.file_path}:{dg.line}:{dg.col}"
+                if dg.file_path is not None
+                else "<no location>"
+            )
+            print(f"  {label:<7} {locstr}: {dg.spelling}")
     return 0
 
 

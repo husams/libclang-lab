@@ -184,7 +184,22 @@ CREATE TABLE IF NOT EXISTS label (
     path TEXT NOT NULL           -- stored verbatim; may contain $VAR
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '14');
+-- ---- v15: per-file parse diagnostics (errors/warnings) ---------------------
+-- Clang diagnostics (severity >= warning) emitted while parsing a TU, keyed by
+-- the TU's file row. Refreshed wholesale on every (re)index. A diagnostic in an
+-- #included header keeps its own file_path/line/col but is owned by the TU.
+CREATE TABLE IF NOT EXISTS diagnostic (
+    id        INTEGER PRIMARY KEY,
+    file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    severity  INTEGER NOT NULL,   -- clang severity: 2=warning 3=error 4=fatal
+    spelling  TEXT NOT NULL,      -- the diagnostic message
+    file_path TEXT,               -- diagnostic location file (NULL if locationless)
+    line      INTEGER,            -- NULL when locationless
+    col       INTEGER             -- NULL when locationless
+);
+CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '15');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -632,6 +647,11 @@ void Storage::migrate() {
   // label table: created by the schema script (CREATE TABLE IF NOT EXISTS).
   // Only flip changed here so the meta UPDATE fires.
   if (!has_table("label")) {
+    changed = true; // table will be created by the schema script
+  }
+  // v14 -> v15: per-file parse diagnostics. Created by the schema script
+  // (CREATE TABLE IF NOT EXISTS); no backfill -- a reindex repopulates it.
+  if (!has_table("diagnostic")) {
     changed = true; // table will be created by the schema script
   }
   if (changed) {
@@ -1204,6 +1224,65 @@ bool Storage::is_file_indexed(const std::string &abs_path,
     return false;
   }
   return true;
+}
+
+// -- diagnostics (v15)
+// ----------------------------------------------------------------------
+
+void Storage::replace_diagnostics(int64_t file_id,
+                                  const std::vector<Diagnostic> &diags) {
+  // Wholesale refresh: drop the file's stale rows, then insert in TU order so
+  // ids follow the diagnostic sequence (parity with storage.py).
+  {
+    auto del = db_.prepare("DELETE FROM diagnostic WHERE file_id = ?");
+    del.bind(1, file_id);
+    del.step_done();
+  }
+  for (const Diagnostic &d : diags) {
+    auto st = db_.prepare(
+        "INSERT INTO diagnostic "
+        "(file_id, severity, spelling, file_path, line, col) "
+        "VALUES (?, ?, ?, ?, ?, ?)");
+    st.bind(1, file_id);
+    st.bind(2, static_cast<int64_t>(d.severity));
+    st.bind(3, std::string_view(d.spelling));
+    bind_opt(st, 4, d.file_path);
+    bind_opt(st, 5, d.line);
+    bind_opt(st, 6, d.col);
+    st.step_done();
+  }
+}
+
+std::vector<Diagnostic> Storage::get_diagnostics(int64_t file_id) {
+  auto st = db_.prepare(
+      "SELECT id, file_id, severity, spelling, file_path, line, col "
+      "FROM diagnostic WHERE file_id = ? ORDER BY id");
+  st.bind(1, file_id);
+  std::vector<Diagnostic> out;
+  while (st.step()) {
+    Diagnostic d;
+    d.id = st.col_int64(0);
+    d.file_id = st.col_int64(1);
+    d.severity = static_cast<int>(st.col_int64(2));
+    d.spelling = st.col_text(3);
+    d.file_path = opt_text(st, 4);
+    d.line = opt_int64(st, 5);
+    d.col = opt_int64(st, 6);
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+std::map<int64_t, std::map<int, int64_t>> Storage::diagnostic_counts() {
+  auto st = db_.prepare("SELECT file_id, severity, COUNT(*) FROM diagnostic "
+                        "GROUP BY file_id, severity");
+  std::map<int64_t, std::map<int, int64_t>> out;
+  while (st.step()) {
+    const int64_t fid = st.col_int64(0);
+    const int sev = static_cast<int>(st.col_int64(1));
+    out[fid][sev] = st.col_int64(2);
+  }
+  return out;
 }
 
 // -- symbols

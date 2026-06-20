@@ -23,6 +23,7 @@
 #include "clang-c/Index.h"
 
 #include "clangx/toolchain.hpp"
+#include "storage/records.hpp"
 #include "util/logger.hpp"
 
 namespace cidx {
@@ -69,6 +70,12 @@ public:
   ParsedTu parse(const std::string &abs_path,
                  const std::vector<std::string> &args,
                  const std::optional<std::string> &driver);
+
+  // v15: plain-data diagnostics at/above WARNING from a parsed TU, in TU
+  // order, for persistence in the index (file_id is filled in by the caller
+  // via Storage::replace_diagnostics). Mirrors util.py collect_diagnostics:
+  // a locationless diagnostic leaves file_path/line/col unset (NULL).
+  static std::vector<Diagnostic> collect_diagnostics(const ParsedTu &tu);
 
   // The assembled final argv (util.py:424-426):
   //   stored_args + toolchain_flags(is_cpp, driver) + {"-ferror-limit=0"}

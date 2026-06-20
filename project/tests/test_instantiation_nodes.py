@@ -128,14 +128,14 @@ def _sym_by_spelling(g: GraphQuery, spelling: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_14(extracted_db):
-    """Freshly-created DB must be at schema v14 (current)."""
+def test_schema_version_is_current(extracted_db):
+    """Freshly-created DB must be at the current schema version."""
     db = Storage(extracted_db)
     row = db._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()
     db.close()
-    assert row is not None and int(row[0]) == 14
+    assert row is not None and int(row[0]) == 15
 
 
 # ---------------------------------------------------------------------------
@@ -519,15 +519,15 @@ def test_migration_v12_to_v13(tmp_path):
     version = db._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(version) == 14, f"expected schema v14 (current), got {version}"
+    assert int(version) == 15, f"expected current schema (v15), got {version}"
     db.close()
 
-    # Second open: idempotent (no error, still v14)
+    # Second open: idempotent (no error, still current)
     db2 = Storage(db_path)
     v2 = db2._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(v2) == 14
+    assert int(v2) == 15
     db2.close()
 
     # Future DB (v15): must NOT be downgraded
