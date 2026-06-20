@@ -212,6 +212,10 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
     // is false (--no-graph was passed).
     indexer.index_edges(tu, path, rec.id);
   } catch (const ClangParseError &e) {
+    // The file failed to parse (e.g. a fatal header-not-found): record the
+    // diagnostics so `show file` / `list files` explain why, even though no
+    // AST was indexed and the file stays pending.
+    db.replace_diagnostics(rec.id, e.diagnostics());
     *ctx.err << "error: " << e.what() << "\n";
     return 1;
   }

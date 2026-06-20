@@ -6,6 +6,10 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include "storage/records.hpp"
 
 namespace cidx {
 
@@ -16,9 +20,20 @@ public:
 };
 
 // A translation unit could not be parsed (fatal diagnostics, bad libclang).
+// Carries the diagnostics (severity >= warning) seen on the failed TU so the
+// caller can still record WHY a file failed, even though no AST was indexed;
+// empty when the TU never materialised.
 class ClangParseError : public CidxError {
 public:
   using CidxError::CidxError;
+  ClangParseError(const std::string &msg, std::vector<Diagnostic> diags)
+      : CidxError(msg), diagnostics_(std::move(diags)) {}
+  const std::vector<Diagnostic> &diagnostics() const noexcept {
+    return diagnostics_;
+  }
+
+private:
+  std::vector<Diagnostic> diagnostics_;
 };
 
 // SQLite / schema / persistence failure.

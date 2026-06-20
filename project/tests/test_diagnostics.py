@@ -174,3 +174,36 @@ def test_show_file_clean_has_no_diagnostics_line(index_db, capsys, monkeypatch):
     rc, out, _ = run(["show", "file", str(fid)], capsys)
     assert rc == 0
     assert "diagnostics" not in out
+
+
+# -- fatal parse failure still records diagnostics (real libclang parse) -------
+
+
+def test_failed_parse_records_fatal_diagnostic(tmp_path, capsys):
+    """A file that fails to parse (fatal header-not-found) still records its
+    diagnostics, so `show file`/`list files` explain why -- even though no AST
+    was indexed and the file stays pending."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "bad.c"
+    src.write_text('#include "nope/missing.h"\nint main(void) { return 0; }\n')
+    db_path = str(tmp_path / "index.db")
+    with Storage(db_path) as db:
+        db.add_component("repo", str(repo))
+        fid = db.add_file_path(str(src), compile_options=["-DFOO=1"], driver="cc")
+        rec = db.get_file_by_id(fid)
+        assert rec is not None
+        rc = cli._index_one(db, rec, str(src))
+        capsys.readouterr()  # drain the "error: ..." stderr line
+        assert rc == 1  # parse failed
+
+        diags = db.get_diagnostics(fid)
+        assert diags, "fatal diagnostics must be recorded even on a failed parse"
+        assert any(
+            "missing.h" in d.spelling and "file not found" in d.spelling
+            for d in diags
+        )
+        assert any(d.severity >= 3 for d in diags)  # error/fatal severity
+        # The file stays pending; counts surface it for `list files`.
+        assert db.get_file_by_id(fid).indexed is False
+        assert fid in db.diagnostic_counts()

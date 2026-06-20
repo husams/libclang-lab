@@ -371,6 +371,7 @@ TEST_SUITE("clang") {
 
     bool threw = false;
     std::string message;
+    std::vector<cidx::Diagnostic> carried;
     std::string out;
     std::string err;
     {
@@ -381,6 +382,7 @@ TEST_SUITE("clang") {
       } catch (const ClangParseError &e) {
         threw = true;
         message = e.what();
+        carried = e.diagnostics();
       }
       out = cap_out.stop();
       err = cap_err.stop();
@@ -388,6 +390,13 @@ TEST_SUITE("clang") {
     REQUIRE(threw);
     CHECK(message == path + ": 1 fatal diagnostic(s): " + path +
                          ":1: 'no-such-header.h' file not found");
+    // v15: the failed parse carries its diagnostics so the caller can still
+    // record WHY the file failed (the fatal header-not-found).
+    REQUIRE(carried.size() == 1);
+    CHECK(carried[0].severity == 4); // fatal
+    CHECK(carried[0].spelling == "'no-such-header.h' file not found");
+    CHECK(carried[0].file_path == path);
+    CHECK(carried[0].line == 1);
     // terminal stayed clean — the dump went to cidx.log
     CHECK(out.empty());
     CHECK(err.empty());

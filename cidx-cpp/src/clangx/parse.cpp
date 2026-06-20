@@ -121,6 +121,41 @@ std::vector<DiagInfo> error_diagnostics(LibClang &lib, CXTranslationUnit tu) {
   return out;
 }
 
+// util.py collect_diagnostics -- plain-data diagnostics at/above WARNING, in
+// TU order, for persistence in the index. A locationless diagnostic leaves
+// file_path/line/col unset (NULL), matching the Python binding byte-for-byte.
+std::vector<Diagnostic> warning_diagnostics(LibClang &lib,
+                                            CXTranslationUnit tu) {
+  std::vector<Diagnostic> out;
+  if (tu == nullptr) {
+    return out;
+  }
+  const unsigned n = lib.clang_getNumDiagnostics(tu);
+  for (unsigned i = 0; i < n; ++i) {
+    CXDiagnostic d = lib.clang_getDiagnostic(tu, i);
+    const int severity = static_cast<int>(lib.clang_getDiagnosticSeverity(d));
+    if (severity >= CXDiagnostic_Warning) {
+      Diagnostic info;
+      info.severity = severity;
+      info.spelling = CxString(lib, lib.clang_getDiagnosticSpelling(d)).str();
+      CXFile file = nullptr;
+      unsigned line = 0;
+      unsigned column = 0;
+      unsigned offset = 0;
+      lib.clang_getExpansionLocation(lib.clang_getDiagnosticLocation(d), &file,
+                                     &line, &column, &offset);
+      if (file != nullptr) {
+        info.file_path = CxString(lib, lib.clang_getFileName(file)).str();
+        info.line = static_cast<int64_t>(line);
+        info.col = static_cast<int64_t>(column);
+      }
+      out.push_back(std::move(info));
+    }
+    lib.clang_disposeDiagnostic(d);
+  }
+  return out;
+}
+
 // util.py:368-377 -- each diagnostic at INFO (the per-file summary carries
 // the WARNING/ERROR level, keeping the CLI warning counter one-per-file,
 // G27), capped at 25 with a suppressed-count line.
@@ -187,39 +222,8 @@ Parser::final_args(const std::string &path,
   return flags;
 }
 
-// util.py collect_diagnostics -- plain-data diagnostics at/above WARNING, in
-// TU order, for the index. A locationless diagnostic leaves file_path/line/col
-// unset (NULL) so the stored row matches the Python binding byte-for-byte.
 std::vector<Diagnostic> Parser::collect_diagnostics(const ParsedTu &tu) {
-  LibClang &lib = LibClang::instance();
-  std::vector<Diagnostic> out;
-  if (tu.tu == nullptr) {
-    return out;
-  }
-  const unsigned n = lib.clang_getNumDiagnostics(tu.tu);
-  for (unsigned i = 0; i < n; ++i) {
-    CXDiagnostic d = lib.clang_getDiagnostic(tu.tu, i);
-    const int severity = static_cast<int>(lib.clang_getDiagnosticSeverity(d));
-    if (severity >= CXDiagnostic_Warning) {
-      Diagnostic info;
-      info.severity = severity;
-      info.spelling = CxString(lib, lib.clang_getDiagnosticSpelling(d)).str();
-      CXFile file = nullptr;
-      unsigned line = 0;
-      unsigned column = 0;
-      unsigned offset = 0;
-      lib.clang_getExpansionLocation(lib.clang_getDiagnosticLocation(d), &file,
-                                     &line, &column, &offset);
-      if (file != nullptr) {
-        info.file_path = CxString(lib, lib.clang_getFileName(file)).str();
-        info.line = static_cast<int64_t>(line);
-        info.col = static_cast<int64_t>(column);
-      }
-      out.push_back(std::move(info));
-    }
-    lib.clang_disposeDiagnostic(d);
-  }
-  return out;
+  return warning_diagnostics(LibClang::instance(), tu.tu);
 }
 
 ParsedTu Parser::parse(const std::string &abs_path,
@@ -288,8 +292,11 @@ void Parser::apply_diagnostic_policy(
                    "; libclang: " +
                    (major != 0 ? std::to_string(major) : std::string("?")));
     log_diagnostics(log_, path, errors);
+    // Carry the diagnostics (collected while the TU is alive) so the caller
+    // can still record WHY the file failed even though no AST was indexed.
     throw ClangParseError(path + ": " + std::to_string(fatal_count) +
-                          " fatal diagnostic(s): " + join(summary_parts, "; "));
+                              " fatal diagnostic(s): " + join(summary_parts, "; "),
+                          warning_diagnostics(lib, tu));
   }
 
   // util.py:449-455 -- tolerated errors (default, non-strict mode): exactly

@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.14.0"
+VERSION = "0.14.1"
 
 
 # clang diagnostic severities (clang.cindex.Diagnostic.Warning/Error/Fatal).
@@ -400,6 +400,10 @@ def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int
             header_options=rec.compile_options,
         )
     except ClangParseError as e:
+        # The file failed to parse (e.g. a fatal header-not-found): record the
+        # diagnostics so `show file` / `list files` explain why, even though no
+        # AST was indexed and the file stays pending.
+        db.replace_diagnostics(rec.id, e.diagnostics)
         print(f"error: {e}", file=sys.stderr)
         return 1
     mtime = os.path.getmtime(path) if os.path.exists(path) else None
