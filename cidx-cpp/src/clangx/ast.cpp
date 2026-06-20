@@ -701,6 +701,8 @@ struct BodyDescentCtx {
   int64_t src_id = -1;
   int64_t file_id = -1;
   int cond_depth = 0;
+  std::string owner_usr; // USR of the enclosing method's owning record (empty
+                         // for free fns); self-owner skip in TYPE_REF branch.
   std::exception_ptr error;
 };
 
@@ -1292,7 +1294,7 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
 // Non-recursive entry point: visits all children via clang_visitChildren,
 // capturing CALL_EXPR (calls) + DECL_REF_EXPR / MEMBER_REF_EXPR (uses)
 // nodes and recursing depth-first.
-CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
+CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                                         CXClientData data) noexcept {
   auto *ctx = static_cast<BodyDescentCtx *>(data);
   try {
@@ -1521,6 +1523,36 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor /*parent*/,
           }
         }
       }
+    } else if (kind == CXCursor_TypeRef || kind == CXCursor_TemplateRef) {
+      // B2 uses: a bare type NAME in expression/statement position
+      // (Color::Red, MyClass::instance(), sizeof(T), static_cast<T>, new T).
+      // PARENT-KIND GUARD: `parent` is the enclosing cursor. Signature / field
+      // / var-decl / typedef type-refs are already emitted by the declaration
+      // paths (emit_type_use, template_arg rows) and have a *declaration*
+      // parent, so skip those. Only type-names under expression/statement
+      // nodes survive. Mirrors ast.py:_body_descent TYPE_REF branch.
+      const CXCursorKind pk = lib.clang_getCursorKind(parent);
+      const bool parent_is_decl =
+          pk == CXCursor_VarDecl || pk == CXCursor_ParmDecl ||
+          pk == CXCursor_FieldDecl || pk == CXCursor_FunctionDecl ||
+          pk == CXCursor_CXXMethod || pk == CXCursor_Constructor ||
+          pk == CXCursor_Destructor || pk == CXCursor_FunctionTemplate ||
+          pk == CXCursor_TypedefDecl || pk == CXCursor_TypeAliasDecl;
+      if (!parent_is_decl) {
+        const CXCursor ref = lib.clang_getCursorReferenced(cursor);
+        if (!lib.clang_Cursor_isNull(ref)) {
+          const std::string usr =
+              CxString(lib, lib.clang_getCursorUSR(ref)).str();
+          // Lookup-only, NO stubs; skip self-edge and the enclosing method's
+          // own owning record (redundant with method_of).
+          if (!usr.empty() && usr != ctx->owner_usr) {
+            const auto dst = ctx->db->lookup_symbol(usr);
+            if (dst && dst->id != ctx->src_id) {
+              emit_body_edge(ctx, lib, cursor, dst->id, 7 /* uses */);
+            }
+          }
+        }
+      }
     } else if (kind == CXCursor_VarDecl) {
       // B2 uses: a LOCAL variable's declared type names a record/enum/typedef
       // -> uses edge (src=enclosing fn). `Conf local;` counts as the function
@@ -1621,6 +1653,18 @@ void AstIndexer::body_descent(CXCursor fn_cursor, int64_t src_id,
   ctx.src_id = src_id;
   ctx.file_id = file_id;
   ctx.cond_depth = 0;
+  // Owner USR for the self-owner skip in the TYPE_REF branch: when fn_cursor is
+  // a method, its semantic parent is the owning record; record that USR so a
+  // method naming its own class does not emit a redundant uses edge.
+  const CXCursor owner = lib.clang_getCursorSemanticParent(fn_cursor);
+  if (!lib.clang_Cursor_isNull(owner)) {
+    const CXCursorKind ok = lib.clang_getCursorKind(owner);
+    if (ok == CXCursor_ClassDecl || ok == CXCursor_StructDecl ||
+        ok == CXCursor_UnionDecl || ok == CXCursor_ClassTemplate ||
+        ok == CXCursor_ClassTemplatePartialSpecialization) {
+      ctx.owner_usr = CxString(lib, lib.clang_getCursorUSR(owner)).str();
+    }
+  }
   lib.clang_visitChildren(fn_cursor, &body_descent_visitor, &ctx);
   if (ctx.error) {
     std::rethrow_exception(ctx.error);

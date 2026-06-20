@@ -30,13 +30,18 @@ endforeach()
 target_compile_definitions(storage_migration_test PRIVATE
   CIDX_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
-# CIDX_MANIFESTS_DIR can be overridden at cmake configure time to simulate an
-# environment where the lab fixtures are absent (e.g. the e2e box that rsyncs
-# only cidx-cpp/).  Default: the sibling manifests/ tree.
+# CIDX_MANIFESTS_DIR can be overridden at cmake configure time (e.g. the e2e box
+# that rsyncs only cidx-cpp/).  Default: the canonical `libclang-lab/manifests`
+# tree, matching the Python suite (test_astcache.py anchors `_MANIFESTS` to
+# `_REPO_ROOT/libclang-lab/manifests`).  Anchoring to the literal `libclang-lab`
+# segment (not worktree-relative `../../manifests`) keeps the frozen cache_key
+# interchange contract identical whether built from main or a worktree.
 if(NOT DEFINED CIDX_MANIFESTS_DIR)
-  get_filename_component(_cidx_manifests_dir
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../manifests" ABSOLUTE)
-  set(CIDX_MANIFESTS_DIR "${_cidx_manifests_dir}")
+  # CMAKE_CURRENT_SOURCE_DIR == <workspace>/<lab-dir>/cidx-cpp/tests -> up 3
+  # reaches the workspace root that holds `libclang-lab`.
+  get_filename_component(_cidx_workspace_root
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+  set(CIDX_MANIFESTS_DIR "${_cidx_workspace_root}/libclang-lab/manifests")
 endif()
 
 # --- S03: compiledb_test — one exe, two ctest registrations -----------------
