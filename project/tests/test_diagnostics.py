@@ -207,3 +207,75 @@ def test_failed_parse_records_fatal_diagnostic(tmp_path, capsys):
         # The file stays pending; counts surface it for `list files`.
         assert db.get_file_by_id(fid).indexed is False
         assert fid in db.diagnostic_counts()
+
+
+def test_failed_load_synthesizes_fatal_diagnostic(tmp_path, capsys, monkeypatch):
+    """A hard load failure (libclang TranslationUnitLoadError) carries no
+    per-diagnostic detail; _index_one synthesizes a fatal row so the failure is
+    never silently dropped (was: replace_diagnostics([]) wiped the row)."""
+    import indexer.cli as climod
+    from indexer.clang.util import ClangParseError
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "x.c"
+    src.write_text("int x;\n")
+    db_path = str(tmp_path / "index.db")
+    with Storage(db_path) as db:
+        db.add_component("repo", str(repo))
+        fid = db.add_file_path(str(src), compile_options=[], driver="cc")
+        rec = db.get_file_by_id(fid)
+        assert rec is not None
+
+        def boom(*a, **k):
+            raise ClangParseError(f"cannot parse {src}")  # no diagnostics
+
+        monkeypatch.setattr(climod, "index_source", boom)
+        rc = climod._index_one(db, rec, str(src))
+        capsys.readouterr()
+        assert rc == 1
+        (d,) = db.get_diagnostics(fid)
+        assert d.severity == 4  # synthesized fatal
+        assert "cannot parse" in d.spelling
+
+
+# -- header vs source: minimal-flag sources must NOT be deferred --------------
+
+
+def test_is_header_classification():
+    assert cli._is_header("/r/foo.h")
+    assert cli._is_header("/r/foo.hpp")
+    assert cli._is_header("/r/foo.tcc")
+    assert cli._is_header("/r/vector")  # extensionless (system header)
+    assert not cli._is_header("/r/foo.c")
+    assert not cli._is_header("/r/foo.cpp")
+    assert not cli._is_header("/r/proj.d/foo.c")  # dotted dir, .c source
+
+
+def test_minimal_flag_source_indexed_header_deferred(tmp_path, capsys):
+    """A TU source whose compile command sanitizes to no flags ([] options) is
+    still indexed by bare `cidx index`, so its parse diagnostics are recorded.
+    A header stays deferred (indexed via its including TU), regardless of the
+    options stamped on its row. Regression: the old `not compile_options` check
+    silently deferred minimal-flag .c sources -> nothing recorded/displayed."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "min.c"
+    # A default-on diagnostic (no -Wall needed): use of an undeclared function.
+    src.write_text("int f(void) { return undeclared_fn(); }\n")
+    hdr = repo / "lib.h"
+    hdr.write_text("int g(void);\n")
+    db_path = str(tmp_path / "index.db")
+    with Storage(db_path) as db:
+        db.add_component("repo", str(repo))
+        src_id = db.add_file_path(str(src), compile_options=[], driver="cc")
+        hdr_id = db.add_file_path(str(hdr), compile_options=[], driver="cc")
+        rc = cli._index_pending(db)
+        capsys.readouterr()
+        assert rc == 0
+        # the []-options .c SOURCE was parsed (indexed), not deferred
+        assert db.get_file_by_id(src_id).indexed is True
+        # its parse diagnostics landed on its own row
+        assert db.get_diagnostics(src_id), "minimal-flag source must record diags"
+        # the header stays pending (deferred to its including TU)
+        assert db.get_file_by_id(hdr_id).indexed is False
