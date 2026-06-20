@@ -51,7 +51,16 @@ if os.environ.get(LIBCLANG_ENV) and not cx.Config.loaded:
 
 
 class ClangParseError(Exception):
-    """The parse produced error/fatal diagnostics; the AST would be truncated."""
+    """The parse produced error/fatal diagnostics; the AST would be truncated.
+
+    `diagnostics` carries the plain-data diagnostics (severity >= warning) seen
+    on the failed TU, so the caller can still record WHY a file failed to parse
+    even though no AST was indexed. Empty when the TU never materialised.
+    """
+
+    def __init__(self, message: str, diagnostics: list[dict] | None = None):
+        super().__init__(message)
+        self.diagnostics: list[dict] = diagnostics or []
 
 
 _CPP_SUFFIXES: frozenset[str] = frozenset(
@@ -568,8 +577,12 @@ def parse(
                 _libclang_major() or "?",
             )
             _log_diagnostics(filename, fatal_diagnostics(tu, cx.Diagnostic.Error))
+            # Carry the diagnostics so the caller can still record WHY the file
+            # failed (the fatal header-not-found et al.) even though no AST was
+            # indexed -- collected here while the TU is still alive.
             raise ClangParseError(
-                f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}"
+                f"{filename}: {len(fatals)} fatal diagnostic(s): {summary}",
+                collect_diagnostics(tu),
             )
         if level > cx.Diagnostic.Error:
             errors = fatal_diagnostics(tu, cx.Diagnostic.Error)
