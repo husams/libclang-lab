@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.14.1"
+VERSION = "0.14.2"
 
 
 # clang diagnostic severities (clang.cindex.Diagnostic.Warning/Error/Fatal).

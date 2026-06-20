@@ -180,3 +180,113 @@ def test_cross_header_member_template_call_ordering():
         )
         method_of = _edge_map(db, 9)
         assert "mm::Box" in method_of.get("mm::Box::put", set())
+
+
+# --- cross-TU wrong-order indexing (USR-keyed stub + backfill) -------------- #
+#
+# A dependent call to a member function template whose DEFINING TU is indexed
+# AFTER the consuming TU must still link, because the callee USR is TU-invariant:
+# the consuming TU mints a USR-keyed stub, and the later index of the cache TU
+# backfills the same USR. Covers BOTH the single-candidate recovered path (`get`)
+# and the multi-candidate overloaded path (`set`, two overloads).
+
+CACHE_HPP = """
+#ifndef MM_CACHE_HPP
+#define MM_CACHE_HPP
+#include <string>
+namespace mm {
+class Cache {
+    int n_ = 0;
+public:
+    template <class T> void set(const std::string& k, T v) { n_ += (int)sizeof(v); }
+    template <class T> void set(const std::string& k, const T* p) { n_ += (int)k.size(); }
+    template <class T> T get(const std::string&) const { return T(); }
+};
+}  // namespace mm
+#endif
+"""
+
+CACHE_CPP = '#include "cache.hpp"\n'
+
+USE_HPP = """
+#ifndef MM_USE_HPP
+#define MM_USE_HPP
+#include "cache.hpp"
+namespace mm {
+template <class T>
+T cache_roundtrip(Cache& c, const std::string& k, T v) {
+    c.set(k, v);          // overloaded -> multi-candidate dependent call
+    return c.get<T>(k);   // single-candidate dependent call
+}
+}  // namespace mm
+#endif
+"""
+
+USE_CPP = """
+#include "use.hpp"
+namespace mm {
+int exercise(Cache& c) { return cache_roundtrip<int>(c, "k", 1); }
+}  // namespace mm
+"""
+
+
+def test_cross_tu_wrong_order_stub_backfill():
+    """Index the consuming TU BEFORE the cache TU; the call must still resolve.
+
+    The cache header lives in a separate, not-yet-registered directory, so it is
+    UNOWNED when `use.cpp` is indexed -- Cache::set/get are absent from the DB.
+    The dependent calls must mint USR-keyed stubs; indexing `cache.cpp` later
+    backfills the same USRs, so the edges become resolved without re-indexing the
+    consuming TU.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        use_dir = os.path.join(tmp, "use")
+        lib_dir = os.path.join(tmp, "lib")
+        os.makedirs(use_dir)
+        os.makedirs(lib_dir)
+        for d, name, body in (
+            (lib_dir, "cache.hpp", CACHE_HPP),
+            (lib_dir, "cache.cpp", CACHE_CPP),
+            (use_dir, "use.hpp", USE_HPP),
+            (use_dir, "use.cpp", USE_CPP),
+        ):
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(body)
+        use_cpp = os.path.join(use_dir, "use.cpp")
+        cache_cpp = os.path.join(lib_dir, "cache.cpp")
+        inc = ["-I" + use_dir, "-I" + lib_dir, "-std=c++17"]
+
+        db = Storage(os.path.join(tmp, "i.db"))
+        # Only the use/ directory is a registered component: cache.hpp under lib/
+        # is unowned at use.cpp index time.
+        db.add_component("use", use_dir)
+        use_fid = db.add_file_path(use_cpp)
+        A.index_source(db, use_cpp, clang_args(use_cpp) + inc, use_fid)
+
+        # Before the cache TU is indexed, the calls already exist as edges to
+        # (unresolved) USR-keyed stubs -- order-independence depends on this.
+        calls = _edge_map(db, 1)
+        roundtrip_calls = calls.get("mm::cache_roundtrip", set())
+        assert "mm::Cache::set" in roundtrip_calls, "overloaded dependent call stub"
+        assert "mm::Cache::get" in roundtrip_calls, "single dependent call stub"
+        pre = db._conn.execute(
+            "SELECT COUNT(*) FROM symbol "
+            "WHERE qual_name = 'mm::Cache::set' AND resolved = 0"
+        ).fetchone()[0]
+        assert pre == 2, "both set overloads present as unresolved stubs"
+
+        # Now index the defining TU: same USRs backfill the stubs to resolved.
+        db.add_component("lib", lib_dir)
+        cache_fid = db.add_file_path(cache_cpp)
+        A.index_source(db, cache_cpp, clang_args(cache_cpp) + ["-I" + lib_dir, "-std=c++17"], cache_fid)
+        db.resolve_pass()
+
+        calls = _edge_map(db, 1)
+        roundtrip_calls = calls.get("mm::cache_roundtrip", set())
+        assert "mm::Cache::set" in roundtrip_calls
+        assert "mm::Cache::get" in roundtrip_calls
+        unresolved = db._conn.execute(
+            "SELECT COUNT(*) FROM symbol "
+            "WHERE qual_name IN ('mm::Cache::set', 'mm::Cache::get') AND resolved = 0"
+        ).fetchone()[0]
+        assert unresolved == 0, "stubs backfilled to resolved after cache TU indexed"

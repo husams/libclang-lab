@@ -1120,12 +1120,15 @@ CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
 // Emit `calls` edges for a dependent call whose overload set has MORE THAN one
 // candidate (e.g. an overloaded member function template `cache.set(...)`
 // invoked inside another template body). libclang cannot say which overload is
-// selected, so the site is linked to every ALREADY-INDEXED overload of that
-// name -- a sound over-approximation for find-references / call-graph
-// navigation. Lookup-only (never mints stubs), so unrelated ADL overload sets
-// that name no indexed symbol produce nothing. No receiver/argument provenance
-// is recorded: that feeds virtual-dispatch devirt, and a function-template call
-// is never a virtual dispatch. Mirror of Python _emit_overloaded_calls().
+// selected, so the site is linked to every overload of that name -- a sound
+// over-approximation for find-references / call-graph navigation. Each candidate
+// USR is TU-invariant by contract, so a candidate not yet in the DB is given a
+// USR-keyed stub (backfilled when its defining TU is indexed later), making the
+// call order-independent. True system/stdlib candidates (ADL overload sets never
+// separately indexed) are skipped so they do not become permanent unresolved
+// externals. No receiver/argument provenance is recorded: that feeds
+// virtual-dispatch devirt, and a function-template call is never a virtual
+// dispatch. Mirror of Python _emit_overloaded_calls().
 void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
   const auto cands = overload_set_candidates(lib, call);
   if (cands.size() < 2) {
@@ -1134,16 +1137,29 @@ void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
   std::set<int64_t> dst_ids; // ordered + deduped
   for (const CXCursor &cand : cands) {
     const std::string usr = CxString(lib, lib.clang_getCursorUSR(cand)).str();
-    if (!usr.empty()) {
-      if (const auto s = ctx->db->lookup_symbol(usr)) {
-        dst_ids.insert(s->id);
-      }
+    if (usr.empty()) {
+      continue;
     }
+    if (const auto s = ctx->db->lookup_symbol(usr)) {
+      dst_ids.insert(s->id);
+      continue;
+    }
+    // Not yet indexed: mint a USR-keyed stub so a later index backfills it,
+    // but skip true system/stdlib overloads.
+    if (lib.clang_Location_isInSystemHeader(
+            lib.clang_getCursorLocation(cand)) != 0) {
+      continue;
+    }
+    const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, cand);
+    dst_ids.insert(ctx->db->mint_symbol_id(
+        usr, CxString(lib, lib.clang_getCursorSpelling(cand)).str(),
+        qualified_name(lib, cand),
+        CxString(lib, lib.clang_getCursorDisplayName(cand)).str(),
+        stub_kind(lib, cand), dl.file_id, dl.line, dl.col, dl.path));
   }
   if (dst_ids.empty()) {
-    // libclang's dependent-context USRs collapse parameter types and may match
-    // nothing stored; fall back to the shared qualified name + kind, which
-    // returns the whole overload set.
+    // Nothing resolved or minted (e.g. all candidates system/USR-less): fall
+    // back to the shared qualified name + kind over indexed symbols.
     const CXCursor first = cands[0];
     const std::string qn = qualified_name(lib, first);
     if (!qn.empty()) {
@@ -1327,20 +1343,22 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
         const std::string callee_usr =
             CxString(lib, lib.clang_getCursorUSR(ref)).str();
         if (!callee_usr.empty()) {
-          // Resolved calls mint a stub for an unindexed target; RECOVERED
-          // (dependent) calls only link to an already-indexed target, so a
-          // single-overload stdlib call never mints a stub.
+          // Resolved calls mint a stub for an unindexed target. A RECOVERED
+          // (dependent) call does the same -- a USR is TU-invariant by
+          // contract, so a USR-keyed stub is backfilled when its defining TU is
+          // indexed later, making the call order-independent. (An earlier
+          // belief that libclang emits an inconsistent USR for dependent member
+          // templates was a parse artifact: a fatal builtin-header miss
+          // truncated `std::string` to a fallback type. With a complete parse
+          // the call-site USR matches the declaration.)
           int64_t dst_id = -1;
           if (recovered) {
             if (const auto dst = ctx->db->lookup_symbol(callee_usr)) {
               dst_id = dst->id;
             }
-            // libclang emits an INCONSISTENT USR for a member function template
-            // referenced in a dependent template body (parameter types collapse,
-            // e.g. `const std::string&` -> `I`), so the declaration USR may not
-            // match what was indexed. Fall back to the stable qualified name +
-            // kind; only link when the match is unambiguous (exactly one
-            // candidate) to avoid mislinks on overloaded member templates.
+            // USR not yet indexed: try the stable qualified name + kind first
+            // (links to an already-present symbol when unambiguous), else mint a
+            // USR-keyed stub for a later index to backfill.
             if (dst_id < 0) {
               const std::string qn = qualified_name(lib, ref);
               if (!qn.empty()) {
@@ -1351,6 +1369,19 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                   dst_id = cands[0].id;
                 }
               }
+            }
+            if (dst_id < 0 && lib.clang_Location_isInSystemHeader(
+                                  lib.clang_getCursorLocation(ref)) == 0) {
+              // Skip true system/stdlib targets (e.g. one-arg std::move) -- they
+              // are never separately indexed, so a stub would be a permanent
+              // unresolved external.
+              const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);
+              dst_id = ctx->db->mint_symbol_id(
+                  callee_usr,
+                  CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
+                  qualified_name(lib, ref),
+                  CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
+                  stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path);
             }
           } else {
             const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);

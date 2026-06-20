@@ -852,10 +852,14 @@ def _emit_overloaded_calls(
 
     libclang cannot say which overload a dependent call selects, so rather than
     drop the call entirely (leaving the symbol with no references) we link the
-    site to every *already-indexed* overload of that name -- a faithful, sound
-    over-approximation for find-references / call-graph navigation: the site does
-    call one of them. Lookup-only (never mints stubs), so unrelated ADL overload
-    sets that name no indexed symbol produce nothing.
+    site to every overload of that name -- a faithful, sound over-approximation
+    for find-references / call-graph navigation: the site does call one of them.
+
+    Each candidate USR is TU-invariant by contract, so a candidate not yet in
+    the DB is given a USR-keyed stub (backfilled when its defining TU is indexed
+    later) -- making the call order-independent. True system/stdlib candidates
+    (ADL overload sets that are never separately indexed) are skipped so they do
+    not become permanent unresolved externals.
 
     No receiver/argument provenance is recorded: that feeds virtual-dispatch
     devirtualization, and a function-template call is never a virtual dispatch.
@@ -863,29 +867,48 @@ def _emit_overloaded_calls(
     cands = _overload_set_candidates(call_cursor)
     if len(cands) < 2:
         return
-    # Prefer exact per-candidate USR resolution; fall back to the shared
-    # qualified name + kind when libclang's dependent-context USRs don't match
-    # any stored symbol (they collapse parameter types -- see _body_descent).
-    dsts: dict[int, Any] = {}
+    dst_ids: set[int] = set()
     for cand in cands:
         usr = cand.get_usr()
-        if usr:
-            s = db.lookup_symbol(usr)
-            if s is not None:
-                dsts[s.id] = s
-    if not dsts:
+        if not usr:
+            continue
+        s = db.lookup_symbol(usr)
+        if s is not None:
+            dst_ids.add(s.id)
+            continue
+        # Not yet indexed: mint a USR-keyed stub so a later index backfills it,
+        # but skip true system/stdlib overloads.
+        if cand.location.is_in_system_header:
+            continue
+        _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, cand)
+        dst_ids.add(
+            db.mint_symbol_id(
+                usr,
+                cand.spelling,
+                _qualified_name(cand),
+                cand.displayname,
+                _KIND_MAP.get(cand.kind, "function"),
+                decl_file_id=_dfid,
+                decl_line=_dln,
+                decl_col=_dcol,
+                decl_path=_dpath,
+            )
+        )
+    if not dst_ids:
+        # Nothing resolved or minted (e.g. all candidates system/USR-less):
+        # fall back to the shared qualified name + kind over indexed symbols.
         first = cands[0]
         qn = _qualified_name(first)
         if qn:
             for s in db.lookup_symbols_by_qual_name(
                 qn, _KIND_MAP.get(first.kind, "function")
             ):
-                dsts[s.id] = s
-    if not dsts:
+                dst_ids.add(s.id)
+    if not dst_ids:
         return
     loc = call_cursor.location
-    for dst in dsts.values():
-        edge_id = db.add_edge(src_id, dst.id, 1)  # calls
+    for dst_id in dst_ids:
+        edge_id = db.add_edge(src_id, dst_id, 1)  # calls
         db.add_edge_site(
             edge_id,
             file_id,
@@ -1043,22 +1066,22 @@ def _body_descent(
             if ref is not None:
                 callee_usr: str = ref.get_usr()
                 if callee_usr:
-                    # Resolved calls mint a stub for an unindexed target;
-                    # RECOVERED (dependent) calls only link to an already-indexed
-                    # target, so a single-overload stdlib call (e.g. one-arg
-                    # std::move) never mints a stub.
+                    # Resolved calls mint a stub for an unindexed target. A
+                    # RECOVERED (dependent) call does the same -- a USR is
+                    # TU-invariant by contract, so a stub keyed on the callee's
+                    # USR is backfilled when its defining TU is indexed later,
+                    # making the call order-independent. (An earlier belief that
+                    # libclang emits an inconsistent USR for dependent member
+                    # templates was a parse artifact: a fatal builtin-header
+                    # miss truncated `std::string` to a fallback type. With a
+                    # complete parse the call-site USR matches the declaration.)
                     if recovered:
                         _dst = db.lookup_symbol(callee_usr)
                         if _dst is None:
-                            # libclang emits an INCONSISTENT USR for a member
-                            # function template referenced in a dependent
-                            # template body (parameter types collapse, e.g.
-                            # `const std::string&` -> `I`), so the declaration
-                            # USR never matches. Recover via the stable
-                            # fully-qualified name + kind; only link when the
-                            # match is unambiguous (exactly one candidate) so
-                            # overloaded member templates are left unresolved
-                            # rather than mislinked.
+                            # USR not yet indexed: try the stable fully-qualified
+                            # name + kind first (links to an already-present
+                            # symbol when unambiguous), else mint a USR-keyed
+                            # stub for a later index to backfill.
                             _qn = _qualified_name(ref)
                             if _qn:
                                 _cands = db.lookup_symbols_by_qual_name(
@@ -1067,6 +1090,22 @@ def _body_descent(
                                 if len(_cands) == 1:
                                     _dst = _cands[0]
                         dst_id = _dst.id if _dst is not None else None
+                        if dst_id is None and not ref.location.is_in_system_header:
+                            # Skip true system/stdlib targets (e.g. one-arg
+                            # std::move) -- they are never separately indexed, so
+                            # a stub would be a permanent unresolved external.
+                            _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
+                            dst_id = db.mint_symbol_id(
+                                callee_usr,
+                                ref.spelling,
+                                _qualified_name(ref),
+                                ref.displayname,
+                                _KIND_MAP.get(ref.kind, "function"),
+                                decl_file_id=_dfid,
+                                decl_line=_dln,
+                                decl_col=_dcol,
+                                decl_path=_dpath,
+                            )
                     else:
                         _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
                         # Pre-check: is this an instantiation member? We set
