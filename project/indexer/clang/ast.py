@@ -412,6 +412,24 @@ _FUNCTION_DEF_KINDS: frozenset[cx.CursorKind] = frozenset(
     }
 )
 
+#: Parent kinds for which a TYPE_REF/TEMPLATE_REF child is a *declaration*
+#: type-reference (signature / field / var / typedef) already captured by the
+#: declaration paths -- so the body-descent TYPE_REF branch must NOT re-emit it.
+_TYPEREF_PARENT_SKIP_KINDS: frozenset[cx.CursorKind] = frozenset(
+    {
+        cx.CursorKind.VAR_DECL,
+        cx.CursorKind.PARM_DECL,
+        cx.CursorKind.FIELD_DECL,
+        cx.CursorKind.FUNCTION_DECL,
+        cx.CursorKind.CXX_METHOD,
+        cx.CursorKind.CONSTRUCTOR,
+        cx.CursorKind.DESTRUCTOR,
+        cx.CursorKind.FUNCTION_TEMPLATE,
+        cx.CursorKind.TYPEDEF_DECL,
+        cx.CursorKind.TYPE_ALIAS_DECL,
+    }
+)
+
 #: Type layers stripped to reach the named (record/enum/typedef) type that a
 #: signature/field/variable mentions: `const Conf *[]` -> `Conf`.
 _TYPE_WRAPPERS: frozenset[cx.TypeKind] = frozenset(
@@ -971,7 +989,12 @@ def _mint_instantiation_nodes(
 
 
 def _body_descent(
-    db: Storage, fn_cursor: cx.Cursor, src_id: int, file_id: int, cond_depth: int = 0
+    db: Storage,
+    fn_cursor: cx.Cursor,
+    src_id: int,
+    file_id: int,
+    cond_depth: int = 0,
+    enclosing_owner_usr: Optional[str] = None,
 ) -> None:
     """Recurse through the body of a function-like cursor emitting calls + uses edges.
 
@@ -1230,6 +1253,45 @@ def _body_descent(
                                 loc.column,
                                 conditional=1 if cond_depth > 0 else 0,
                             )
+        elif kind in (cx.CursorKind.TYPE_REF, cx.CursorKind.TEMPLATE_REF):
+            # B2 uses: a bare type NAME in an expression/statement position
+            # (e.g. `Color::Red`, `MyClass::instance()`, `sizeof(T)`,
+            # `static_cast<T>(...)`, `new T`). libclang exposes these as
+            # TYPE_REF / TEMPLATE_REF cursors that no other branch handles, so
+            # the named type would otherwise be invisible in the graph.
+            #
+            # PARENT-KIND GUARD: in _body_descent the immediate parent of
+            # `child` is `fn_cursor`. Signature / field / var-decl / typedef
+            # type-refs are already emitted by the declaration paths
+            # (_emit_type_use, template_arg rows). Those type-refs are direct
+            # children of a *declaration* cursor, so skip when fn_cursor is a
+            # declaration kind. Only type-names under expression/statement
+            # nodes (parent is a CALL_EXPR, DECL_REF_EXPR, UNEXPOSED_EXPR, ...)
+            # survive this guard.
+            if fn_cursor.kind not in _TYPEREF_PARENT_SKIP_KINDS:
+                ref = child.referenced
+                if ref is not None:
+                    usr: str = ref.get_usr()
+                    # Lookup-only, NO stubs: stdlib / unindexed types create no
+                    # edges. Skip self-edge and the enclosing method's own
+                    # owning record (redundant with method_of). Use the
+                    # immutable `enclosing_owner_usr` parameter, NOT the local
+                    # `owner_usr` temporary reassigned by the CALL_EXPR
+                    # implicit-`this` branch (which would otherwise leak the
+                    # callee's class USR into descendants and wrongly suppress
+                    # legitimate type uses).
+                    if usr and usr != enclosing_owner_usr:
+                        dst = db.lookup_symbol(usr)
+                        if dst is not None and dst.id != src_id:
+                            edge_id = db.add_edge(src_id, dst.id, 7)  # uses
+                            loc = child.location
+                            db.add_edge_site(
+                                edge_id,
+                                file_id,
+                                loc.line,
+                                loc.column,
+                                conditional=1 if cond_depth > 0 else 0,
+                            )
         elif kind == cx.CursorKind.VAR_DECL:
             # B2 uses: a LOCAL variable's declared type names a record/enum/
             # typedef -> uses edge (src=enclosing fn). `Conf local;` counts as
@@ -1305,7 +1367,14 @@ def _body_descent(
                                         literal=arg_literal,
                                     )
         is_cond = kind in _COND_KINDS
-        _body_descent(db, child, src_id, file_id, cond_depth + (1 if is_cond else 0))
+        _body_descent(
+            db,
+            child,
+            src_id,
+            file_id,
+            cond_depth + (1 if is_cond else 0),
+            enclosing_owner_usr,
+        )
 
 
 def _index_edges_notxn(
@@ -1641,7 +1710,26 @@ def _index_edges_notxn(
         fn_sym = db.lookup_symbol(fn_usr)
         if fn_sym is None:
             continue
-        _body_descent(db, cursor, fn_sym.id, file_id)
+        # Self-owner skip for the TYPE_REF branch: when `cursor` is a method,
+        # its semantic parent is the owning record; record that USR so a method
+        # naming its own class does not emit a redundant uses edge.
+        _owner = cursor.semantic_parent
+        _owner_usr = (
+            _owner.get_usr()
+            if _owner is not None
+            and _owner.kind
+            in (
+                cx.CursorKind.CLASS_DECL,
+                cx.CursorKind.STRUCT_DECL,
+                cx.CursorKind.UNION_DECL,
+                cx.CursorKind.CLASS_TEMPLATE,
+                cx.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+            )
+            else None
+        )
+        _body_descent(
+            db, cursor, fn_sym.id, file_id, enclosing_owner_usr=_owner_usr
+        )
 
 
 def index_edges(

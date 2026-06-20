@@ -1106,13 +1106,19 @@ TEST_SUITE("clang") {
       CHECK(st.col_int64(0) >= 2);
     }
 
-    // uses (kind=7): widest() references indexed symbol(s) from geometry.hpp
-    // (at minimum the radius_ or max_of template arg types)
-    // uses may be 0 if all refs are to stdlib/template symbols not in the DB;
-    // the important check is that it doesn't crash and the query runs.
-    const int64_t uses_count = count_edges(7);
-    CHECK(uses_count >=
-          0); // at minimum: no crash; parity fixture confirms actual count
+    // uses (kind=7): widest() now also names Color via the TYPE_REF `Color::Red`
+    // in `Box<Color> bc(Color::Red)` expression position -> a uses edge from
+    // widest to the indexed enum Color (TYPE_REF uses-edge feature, v0.5.0).
+    {
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM edge e "
+          "JOIN symbol src ON src.id = e.src_id "
+          "JOIN symbol dst ON dst.id = e.dst_id "
+          "WHERE e.kind = 7 AND src.spelling = 'widest' "
+          "  AND dst.spelling = 'Color'");
+      st.step();
+      CHECK(st.col_int64(0) == 1); // widest uses Color via Color::Red TYPE_REF
+    }
 
     // Verify the inherits edge: src=Circle, dst=Shape
     {
@@ -1253,6 +1259,67 @@ TEST_SUITE("clang") {
     CHECK(users.count("RdKafka::Conf::self") == 1);        // return type
     CHECK(users.count("RdKafka::ConfAlias") == 1);         // typedef underlying
     CHECK(users.count("RdKafka::Conf") == 0);              // no self-edge
+  }
+
+  TEST_CASE("typeref uses: a bare type NAME in expression position "
+            "(static-call receiver, scoped-enum access) earns an inbound "
+            "`uses` edge; self-owner is skipped (TYPE_REF branch parity)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/tr.cpp";
+    // Mirrors project/tests/test_type_uses.py TYPEREF_SOURCE byte-for-byte
+    // behavior: Widget::instance() and Color::Red/Green are TYPE_REFs in
+    // expression position; Widget methods naming Widget itself are self-owner.
+    write_file(path,
+               "namespace N {\n"
+               "  enum class Color { Red, Green };\n"
+               "  struct Widget {\n"
+               "    static Widget* instance();\n"
+               "    int v;\n"
+               "    void touch() { (void)this; }\n"
+               "    Color self_color() { return Color::Red; }\n"
+               "  };\n"
+               "  struct Other {\n"
+               "    void use() {\n"
+               "      Widget* w = Widget::instance(); (void)w;\n"
+               "      Color c = Color::Green; (void)c;\n"
+               "    }\n"
+               "  };\n"
+               "}\n");
+
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    // Map dst spelling -> set(src qual_name) over kind=7 edges.
+    auto users_of = [&f](const char *dst_spelling) {
+      std::unordered_set<std::string> users;
+      auto &raw = f.db.raw_db();
+      auto st = raw.prepare("SELECT src.qual_name FROM edge e "
+                            "JOIN symbol src ON src.id = e.src_id "
+                            "JOIN symbol dst ON dst.id = e.dst_id "
+                            "WHERE e.kind = 7 AND dst.spelling = ?");
+      st.bind(1, std::string_view{dst_spelling});
+      while (st.step()) {
+        users.insert(st.col_text(0));
+      }
+      return users;
+    };
+
+    const auto widget_users = users_of("Widget");
+    const auto color_users = users_of("Color");
+
+    // Static-call receiver TYPE_REF -> use edge to Widget.
+    CHECK(widget_users.count("N::Other::use") == 1);
+    // Scoped-enum access TYPE_REFs -> use edges to Color.
+    CHECK(color_users.count("N::Other::use") == 1);
+    CHECK(color_users.count("N::Widget::self_color") == 1);
+    // Self-owner skip: a Widget method must NOT use its own class.
+    CHECK(widget_users.count("N::Widget::touch") == 0);
+    CHECK(widget_users.count("N::Widget::self_color") == 0);
   }
 
   TEST_CASE("dependent calls inside a template body are recovered: a template "
