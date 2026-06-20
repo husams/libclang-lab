@@ -290,3 +290,70 @@ def test_cross_tu_wrong_order_stub_backfill():
             "WHERE qual_name IN ('mm::Cache::set', 'mm::Cache::get') AND resolved = 0"
         ).fetchone()[0]
         assert unresolved == 0, "stubs backfilled to resolved after cache TU indexed"
+
+
+# --- system-header gating (no stub for stdlib/ADL overload sets) ------------ #
+#
+# The stub-minting that makes wrong-order indexing work is GATED to non-system
+# headers: a dependent call to a STDLIB overload set (e.g. `std::swap`) must NOT
+# mint a USR-keyed stub, or every TU that touches the standard library would
+# accumulate permanent unresolved externals and the stub count would balloon.
+# `std::swap(a, b)` on dependent operands is a multi-candidate (>1) dependent
+# overload set whose every candidate lives in <utility>, so it exercises the
+# _emit_overloaded_calls system-header skip (verified below by an inline check
+# that the construct really is a multi-candidate all-system overload set).
+
+SWAP_STD = """
+#include <utility>
+namespace nn {
+template <class T>
+void swap_them(T& a, T& b) {
+    std::swap(a, b);   // multi-candidate dependent overload set, all in <utility>
+}
+}  // namespace nn
+"""
+
+
+def test_system_overload_set_makes_no_stub():
+    """A dependent call to a std overload set links to nothing -- no std stub."""
+    import clang.cindex as cx  # local import: only this test inspects cursors
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "t.cpp")
+        with open(path, "w") as fh:
+            fh.write(SWAP_STD)
+        tu = A.parse(path, clang_args(path) + ["-std=c++17"])
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture source must parse cleanly"
+        )
+
+        # Guard: confirm the construct actually exercises the multi-candidate
+        # system-header path in _emit_overloaded_calls. If a future libclang
+        # changes this, the test would otherwise pass vacuously.
+        found = []
+        for fn in tu.cursor.walk_preorder():
+            if fn.kind == cx.CursorKind.FUNCTION_TEMPLATE and fn.spelling == "swap_them":
+                for node in fn.walk_preorder():
+                    if node.kind == cx.CursorKind.CALL_EXPR and node.referenced is None:
+                        cands = A._overload_set_candidates(node)
+                        if len(cands) >= 2:
+                            found.append(cands)
+        assert found, "construct must yield a multi-candidate dependent call"
+        assert all(
+            c.location.is_in_system_header for cands in found for c in cands
+        ), "every candidate must be in a system header (gating precondition)"
+
+        db = _edges_for_source(tmp, SWAP_STD)
+
+        # No std:: symbol row was minted at all (resolved or not).
+        std_syms = db._conn.execute(
+            "SELECT COUNT(*) FROM symbol WHERE qual_name LIKE 'std::%'"
+        ).fetchone()[0]
+        assert std_syms == 0, "no stdlib stub may be minted for a system overload set"
+
+        # And no calls edge points at a std:: target.
+        calls = _edge_map(db, 1)
+        for dsts in calls.values():
+            assert not any(d.startswith("std::") for d in dsts), (
+                "no calls edge to a stdlib symbol"
+            )
