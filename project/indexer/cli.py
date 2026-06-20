@@ -65,7 +65,22 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.14.2"
+VERSION = "0.14.3"
+
+# Header extensions: a pending file with one of these (or no extension, e.g. a
+# bare libstdc++ header) is indexed via its including TU's index_headers() pass,
+# never parsed standalone. A TU source (.c/.cpp/...) is ALWAYS indexed even when
+# its compile command sanitizes to no flags (e.g. `cc -c x.c -o x.o` -> []), so
+# its parse diagnostics are recorded. (Was keyed off empty compile_options, which
+# wrongly deferred minimal-flag sources -- they recorded nothing on `cidx index`.)
+_HEADER_SUFFIXES = frozenset(
+    {".h", ".hh", ".hpp", ".hxx", ".h++", ".hp", ".inc", ".tcc", ".ipp", ".ixx"}
+)
+
+
+def _is_header(path: str) -> bool:
+    ext = os.path.splitext(path)[1].lower()
+    return ext == "" or ext in _HEADER_SUFFIXES
 
 
 # clang diagnostic severities (clang.cindex.Diagnostic.Warning/Error/Fatal).
@@ -402,8 +417,19 @@ def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int
     except ClangParseError as e:
         # The file failed to parse (e.g. a fatal header-not-found): record the
         # diagnostics so `show file` / `list files` explain why, even though no
-        # AST was indexed and the file stays pending.
-        db.replace_diagnostics(rec.id, e.diagnostics)
+        # AST was indexed and the file stays pending. A hard load failure (a
+        # TranslationUnitLoadError) carries no per-diagnostic detail -- synthesize
+        # one fatal row from the error so the failure is never silently dropped.
+        diags = e.diagnostics or [
+            {
+                "severity": 4,  # clang.cindex.Diagnostic.Fatal
+                "spelling": str(e),
+                "file_path": path,
+                "line": None,
+                "col": None,
+            }
+        ]
+        db.replace_diagnostics(rec.id, diags)
         print(f"error: {e}", file=sys.stderr)
         return 1
     mtime = os.path.getmtime(path) if os.path.exists(path) else None
@@ -439,21 +465,22 @@ def _index_files(
 
 
 def _index_pending(db: Storage, no_graph: bool = False) -> int:
-    """index (no args): index every pending file that has a compile command.
+    """index (no args): index every pending translation-unit source.
 
-    Header rows carry no compile command (index_headers adds them with NULL
-    options). A header is indexed via its including TU's index_headers() pass --
-    where the TU's -I/-std context resolves its types and a single live-DB
-    dedup scans it exactly once per run -- never parsed standalone (no flags =
-    a broken, truncated AST). So pending headers are deferred here, not parsed
-    on their own; the sources that include them regenerate their edges.
+    A header (by extension; see _is_header) is indexed via its including TU's
+    index_headers() pass -- where the TU's -I/-std context resolves its types
+    and a single live-DB dedup scans it exactly once per run -- never parsed
+    standalone (no flags = a broken, truncated AST). So pending headers are
+    deferred here; the sources that include them regenerate their edges. A TU
+    source is indexed even when its compile command sanitizes to no flags (it is
+    still a real TU), so its parse diagnostics land on its row.
     """
     done, skipped, failed, deferred = 0, 0, 0, 0
     for rec, path in db.files():
         if index_status(rec, path)[0]:
             skipped += 1
             continue
-        if not rec.compile_options:
+        if _is_header(path):
             deferred += 1  # header: indexed via its TU, not standalone
             continue
         print(f"indexing {path}")

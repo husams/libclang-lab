@@ -214,8 +214,18 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
   } catch (const ClangParseError &e) {
     // The file failed to parse (e.g. a fatal header-not-found): record the
     // diagnostics so `show file` / `list files` explain why, even though no
-    // AST was indexed and the file stays pending.
-    db.replace_diagnostics(rec.id, e.diagnostics());
+    // AST was indexed and the file stays pending. A hard load failure carries
+    // no per-diagnostic detail -- synthesize one fatal row from the error so
+    // the failure is never silently dropped.
+    std::vector<Diagnostic> failed = e.diagnostics();
+    if (failed.empty()) {
+      Diagnostic d;
+      d.severity = 4; // clang fatal
+      d.spelling = e.what();
+      d.file_path = path;
+      failed.push_back(std::move(d));
+    }
+    db.replace_diagnostics(rec.id, failed);
     *ctx.err << "error: " << e.what() << "\n";
     return 1;
   }
@@ -271,10 +281,13 @@ int index_pending(Storage &db, Parser &parser, AstIndexer &indexer,
       ++skipped;
       continue;
     }
-    // Header rows carry no compile command; they are indexed via their
-    // including TU's index_headers() pass (full -I/-std context, deduped once
-    // per run against the live DB), never parsed standalone. Defer them here.
-    if (!rec.compile_options || rec.compile_options->empty()) {
+    // A header (by extension) is indexed via its including TU's
+    // index_headers() pass (full -I/-std context, deduped once per run against
+    // the live DB), never parsed standalone. Defer it here. A TU source is
+    // indexed even when its compile command sanitizes to no flags (e.g.
+    // `cc -c x.c -o x.o` -> []) -- it is still a real TU, so its parse
+    // diagnostics land on its row.
+    if (files::is_header(path)) {
       ++deferred;
       continue;
     }

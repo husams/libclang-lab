@@ -32,6 +32,12 @@ IndexStatus index_status(Storage &db, const std::string &abs_path);
 // The human reason string the Python CLI prints for each status.
 const char *index_status_reason(IndexStatus status);
 
+// True for a header (by extension, or no extension e.g. a bare libstdc++
+// header). Mirrors cli.py _is_header: a header is indexed via its including
+// TU's index_headers() pass, never parsed standalone; a TU source is indexed
+// even when its compile command sanitizes to no flags.
+bool is_header(const std::string &path);
+
 // Absolute path for a CLI file argument: relative paths resolve against
 // `root` (the --source component path) when given, else against the CWD.
 std::string

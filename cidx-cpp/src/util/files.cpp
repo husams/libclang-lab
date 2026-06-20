@@ -1,11 +1,32 @@
 #include "util/files.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+
 #include "storage/storage.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx {
 namespace files {
+
+bool is_header(const std::string &path) {
+  // Extension after the last '.', but only within the final path segment.
+  const auto slash = path.find_last_of("/\\");
+  const auto dot = path.find_last_of('.');
+  if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+    return true; // no extension (e.g. a bare libstdc++ header)
+  }
+  std::string ext = path.substr(dot);
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  static const std::array<const char *, 10> kHeaderSuffixes = {
+      ".h", ".hh", ".hpp", ".hxx", ".h++", ".hp", ".inc", ".tcc", ".ipp",
+      ".ixx"};
+  return std::any_of(kHeaderSuffixes.begin(), kHeaderSuffixes.end(),
+                     [&](const char *s) { return ext == s; });
+}
 
 IndexStatus index_status(const File &rec, const std::string &path) {
   if (!rec.indexed) {
