@@ -1,12 +1,97 @@
 [
   {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -std=c11 -c calls.c -o calls.o",
+    "file": "calls.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "c++ -std=c++17 -I/Users/husam/workspace/qemu-vms/libclang-lab/manifests -c geometry.cpp -o geometry.o",
+    "file": "geometry.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c UseCache.cpp -o UseCache.o",
+    "file": "UseCache.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c chain.cpp -o chain.o",
+    "file": "chain.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c creatures.cpp -o creatures.o",
+    "file": "creatures.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c devirt3.cpp -o devirt3.o",
+    "file": "devirt3.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c devirt3_caller.cpp -o devirt3_caller.o",
+    "file": "devirt3_caller.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c instantiations.cpp -o instantiations.o",
+    "file": "instantiations.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c main.cpp -o main.o",
+    "file": "main.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c nested.cpp -o nested.o",
+    "file": "nested.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c pipeline.cpp -o pipeline.o",
+    "file": "pipeline.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c shapes.cpp -o shapes.o",
+    "file": "shapes.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -std=c11 -c macros.c -o macros.o",
+    "file": "macros.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -c messy.c -o messy.o",
+    "file": "messy.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/project",
+    "command": "cc -I. -c app.c -o app.o",
+    "file": "app.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/project",
+    "command": "cc -I. -c mathlib.c -o mathlib.o",
+    "file": "mathlib.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
     "command": "cc -I. -std=c11 -DMAX_SHAPES=64 -c shapes.c -o shapes.o",
     "file": "shapes.c"
   },
   {
-    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
-    "command": "cc -std=c11 -c calls.c -o calls.o",
-    "file": "calls.c"
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/cpplib/v1.4.0",
+    "command": "c++ -std=c++17 -I. -c widget.cpp -o widget.o",
+    "file": "widget.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/lib/1.2.0",
+    "command": "cc -c mathx.c -o mathx.o",
+    "file": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/lib/1.2.0/mathx.c"
   }
 ]

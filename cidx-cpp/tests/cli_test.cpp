@@ -778,12 +778,12 @@ TEST_CASE("args: index collects FILE... and --source") {
 }
 
 TEST_CASE("args: --version sets the version flag (top level only)") {
-  // $ python3 -m indexer --version   -> "cidx 0.12.0" on stdout, exit 0
+  // $ python3 -m indexer --version   -> "cidx 0.13.0" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.12.0");
+  CHECK(std::string(cli::kVersion) == "0.13.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1641,7 +1641,7 @@ TEST_SUITE("clang") {
     CHECK(r.err.empty());
   }
 
-  TEST_CASE("import: manifests/project compile DB (READ-ONLY fixture)") {
+  TEST_CASE("import: manifests unified compile DB (READ-ONLY fixture)") {
     if (require_libclang() == nullptr) {
       return;
     }
@@ -1649,17 +1649,16 @@ TEST_SUITE("clang") {
       return;
     }
     const std::string t = make_temp_dir();
+    // Single unified DB at manifests/ (sub-project DBs were consolidated).
     const std::string db_path =
-        std::string(CIDX_MANIFESTS_DIR) + "/project/compile_commands.json";
+        std::string(CIDX_MANIFESTS_DIR) + "/compile_commands.json";
     const std::string project = std::string(CIDX_MANIFESTS_DIR) + "/project";
 
     const CmdResult r = run_cli({"import", "--db", db_path}, t);
     CHECK(r.rc == 0);
-    // The component line names the qemu-vms git root (machine-dependent);
-    // the counts line is the golden part:
-    // $ python3 -m indexer import --db .../manifests/project/...json
-    // -> "imported 2 file(s), skipped 0"
-    CHECK(r.out.find("imported 2 file(s), skipped 0\n") != std::string::npos);
+    // Unified DB: assert the project TUs imported with their flags rather than a
+    // fixed total count (fixtures grow over time — see CLAUDE.md).
+    CHECK(r.out.find("skipped 0\n") != std::string::npos);
     CHECK(r.err.empty());
 
     Storage db(t + "/index.db");
@@ -1777,16 +1776,19 @@ TEST_SUITE("clang") {
               "0 system, 0 unowned\n"
               "index: 2 indexed, 0 failed, 0 already indexed\n");
 
-    // Header row written via the including TU: indexed, md5 captured, NULL
-    // compile_options/driver (G20).
+    // Header row written via the including TU (app.c): indexed, md5 captured,
+    // and stamped with that TU's compile_options + driver so the header is
+    // standalone-reparseable (v0.13.0; was NULL options/driver pre-G20 fix).
     {
       Storage db(t + "/index.db");
       const std::optional<cidx::File> h = db.get_file(proj + "/mathlib.h");
       REQUIRE(h);
       CHECK(h->indexed);
       CHECK(h->md5);
-      CHECK(!h->compile_options);
-      CHECK(!h->driver);
+      const std::optional<cidx::File> tu = db.get_file(proj + "/app.c");
+      REQUIRE(tu);
+      CHECK(h->compile_options == tu->compile_options);
+      CHECK(h->driver == tu->driver);
     }
 
     // $ python3 -m indexer index   (second run: md5-current — the header row

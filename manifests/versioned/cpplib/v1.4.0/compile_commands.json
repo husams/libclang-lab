@@ -1,7 +1,0 @@
-[
-  {
-    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/cpplib/v1.4.0",
-    "command": "c++ -std=c++17 -I. -c widget.cpp -o widget.o",
-    "file": "widget.cpp"
-  }
-]

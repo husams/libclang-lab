@@ -144,7 +144,10 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
     // opts + toolchain_flags(is_cpp, driver) + -ferror-limit=0 itself.
     const ParsedTu tu = parser.parse(path, opts, rec.driver);
     stored = indexer.index_symbols(tu, path, rec.id);
-    hs = indexer.index_headers(tu);
+    // Stamp each indexed header with this TU's (encoded) options + driver so
+    // the header is standalone-reparseable (e.g. `cidx ast dump <header>`).
+    hs = indexer.index_headers(tu, std::nullopt, rec.compile_options,
+                               rec.driver);
     // v7: extract graph edges AFTER symbols so src_id lookups hit real rows.
     // index_edges opens its own transaction; it's a no-op when graph_enabled_
     // is false (--no-graph was passed).

@@ -326,7 +326,11 @@ def _is_system_header(tu: cx.TranslationUnit, fobj: cx.File) -> bool:
 
 
 def index_headers(
-    db: Storage, tu: cx.TranslationUnit, ignore_system: bool | None = None
+    db: Storage,
+    tu: cx.TranslationUnit,
+    ignore_system: bool | None = None,
+    header_options: Sequence[str] | None = None,
+    header_driver: str | None = None,
 ) -> dict[str, int]:
     """Index every header this TU includes, skipping ones already indexed.
 
@@ -372,7 +376,20 @@ def index_headers(
             counts["already"] += 1
             continue
         mtime = os.path.getmtime(path) if os.path.exists(path) else None
-        file_id = db.add_file_path(path, mtime=mtime, md5=md5)
+        # Stamp the header with the SAME (encoded) compile options + driver as
+        # its including TU, so the header is standalone-reparseable (e.g.
+        # `cidx ast dump <header>`) with the TU's full -I/-std/-D context
+        # instead of bare defaults. The options stay in their portable
+        # <label>/$VAR form (decoded at parse time), mirroring TU rows.
+        file_id = db.add_file_path(
+            path,
+            mtime=mtime,
+            md5=md5,
+            compile_options=list(header_options)
+            if header_options is not None
+            else None,
+            driver=header_driver,
+        )
         # Pass 1: symbols only (each in its own transaction).
         with db.transaction():
             stored, _ = _index_file_notxn(db, tu, inc.include.name, file_id)
@@ -1755,6 +1772,7 @@ def index_source(
     ignore_system: bool | None = None,
     driver: str | None = None,
     no_graph: bool = False,
+    header_options: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Parse one source file, index its symbols and its headers, free the TU.
 
@@ -1766,7 +1784,13 @@ def index_source(
     tu = parse(filename, args, driver=driver)
     try:
         stored, skipped = index_symbols(db, tu, file_id)
-        headers = index_headers(db, tu, ignore_system=ignore_system)
+        headers = index_headers(
+            db,
+            tu,
+            ignore_system=ignore_system,
+            header_options=header_options,
+            header_driver=driver,
+        )
         if not no_graph:
             index_edges(db, tu, filename, file_id)
     finally:

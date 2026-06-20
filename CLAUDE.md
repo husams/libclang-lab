@@ -48,12 +48,11 @@ libclang-lab/
 │   ├── calls.c                        ← Functions calling each other (AST dumper + call-graph: Parts 2, 5)
 │   ├── messy.c                        ← Bad naming + nested control flow (linter + metrics: Part 5)
 │   ├── macros.c                       ← #define / #include sample for preprocessing (Part 4)
-│   ├── compile_commands.json          ← Top-level compilation DB referencing the manifests samples
+│   ├── compile_commands.json          ← THE single unified compilation DB for ALL manifests TUs (see note below)
 │   └── project/                       ← Two-TU project for cross-TU USR work (Parts 4–6)
 │       ├── mathlib.h                  ← Header: multiply / square prototypes
 │       ├── mathlib.c                  ← Definitions for mathlib.h
-│       ├── app.c                      ← Caller TU using mathlib (cross-TU references)
-│       └── compile_commands.json      ← Compilation DB for the project (CompilationDatabase source)
+│       └── app.c                      ← Caller TU using mathlib (cross-TU references)
 └── scripts/                           ← All lab scripts (run from repo root)
     ├── _helpers.py                    ← Shared module: clang_args/parse/walk/loc/in_main_file/top_level/fatal_diagnostics
     ├── _smoke_test.py                 ← Ground-truth API check — every API the lab teaches, asserted
@@ -99,6 +98,14 @@ libclang-lab/
     ├── p6_limits.py                   ← 6.6 Limits of libclang (template-instantiation visibility)
     └── p6_index.py                    ← 6.7 CAPSTONE: mini semantic indexer (symbol table + xref map)
 ```
+
+## Unified compilation database
+
+`manifests/compile_commands.json` is the **single, unified** compilation database for the whole lab — every sample TU under `manifests/` (top-level `*.c`/`*.cpp`, `project/`, `graphlab/`, `geometry.cpp`, `versioned/...`) is listed here as one JSON array. The old per-subdirectory `compile_commands.json` files (`project/`, `geometry/`, `graphlab/`, `versioned/*/`) were consolidated into this one file and removed; do **not** recreate them.
+
+Consumers that load it: `scripts/p4_compiledb.py` and `scripts/_smoke_test.py` (`CompilationDatabase.fromDirectory(manifests)`), and the C++/Python parity + compiledb tests. These assert fixtures **by name/content**, never by a fixed entry count, so the DB can grow.
+
+**Agent ALLOWANCE — keep this file in sync:** when you add a new sample source / test fixture under `manifests/`, you ARE allowed (and expected) to update `manifests/compile_commands.json` to add its entry — append an object with `directory`, a realistic `command` (preserve meaningful flags like `-std=`, `-I`, `-D`), and `file`. This is the one place to register a new TU; nothing else needs editing. Keep entries sorted by resolved path and preserve each TU's real compile flags (some tests assert them, e.g. `shapes.c` carries `-std=c11 -DMAX_SHAPES=64`).
 
 ## Environment
 

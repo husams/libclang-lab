@@ -43,8 +43,8 @@ def resolve_includes(args, directory):
 
 
 def main():
-    proj = MANIFESTS / "project"
-    cdb = cx.CompilationDatabase.fromDirectory(str(proj))
+    # Single unified DB at manifests/ (sub-project DBs were consolidated).
+    cdb = cx.CompilationDatabase.fromDirectory(str(MANIFESTS))
 
     cmds = sorted(cdb.getAllCompileCommands(), key=lambda c: c.filename)
     print(f"getAllCompileCommands(): {len(cmds)} entries")

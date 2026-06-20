@@ -555,9 +555,10 @@ int AstIndexer::index_symbols(const ParsedTu &tu, const std::string &filename,
   return index_file(tu, filename, file_id).first;
 }
 
-HeaderStats
-AstIndexer::index_headers(const ParsedTu &tu,
-                          const std::optional<bool> &ignore_system) {
+HeaderStats AstIndexer::index_headers(
+    const ParsedTu &tu, const std::optional<bool> &ignore_system,
+    const std::optional<std::vector<std::string>> &header_options,
+    const std::optional<std::string> &header_driver) {
   LibClang &lib = LibClang::instance();
   const bool ignore =
       ignore_system ? *ignore_system : default_ignore_system_headers();
@@ -610,8 +611,11 @@ AstIndexer::index_headers(const ParsedTu &tu,
       continue;
     }
     const std::optional<double> mtime = file_mtime(path);
-    // Header file rows carry mtime + md5 but NULL options/driver (G20).
-    const int64_t file_id = db_.add_file_path(path, mtime, md5);
+    // Stamp the header with the including TU's (encoded) options + driver so
+    // it is standalone-reparseable with full -I/-std/-D context, mirroring TU
+    // rows (decoded at parse time).
+    const int64_t file_id =
+        db_.add_file_path(path, mtime, md5, header_options, header_driver);
     // Extract this header's symbols out of THIS TU's AST (no separate
     // parse), matching cursors against the include SPELLING, not the
     // abspath (G23: cursors' location-file names agree with the spelling).

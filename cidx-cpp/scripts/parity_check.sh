@@ -38,10 +38,14 @@ CIDX_CPP_ROOT="$(dirname "$SCRIPT_DIR")"
 LAB_ROOT="$(dirname "$CIDX_CPP_ROOT")"
 PY_CIDX="$LAB_ROOT/project/cidx"
 CPP_BIN="${CIDX_CPP_BIN:-$CIDX_CPP_ROOT/build/cidx}"
-FIXTURE_DB="$LAB_ROOT/manifests/project/compile_commands.json"
+# Single unified compile DB at manifests/ (sub-project DBs were consolidated).
+# All scenarios import the same DB under different component names; the
+# geometry/graphlab edge + call_arg assertions stay exercised because those
+# TUs live in the unified DB.
+FIXTURE_DB="$LAB_ROOT/manifests/compile_commands.json"
 PROJECT_DIR="$LAB_ROOT/manifests/project"
-GEOMETRY_DB="$LAB_ROOT/manifests/geometry"
-GRAPHLAB_DB="$LAB_ROOT/manifests/graphlab"
+GEOMETRY_DB="$LAB_ROOT/manifests"
+GRAPHLAB_DB="$LAB_ROOT/manifests"
 
 fail() { echo "parity_check: FAIL: $*" >&2; exit 1; }
 

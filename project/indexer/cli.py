@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 
 
 def cache_dir() -> str:
@@ -367,6 +367,7 @@ def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int
             rec.id,
             driver=rec.driver,
             no_graph=no_graph,
+            header_options=rec.compile_options,
         )
     except ClangParseError as e:
         print(f"error: {e}", file=sys.stderr)

@@ -112,10 +112,12 @@ incs = [c for c, _ in walk(pp.cursor) if c.kind == cx.CursorKind.INCLUSION_DIREC
 check("inclusion directives captured", len(incs) >= 1, f"{len(incs)} includes")
 
 # --- Part 4/5: CompilationDatabase ---
+# Single unified DB at manifests/ (sub-project DBs were consolidated); match by
+# content rather than a fixed count (fixtures grow over time — see CLAUDE.md).
 proj = MANIFESTS / "project"
-cdb = cx.CompilationDatabase.fromDirectory(str(proj))
+cdb = cx.CompilationDatabase.fromDirectory(str(MANIFESTS))
 cmds = list(cdb.getAllCompileCommands())
-check("compilation db loads", len(cmds) == 2, f"{len(cmds)} commands")
+check("compilation db loads", len(cmds) >= 2, f"{len(cmds)} commands")
 first_args = list(cmds[0].arguments)
 check("compile command has args", len(first_args) > 1, str(first_args[:3]))
 
