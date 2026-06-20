@@ -21,7 +21,18 @@ indexer = "indexer.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+# Force this project to be installed (editable) into the venv on every
+# `uv sync` / `uv run`. Combined with the wheel mapping below, uv drops a
+# `.pth` that puts `project/` on sys.path, so `import indexer` works from any
+# `uv run` (ipython, python, scripts) and any cwd -- without making `project`
+# itself a package. Explicit `package = true` guards against uv ever treating
+# this as a non-package "virtual" project (which would skip the editable
+# install and break the import, as happened with a stale env).
+package = true
+
 [tool.hatch.build.targets.wheel]
+# Maps the on-disk `project/indexer/` to the top-level import name `indexer`.
 packages = ["project/indexer"]
 
 [tool.pytest.ini_options]
