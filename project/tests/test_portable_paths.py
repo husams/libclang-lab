@@ -248,7 +248,7 @@ def test_fresh_db_schema_version(tmp_path):
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         assert row is not None
-        assert int(row[0]) == 15
+        assert int(row[0]) == 16
 
 
 def test_fresh_db_component_has_version_column(tmp_path):
@@ -367,14 +367,14 @@ def test_migration_v13_to_v14(tmp_path):
         row = db._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
-        assert row is not None and int(row[0]) == 15
+        assert row is not None and int(row[0]) == 16
 
     # Idempotent on second open.
     with Storage(db_path) as db2:
         row = db2._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
-        assert int(row[0]) == 15
+        assert int(row[0]) == 16
 
 
 def test_migration_existing_components_get_null_version(tmp_path):
@@ -397,6 +397,7 @@ def test_migration_existing_components_get_null_version(tmp_path):
         CREATE TABLE symbol (
             id INTEGER PRIMARY KEY, usr TEXT NOT NULL UNIQUE,
             spelling TEXT NOT NULL, kind TEXT NOT NULL,
+            display_name TEXT, type_info TEXT, linkage TEXT, access TEXT,
             is_definition INTEGER NOT NULL DEFAULT 0, is_pure INTEGER NOT NULL DEFAULT 0,
             is_static INTEGER NOT NULL DEFAULT 0, is_instantiation INTEGER NOT NULL DEFAULT 0,
             resolved INTEGER NOT NULL DEFAULT 0,

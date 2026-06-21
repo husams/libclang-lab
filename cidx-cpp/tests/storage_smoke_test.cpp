@@ -374,17 +374,19 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
           std::string("multiply(int, int)"));
   }
 
-  // §3.2: a bad kind is rejected by the SQL CHECK too (the app-side throw was
-  // asserted above) — raw insert bypassing add_symbol.
+  // §3.2 (v16): the SQL CHECK on symbol.kind was dropped (kind is now an
+  // INTEGER == CXCursorKind); validation is app-side only (the add_symbol throw
+  // was asserted above). A raw insert bypassing add_symbol is no longer
+  // rejected by a constraint.
   {
     cidx::SqliteDb raw(db_path);
-    auto bad = raw.prepare(
-        "INSERT INTO symbol (usr, spelling, kind) VALUES ('y', 'y', 'bogus')");
-    CHECK_THROWS_AS(bad.step_done(), cidx::StorageError);
+    auto ok = raw.prepare(
+        "INSERT INTO symbol (usr, spelling, kind) VALUES ('y', 'y', 8)");
+    CHECK_NOTHROW(ok.step_done());
   }
 }
 
-TEST_CASE("fresh Storage produces schema v15 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v16 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -401,10 +403,10 @@ TEST_CASE("fresh Storage produces schema v15 (file-backed and :memory:)") {
   }
   // v14 adds the label table; v15 adds the diagnostic table
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
-                                        "file", "symbol", "edge_kind", "edge",
-                                        "edge_site", "template_param",
-                                        "template_arg", "call_arg", "label",
-                                        "diagnostic"});
+                                        "file", "symbol", "symbol_kind",
+                                        "edge_kind", "edge", "edge_site",
+                                        "template_param", "template_arg",
+                                        "call_arg", "label", "diagnostic"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -456,7 +458,7 @@ TEST_CASE("fresh Storage produces schema v15 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "15");
+    CHECK(st.col_text(0) == "16");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");
@@ -472,7 +474,8 @@ TEST_CASE("fresh Storage produces schema v15 (file-backed and :memory:)") {
     REQUIRE(st.step());
     const std::string ddl = st.col_text(0);
     CHECK(ddl.find("ON DELETE SET NULL") != std::string::npos);
-    CHECK(ddl.find("'macro'") != std::string::npos); // 17 kinds incl. macro
+    // v16: kind is an INTEGER (CXCursorKind); the old name CHECK list is gone.
+    CHECK(ddl.find("kind         INTEGER NOT NULL") != std::string::npos);
   }
   {
     auto st = raw.prepare(

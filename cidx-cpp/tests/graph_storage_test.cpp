@@ -290,8 +290,9 @@ TEST_CASE("T3 boundary: stub minted with kind=function passes CHECK constraint")
     auto st = raw.prepare("SELECT kind FROM symbol WHERE id=?");
     st.bind(1, id);
     REQUIRE(st.step());
-    // Must be a CHECK-valid kind (implementation uses 'function').
-    const std::string k = st.col_text(0);
+    // v16: kind stored as a CXCursorKind int; recover the name (mint uses
+    // 'function' as the fallback kind).
+    const std::string k = cidx::symbol_kind_name(st.col_int64(0));
     CHECK((k == "function" || k == "method" || k == "constructor" ||
            k == "destructor" || k == "class" || k == "struct"));
   }
@@ -730,8 +731,10 @@ TEST_CASE("T3 naming: mint carries spelling/qual_name; upgrades empty, never clo
         "SELECT spelling, qual_name, kind, resolved FROM symbol WHERE usr=?");
     st.bind(1, std::string_view(usr));
     REQUIRE(st.step());
+    // v16: kind is stored as a CXCursorKind int; recover the name for asserts.
     return std::tuple<std::string, std::string, std::string, int64_t>(
-        st.col_text(0), st.col_text(1), st.col_text(2), st.col_int64(3));
+        st.col_text(0), st.col_text(1),
+        cidx::symbol_kind_name(st.col_int64(2)), st.col_int64(3));
   };
 
   // Named mint: a never-indexed stdlib target keeps its name AND kind.

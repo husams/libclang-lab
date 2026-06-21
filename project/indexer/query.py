@@ -47,6 +47,10 @@ import sqlite3
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Literal, Optional, Sequence, overload
 
+# symbol.kind is stored as a CXCursorKind int (v16); these recover the name and
+# convert a name filter back to the stored int. Single source of truth = storage.
+from indexer.storage import SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES
+
 # edge_kind.id <-> name -- seeded identically by the indexer (storage.py). We
 # hardcode to avoid a query and to validate any DB that disagrees.
 EDGE_KINDS = {
@@ -622,7 +626,7 @@ class GraphQuery:
             usr=r["usr"],
             spelling=r["spelling"],
             name=r["qual_name"] or r["spelling"],
-            kind=r["kind"],
+            kind=SYMBOL_KIND_NAMES.get(r["kind"], r["kind"]),
             type_info=r["type_info"],
             is_definition=bool(r["is_definition"]),
             is_pure=bool(r["is_pure"]),
@@ -729,7 +733,7 @@ class GraphQuery:
         args: list = [like]
         if kind:
             sql += " AND s.kind = ?"
-            args.append(kind)
+            args.append(SYMBOL_KIND_IDS.get(kind, -1))
         sql += (
             " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
             "COALESCE(s.qual_name, s.spelling) LIMIT ?"
@@ -743,7 +747,7 @@ class GraphQuery:
         args: list = [spelling]
         if kind:
             sql += " AND s.kind = ?"
-            args.append(kind)
+            args.append(SYMBOL_KIND_IDS.get(kind, -1))
         sql += " ORDER BY s.usr"
         return [self._sym(r) for r in self._c.execute(sql, args)]
 
