@@ -9,6 +9,10 @@ namespace app {
 
 struct Dashboard{
     void draw(const Client& c);
+    // Method-scoped heap allocation + deletion: these are owned by a record
+    // (Dashboard) so the entity_edge roll-up can produce a creates/destroys row.
+    // Used by the PR2 acceptance test for entity_edge rows 7/8.
+    void refresh(double r);
 };
 
 // Function taking an ABSTRACT class by reference and calling its methods:

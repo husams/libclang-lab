@@ -10,6 +10,21 @@
     "file": "geometry.cpp"
   },
   {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -std=c11 -c macros.c -o macros.o",
+    "file": "macros.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -c messy.c -o messy.o",
+    "file": "messy.c"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "cc -I. -std=c11 -DMAX_SHAPES=64 -c shapes.c -o shapes.o",
+    "file": "shapes.c"
+  },
+  {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
     "command": "c++ -std=c++17 -I. -c UseCache.cpp -o UseCache.o",
     "file": "UseCache.cpp"
@@ -56,18 +71,13 @@
   },
   {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c pool_widget.cpp -o pool_widget.o",
+    "file": "pool_widget.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
     "command": "c++ -std=c++17 -I. -c shapes.cpp -o shapes.o",
     "file": "shapes.cpp"
-  },
-  {
-    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
-    "command": "cc -std=c11 -c macros.c -o macros.o",
-    "file": "macros.c"
-  },
-  {
-    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
-    "command": "cc -c messy.c -o messy.o",
-    "file": "messy.c"
   },
   {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/project",
@@ -78,11 +88,6 @@
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/project",
     "command": "cc -I. -c mathlib.c -o mathlib.o",
     "file": "mathlib.c"
-  },
-  {
-    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
-    "command": "cc -I. -std=c11 -DMAX_SHAPES=64 -c shapes.c -o shapes.o",
-    "file": "shapes.c"
   },
   {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/versioned/cpplib/v1.4.0",

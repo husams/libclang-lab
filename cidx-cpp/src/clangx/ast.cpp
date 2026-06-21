@@ -907,6 +907,47 @@ ValueSource classify_value_source(LibClang &lib, CXCursor expr) {
   return {"unknown", "", "", ""};
 }
 
+// Return the Layer-0 edge kind for a constructor call: copy(13)/move(14)/value(10).
+// Mirrors ast.py:_ctor_form_kind.
+// Inspects the ctor declaration's single parameter type spelling:
+//   "&&"  -> move (14); "&" alone -> copy (13); else -> value (10).
+static int ctor_form_kind(LibClang &lib, CXCursor ctor_cursor) {
+  // Collect PARM_DECL children of the ctor declaration.
+  struct ParmCtx {
+    LibClang *lib;
+    std::string first_param_type;
+    int count = 0;
+  } pctx;
+  pctx.lib = &lib;
+  lib.clang_visitChildren(
+      ctor_cursor,
+      [](CXCursor c, CXCursor /*parent*/, CXClientData data) {
+        auto *ctx = static_cast<ParmCtx *>(data);
+        if (ctx->lib->clang_getCursorKind(c) == CXCursor_ParmDecl) {
+          ++ctx->count;
+          if (ctx->count == 1) {
+            ctx->first_param_type =
+                CxString(*ctx->lib,
+                         ctx->lib->clang_getTypeSpelling(
+                             ctx->lib->clang_getCursorType(c)))
+                    .str();
+          }
+        }
+        return CXChildVisit_Continue;
+      },
+      &pctx);
+  if (pctx.count == 1) {
+    const std::string &pt = pctx.first_param_type;
+    if (pt.find("&&") != std::string::npos) {
+      return 14; // construct-move
+    }
+    if (pt.find('&') != std::string::npos) {
+      return 13; // construct-copy
+    }
+  }
+  return 10; // construct-value
+}
+
 // Return the receiver sub-expression of a C++ member call (the base object),
 // or a null cursor for free-function calls or no-receiver implicit-this calls.
 // Mirrors ast.py:_receiver_subexpr.
@@ -1535,6 +1576,109 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
           }
         }
       }
+      // PR1 Layer-0: emit construction form edges (10/11/13/14) and
+      // factory-construct (15) when the callee is a known constructor or a
+      // make_unique / make_shared factory. Lookup-only: only when B is indexed.
+      // parent-kind context: `parent` (the cursor arg) is the parent of cursor.
+      if (!lib.clang_Cursor_isNull(ref)) {
+        const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+        if (ref_kind == CXCursor_Constructor) {
+          // Skip if the immediate parent is CXXNewExpr (134): the construct-heap
+          // branch below handles that case so we avoid emitting both 12 and 10.
+          const CXCursorKind parent_kind = lib.clang_getCursorKind(parent);
+          if (parent_kind != (CXCursorKind)134 /* CXXNewExpr */) {
+            const std::string type_usr =
+                record_usr_of_type(lib, lib.clang_getCursorType(cursor));
+            if (!type_usr.empty()) {
+              if (const auto dst_sym = ctx->db->lookup_symbol(type_usr)) {
+                int form;
+                if (parent_kind == CXCursor_VarDecl) {
+                  form = ctor_form_kind(lib, ref);
+                } else {
+                  // Standalone temporary (Widget{} / Widget(x) not in a var).
+                  int sig = ctor_form_kind(lib, ref);
+                  form = (sig == 13 || sig == 14) ? sig : 11; // construct-temp
+                }
+                Edge fe;
+                fe.src_id = ctx->src_id;
+                fe.dst_id = dst_sym->id;
+                fe.kind = form;
+                fe.count = 1;
+                ctx->db->add_edge(fe);
+              }
+            }
+          }
+        } else if (ref_kind == CXCursor_FunctionDecl) {
+          // Factory: make_unique<B> / make_shared<B> from system headers.
+          const std::string callee_sp =
+              CxString(lib, lib.clang_getCursorSpelling(ref)).str();
+          if ((callee_sp == "make_unique" || callee_sp == "make_shared") &&
+              lib.clang_Location_isInSystemHeader(
+                  lib.clang_getCursorLocation(ref)) != 0) {
+            const CXType result_canonical =
+                ::clang_getCanonicalType(lib.clang_getCursorType(cursor));
+            const int nargs =
+                lib.clang_Type_getNumTemplateArguments(result_canonical);
+            if (nargs > 0) {
+              const CXType arg0 =
+                  lib.clang_Type_getTemplateArgumentAsType(result_canonical, 0);
+              const std::string fact_usr = record_usr_of_type(lib, arg0);
+              if (!fact_usr.empty()) {
+                if (const auto fact_sym = ctx->db->lookup_symbol(fact_usr)) {
+                  Edge fe;
+                  fe.src_id = ctx->src_id;
+                  fe.dst_id = fact_sym->id;
+                  fe.kind = 15; // factory-construct
+                  fe.count = 1;
+                  ctx->db->add_edge(fe);
+                }
+              }
+            }
+          }
+        }
+      }
+    } else if (kind == (CXCursorKind)134 /* CXXNewExpr */) {
+      // PR1 Layer-0: construct-heap (12). The new expression type is the
+      // pointer to the allocated record (e.g. Widget*).
+      const std::string heap_usr =
+          record_usr_of_type(lib, lib.clang_getCursorType(cursor));
+      if (!heap_usr.empty()) {
+        if (const auto heap_sym = ctx->db->lookup_symbol(heap_usr)) {
+          Edge fe;
+          fe.src_id = ctx->src_id;
+          fe.dst_id = heap_sym->id;
+          fe.kind = 12; // construct-heap
+          fe.count = 1;
+          ctx->db->add_edge(fe);
+        }
+      }
+    } else if (kind == (CXCursorKind)135 /* CXXDeleteExpr */) {
+      // PR1 Layer-0: destroy (16). First child's type pointee names the
+      // destroyed record.
+      struct FirstDelCtx {
+        LibClang *lib;
+        std::string usr;
+      } fdc;
+      fdc.lib = &lib;
+      lib.clang_visitChildren(
+          cursor,
+          [](CXCursor c, CXCursor /*p*/, CXClientData data) {
+            auto *ctx2 = static_cast<FirstDelCtx *>(data);
+            const CXType ct = ctx2->lib->clang_getCursorType(c);
+            ctx2->usr = record_usr_of_type(*ctx2->lib, ct);
+            return CXChildVisit_Break; // first child only
+          },
+          &fdc);
+      if (!fdc.usr.empty()) {
+        if (const auto del_sym = ctx->db->lookup_symbol(fdc.usr)) {
+          Edge fe;
+          fe.src_id = ctx->src_id;
+          fe.dst_id = del_sym->id;
+          fe.kind = 16; // destroy
+          fe.count = 1;
+          ctx->db->add_edge(fe);
+        }
+      }
     } else if (kind == CXCursor_DeclRefExpr || kind == CXCursor_MemberRefExpr) {
       // B2 uses: DECL_REF_EXPR references a non-function indexed symbol
       // (variable, field, enum-constant, etc.).  Only emit for symbols
@@ -1955,6 +2099,74 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
           oe.count = 1;
           db_.add_edge(oe);
         }
+      }
+      return;
+    }
+
+    // -- FRIEND_DECL: friend (Layer-0 kind 17 -> befriends entity_edge) --
+    // Mirrors ast.py FRIEND_DECL handler. `friend class B;` inside record A;
+    // the friend target B is a child TYPE_REF whose referenced declaration is
+    // the friended record. Lookup-only (no stub), record-friends only.
+    if (ck == CXCursor_FriendDecl) {
+      const CXCursor owner = lib.clang_getCursorSemanticParent(cursor);
+      if (lib.clang_Cursor_isNull(owner)) {
+        return;
+      }
+      const CXCursorKind owner_kind = lib.clang_getCursorKind(owner);
+      if (owner_kind != CXCursor_ClassDecl &&
+          owner_kind != CXCursor_StructDecl) {
+        return;
+      }
+      const std::string owner_usr =
+          CxString(lib, lib.clang_getCursorUSR(owner)).str();
+      if (owner_usr.empty()) {
+        return;
+      }
+      const auto src_sym = db_.lookup_symbol(owner_usr);
+      if (!src_sym) {
+        return;
+      }
+      // Collect direct TYPE_REF children (the friended type references).
+      struct FriendCtx {
+        LibClang *lib;
+        std::vector<CXCursor> type_refs;
+      } fctx;
+      fctx.lib = &lib;
+      lib.clang_visitChildren(
+          cursor,
+          [](CXCursor c, CXCursor /*parent*/, CXClientData data) {
+            auto *ctx = static_cast<FriendCtx *>(data);
+            if (ctx->lib->clang_getCursorKind(c) == CXCursor_TypeRef) {
+              ctx->type_refs.push_back(c);
+            }
+            return CXChildVisit_Continue;
+          },
+          &fctx);
+      for (const CXCursor &tref : fctx.type_refs) {
+        const CXCursor friend_decl = lib.clang_getCursorReferenced(tref);
+        if (lib.clang_Cursor_isNull(friend_decl)) {
+          continue;
+        }
+        const CXCursorKind fk = lib.clang_getCursorKind(friend_decl);
+        if (fk != CXCursor_ClassDecl && fk != CXCursor_StructDecl &&
+            fk != CXCursor_ClassTemplate) {
+          continue;
+        }
+        const std::string friend_usr =
+            CxString(lib, lib.clang_getCursorUSR(friend_decl)).str();
+        if (friend_usr.empty()) {
+          continue;
+        }
+        const auto dst_sym = db_.lookup_symbol(friend_usr);
+        if (!dst_sym) {
+          continue;
+        }
+        Edge e;
+        e.src_id = src_sym->id;
+        e.dst_id = dst_sym->id;
+        e.kind = 17; // friend
+        e.count = 1;
+        db_.add_edge(e);
       }
       return;
     }

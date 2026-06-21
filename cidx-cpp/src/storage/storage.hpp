@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 16;
+constexpr int kSchemaVersion = 17;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -251,6 +251,21 @@ public:
   // Delete edges whose src is a symbol defined in this file (idempotent
   // re-index: edges cascade-delete their edge_site rows).
   void delete_edges_for_file(int64_t file_id);
+
+  // -- entity_edge (v17) -------------------------------------------------------
+  // Upsert an entity_edge row (idempotent re-materialise safe).
+  void add_entity_edge(int64_t src_id, int64_t dst_id, int64_t kind,
+                       int64_t count = 1,
+                       std::optional<int64_t> via_member_id = std::nullopt,
+                       int64_t multiplicity = 1, int64_t access = 0,
+                       int64_t is_virtual = 0,
+                       std::optional<int64_t> create_form = std::nullopt,
+                       int64_t partial = 0);
+  // Delete all entity_edge rows (pre-step for idempotent re-materialise).
+  void clear_entity_edges();
+  // Materialise all 11 entity relation kinds from the Layer-0 graph.
+  // Called by resolve_pass() after rollup_edge_counts(). Pure DB pass.
+  void materialise_entity_edges();
 
   // Resolve pass (DB-only, no parse): roll up edge.count from edge_site for
   // calls/uses, report remaining stubs. Returns count of still-unresolved

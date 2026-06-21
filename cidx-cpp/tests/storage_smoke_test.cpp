@@ -386,7 +386,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v16 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v17 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -401,12 +401,13 @@ TEST_CASE("fresh Storage produces schema v16 (file-backed and :memory:)") {
       tables.insert(st.col_text(0));
     }
   }
-  // v14 adds the label table; v15 adds the diagnostic table
+  // v14 adds label; v15 adds diagnostic; v17 adds entity_edge + entity_edge_kind
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "symbol_kind",
                                         "edge_kind", "edge", "edge_site",
                                         "template_param", "template_arg",
-                                        "call_arg", "label", "diagnostic"});
+                                        "call_arg", "label", "diagnostic",
+                                        "entity_edge_kind", "entity_edge"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -451,14 +452,16 @@ TEST_CASE("fresh Storage produces schema v16 (file-backed and :memory:)") {
                                          "idx_symbol_kind",
                                          "idx_edge_src", "idx_edge_dst",
                                          "idx_call_arg_edge",
-                                         "idx_diagnostic_file"});
+                                         "idx_diagnostic_file",
+                                         "idx_entity_edge_src",
+                                         "idx_entity_edge_dst"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "16");
+    CHECK(st.col_text(0) == "17");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

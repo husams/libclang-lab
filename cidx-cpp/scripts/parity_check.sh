@@ -439,6 +439,24 @@ if ! diff -u "$WORK/py.dump" "$WORK/cpp.dump" >"$WORK/dump.diff"; then
 fi
 echo "parity_check: DB dumps identical (mtime/indexed_at excluded)"
 
+# --- diff 2b: entity_edge parity (Layer-1 UML/ER roll-up, schema v17) ----------
+# The DB-dump diff above already byte-locks EVERY INSERT row, including the
+# entity_edge rows materialized by `resolve` (materialize_entity_edges) whenever
+# the final corpus state carries them. This explicit guard names entity_edge in
+# the gate and fails loudly if the Python and C++ ports ever disagree on the
+# materialized Layer-1 rows. It asserts COUNT-EQUALITY (py == cpp), NOT a
+# non-empty end-state: the parity corpus's late stages reset the working cache,
+# so the final dump legitimately holds zero entity_edge rows — both ports must
+# still agree. Existence + correctness of the 11 kinds is proven by the pytest
+# acceptance suite (test_entity_edge_pr2_acceptance.py over manifests/graphlab).
+# (entity_edge_kind lookup rows are excluded by matching 'VALUES' on the bare name.)
+PY_EE=$(grep -c '^INSERT INTO entity_edge VALUES' "$WORK/py.dump" || true)
+CPP_EE=$(grep -c '^INSERT INTO entity_edge VALUES' "$WORK/cpp.dump" || true)
+if [ "${PY_EE:-0}" -ne "${CPP_EE:-0}" ]; then
+  fail "entity_edge parity: row count differs (py=$PY_EE cpp=$CPP_EE) (work dir kept: $WORK)"
+fi
+echo "parity_check: entity_edge rows identical (py==cpp == $PY_EE rows)"
+
 # --- diff 3: CIDX_MEM per-TU memory report ------------------------------------
 # Both tools call clang_getCXTUResourceUsage on the SAME linked libclang over
 # the SAME sources, so the per-TU byte amounts are deterministic and identical.

@@ -244,11 +244,12 @@ def test_split_base_version_trailing_slash():
 def test_fresh_db_schema_version(tmp_path):
     db_path = str(tmp_path / "test.db")
     with Storage(db_path) as db:
+        from indexer.storage import SCHEMA_VERSION
         row = db._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         assert row is not None
-        assert int(row[0]) == 16
+        assert int(row[0]) == SCHEMA_VERSION
 
 
 def test_fresh_db_component_has_version_column(tmp_path):
@@ -367,14 +368,15 @@ def test_migration_v13_to_v14(tmp_path):
         row = db._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
-        assert row is not None and int(row[0]) == 16
+        from indexer.storage import SCHEMA_VERSION
+        assert row is not None and int(row[0]) == SCHEMA_VERSION
 
     # Idempotent on second open.
     with Storage(db_path) as db2:
         row = db2._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
-        assert int(row[0]) == 16
+        assert int(row[0]) == SCHEMA_VERSION
 
 
 def test_migration_existing_components_get_null_version(tmp_path):

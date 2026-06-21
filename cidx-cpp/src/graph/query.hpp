@@ -51,6 +51,12 @@ inline const std::map<std::string, int64_t> &edge_kinds_map() {
       {"calls", 1},     {"inherits", 2}, {"contains", 3},
       {"specializes", 4}, {"instantiates", 5}, {"overrides", 6},
       {"uses", 7},      {"field_of", 8}, {"method_of", 9},
+      // PR1 (v17): Layer-0 construction / destruction form edges
+      {"construct-value", 10}, {"construct-temp", 11}, {"construct-heap", 12},
+      {"construct-copy", 13}, {"construct-move", 14},
+      {"factory-construct", 15}, {"destroy", 16},
+      // PR2 (v17): Layer-0 friend declaration (rolled up to befriends)
+      {"friend", 17},
   };
   return m;
 }
@@ -60,6 +66,12 @@ inline const std::map<int64_t, std::string> &edge_names_map() {
       {1, "calls"},     {2, "inherits"},     {3, "contains"},
       {4, "specializes"}, {5, "instantiates"}, {6, "overrides"},
       {7, "uses"},      {8, "field_of"},     {9, "method_of"},
+      // PR1 (v17): Layer-0 construction / destruction form edges
+      {10, "construct-value"}, {11, "construct-temp"}, {12, "construct-heap"},
+      {13, "construct-copy"}, {14, "construct-move"},
+      {15, "factory-construct"}, {16, "destroy"},
+      // PR2 (v17): Layer-0 friend declaration (rolled up to befriends)
+      {17, "friend"},
   };
   return m;
 }

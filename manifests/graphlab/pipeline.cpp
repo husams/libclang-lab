@@ -56,4 +56,16 @@ void Dashboard::draw(const Client& c) {
     c.send("drawing dashboard");
 }
 
+// refresh() is a METHOD-SCOPED new/delete (owned by Dashboard, an entity).
+// `new geo::Circle(r)` → construct-heap Layer-0 edge → entity_edge creates(7).
+// `delete` through `geo::Shape*` → destroy Layer-0 edge → entity_edge destroys(9).
+// The free functions make_shape/consume above also use new/delete, but they are
+// not owned by any record, so the entity_edge roll-up skips them.
+void Dashboard::refresh(double r) {
+    geo::Shape* s = new geo::Circle(r);   // heap-allocate a concrete entity
+    double a = s->area();                 // use the abstract interface
+    delete s;                             // destroy through base pointer
+    (void)a;
+}
+
 } // namespace app

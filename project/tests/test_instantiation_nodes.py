@@ -135,7 +135,8 @@ def test_schema_version_is_current(extracted_db):
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()
     db.close()
-    assert row is not None and int(row[0]) == 16
+    from indexer.storage import SCHEMA_VERSION
+    assert row is not None and int(row[0]) == SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +520,8 @@ def test_migration_v12_to_v13(tmp_path):
     version = db._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(version) == 16, f"expected current schema (v15), got {version}"
+    from indexer.storage import SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION, f"expected current schema (v{SCHEMA_VERSION}), got {version}"
     db.close()
 
     # Second open: idempotent (no error, still current)
@@ -527,7 +529,7 @@ def test_migration_v12_to_v13(tmp_path):
     v2 = db2._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(v2) == 16
+    assert int(v2) == SCHEMA_VERSION
     db2.close()
 
     # Future DB (v99): must NOT be downgraded

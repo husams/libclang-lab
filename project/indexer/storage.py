@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -173,7 +173,10 @@ CREATE TABLE IF NOT EXISTS edge_kind (
 INSERT OR IGNORE INTO edge_kind (id, name) VALUES
   (1,'calls'), (2,'inherits'), (3,'contains'), (4,'specializes'),
   (5,'instantiates'), (6,'overrides'), (7,'uses'),
-  (8,'field_of'), (9,'method_of');
+  (8,'field_of'), (9,'method_of'),
+  (10,'construct-value'), (11,'construct-temp'), (12,'construct-heap'),
+  (13,'construct-copy'), (14,'construct-move'),
+  (15,'factory-construct'), (16,'destroy'), (17,'friend');
 
 CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
@@ -258,6 +261,42 @@ CREATE TABLE IF NOT EXISTS diagnostic (
     col       INTEGER             -- NULL when locationless
 );
 CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
+
+-- ---- v17: Layer-1 entity-edge graph (UML/ER relations over record/enum symbols) --
+-- Entity = a symbol whose kind is in {{class,struct,union,enum}}; no separate table.
+-- All columns are INTEGER (zero text in the table itself). The 11 relation names
+-- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
+-- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
+
+CREATE TABLE IF NOT EXISTS entity_edge_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
+  (1,'generalizes'), (2,'realizes'), (3,'specializes'),
+  (4,'composes'), (5,'aggregates'), (6,'associates'),
+  (7,'creates'), (8,'uses'), (9,'destroys'),
+  (10,'nests'), (11,'befriends');
+
+CREATE TABLE IF NOT EXISTS entity_edge (
+    src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    dst_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind          INTEGER NOT NULL,   -- entity_edge_kind.id (no FK: seed-only)
+    count         INTEGER NOT NULL DEFAULT 1,
+    via_member_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    multiplicity  INTEGER NOT NULL DEFAULT 1,
+                                      -- 1=one 2=0..1 3=0..* 4=N
+    access        INTEGER NOT NULL DEFAULT 0,
+                                      -- 0=public 1=protected 2=private
+    is_virtual    INTEGER NOT NULL DEFAULT 0,  -- 1 = virtual base (generalizes)
+    create_form   INTEGER,            -- creates/destroys only:
+                                      -- 1=ctor_call 2=return 3=value 4=temp
+                                      -- 5=heap 6=factory 7=copy 8=move
+    partial       INTEGER NOT NULL DEFAULT 0,  -- 1 = top-soundness flag
+    UNIQUE (src_id, dst_id, kind, via_member_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
+CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -526,6 +565,12 @@ class Storage:
             # v14 -> v15: per-file parse diagnostics. Created by the schema
             # script (CREATE TABLE IF NOT EXISTS); no backfill possible -- a
             # reindex repopulates it from each TU's diagnostics.
+            changed = True
+        if "entity_edge" not in tables:
+            # v16 -> v17: Layer-1 entity_edge + entity_edge_kind tables.
+            # Created by the schema script (CREATE TABLE IF NOT EXISTS).
+            # entity_edge is a derived, materialized table -- populate via
+            # `cidx resolve`. No backfill on migration.
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -1740,6 +1785,75 @@ class Storage:
         )
         self._commit()
 
+    # -- entity_edge (v17) ------------------------------------------------------
+
+    def add_entity_edge(
+        self,
+        src_id: int,
+        dst_id: int,
+        kind: int,
+        count: int = 1,
+        via_member_id: Optional[int] = None,
+        multiplicity: int = 1,
+        access: int = 0,
+        is_virtual: int = 0,
+        create_form: Optional[int] = None,
+        partial: int = 0,
+    ) -> None:
+        """Upsert an entity_edge row (re-materialise safe via ON CONFLICT DO UPDATE)."""
+        self._conn.execute(
+            "INSERT INTO entity_edge "
+            "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+            " access, is_virtual, create_form, partial) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "  count       = excluded.count, "
+            "  multiplicity = excluded.multiplicity, "
+            "  access      = excluded.access, "
+            "  is_virtual  = excluded.is_virtual, "
+            "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
+            "  partial     = excluded.partial",
+            (src_id, dst_id, kind, count, via_member_id, multiplicity,
+             access, is_virtual, create_form, partial),
+        )
+        self._commit()
+
+    def clear_entity_edges(self) -> None:
+        """Delete all entity_edge rows (pre-step for idempotent re-materialise)."""
+        self._conn.execute("DELETE FROM entity_edge")
+        self._commit()
+
+    def entity_edges(
+        self,
+        src_id: Optional[int] = None,
+        dst_id: Optional[int] = None,
+        kind: Optional[int] = None,
+    ) -> list[dict]:
+        """Return entity_edge rows as dicts, optionally filtered.
+
+        All columns returned. Rows sorted by (src_id, kind, dst_id).
+        """
+        wheres: list[str] = []
+        params: list[Any] = []
+        if src_id is not None:
+            wheres.append("src_id = ?")
+            params.append(src_id)
+        if dst_id is not None:
+            wheres.append("dst_id = ?")
+            params.append(dst_id)
+        if kind is not None:
+            wheres.append("kind = ?")
+            params.append(kind)
+        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+        rows = self._conn.execute(
+            f"SELECT src_id, dst_id, kind, count, via_member_id, multiplicity, "
+            f"access, is_virtual, create_form, partial "
+            f"FROM entity_edge {where_sql} "
+            f"ORDER BY src_id, kind, dst_id",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def rollup_edge_counts(self) -> None:
         """For calls (1) and uses (7): set count = COUNT(edge_site)."""
         self._conn.execute(
@@ -1775,13 +1889,15 @@ class Storage:
         self._commit()
 
     def resolve_pass(self) -> tuple[int, int]:
-        """Roll up edge counts, write graph_resolved_at meta.
+        """Roll up edge counts, materialise entity_edge, write graph_resolved_at meta.
 
         Returns (still_stub_count, cross_repo_edge_count).
         """
         from datetime import datetime, timezone
+        from indexer.entity_rollup import materialize_entity_edges
 
         self.rollup_edge_counts()
+        materialize_entity_edges(self)
         # A still-stub is a minted placeholder never backfilled by a real
         # symbol: resolved=0 with NO location (neither a definition nor a decl
         # site). NOT keyed on spelling -- stubs are now minted NAMED, so the

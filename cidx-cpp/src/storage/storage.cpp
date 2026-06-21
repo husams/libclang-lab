@@ -132,7 +132,10 @@ CREATE TABLE IF NOT EXISTS edge_kind (
 INSERT OR IGNORE INTO edge_kind (id, name) VALUES
   (1,'calls'), (2,'inherits'), (3,'contains'), (4,'specializes'),
   (5,'instantiates'), (6,'overrides'), (7,'uses'),
-  (8,'field_of'), (9,'method_of');
+  (8,'field_of'), (9,'method_of'),
+  (10,'construct-value'), (11,'construct-temp'), (12,'construct-heap'),
+  (13,'construct-copy'), (14,'construct-move'),
+  (15,'factory-construct'), (16,'destroy'), (17,'friend');
 
 CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
@@ -218,7 +221,43 @@ CREATE TABLE IF NOT EXISTS diagnostic (
 );
 CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '16');
+-- ---- v17: Layer-1 entity-edge graph (UML/ER relations over record/enum symbols) --
+-- Entity = a symbol whose kind is in {class,struct,union,enum}; no separate table.
+-- All columns are INTEGER (zero text in the table itself). The 11 relation names
+-- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
+-- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
+
+CREATE TABLE IF NOT EXISTS entity_edge_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
+  (1,'generalizes'), (2,'realizes'), (3,'specializes'),
+  (4,'composes'), (5,'aggregates'), (6,'associates'),
+  (7,'creates'), (8,'uses'), (9,'destroys'),
+  (10,'nests'), (11,'befriends');
+
+CREATE TABLE IF NOT EXISTS entity_edge (
+    src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    dst_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind          INTEGER NOT NULL,   -- entity_edge_kind.id (no FK: seed-only)
+    count         INTEGER NOT NULL DEFAULT 1,
+    via_member_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    multiplicity  INTEGER NOT NULL DEFAULT 1,
+                                      -- 1=one 2=0..1 3=0..* 4=N
+    access        INTEGER NOT NULL DEFAULT 0,
+                                      -- 0=public 1=protected 2=private
+    is_virtual    INTEGER NOT NULL DEFAULT 0,  -- 1 = virtual base (generalizes)
+    create_form   INTEGER,            -- creates/destroys only:
+                                      -- 1=ctor_call 2=return 3=value 4=temp
+                                      -- 5=heap 6=factory 7=copy 8=move
+    partial       INTEGER NOT NULL DEFAULT 0,  -- 1 = top-soundness flag
+    UNIQUE (src_id, dst_id, kind, via_member_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
+CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '17');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -736,6 +775,12 @@ void Storage::migrate() {
   // (CREATE TABLE IF NOT EXISTS); no backfill -- a reindex repopulates it.
   if (!has_table("diagnostic")) {
     changed = true; // table will be created by the schema script
+  }
+  // v16 -> v17: Layer-1 entity_edge + entity_edge_kind tables. Created by the
+  // schema script (CREATE TABLE IF NOT EXISTS). entity_edge is a derived,
+  // materialised table -- populate via `cidx resolve`. No backfill on migration.
+  if (!has_table("entity_edge")) {
+    changed = true; // tables will be created by the schema script
   }
   if (changed) {
     auto st =
@@ -1947,9 +1992,577 @@ std::vector<Edge> Storage::cross_repo_edges() {
   return out;
 }
 
+// -- entity_edge (v17) --------------------------------------------------------
+
+void Storage::add_entity_edge(int64_t src_id, int64_t dst_id, int64_t kind,
+                               int64_t count,
+                               std::optional<int64_t> via_member_id,
+                               int64_t multiplicity, int64_t access,
+                               int64_t is_virtual,
+                               std::optional<int64_t> create_form,
+                               int64_t partial) {
+  auto st = db_.prepare(
+      "INSERT INTO entity_edge "
+      "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+      " access, is_virtual, create_form, partial) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+      "  count       = excluded.count, "
+      "  multiplicity = excluded.multiplicity, "
+      "  access      = excluded.access, "
+      "  is_virtual  = excluded.is_virtual, "
+      "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
+      "  partial     = excluded.partial");
+  st.bind(1, src_id);
+  st.bind(2, dst_id);
+  st.bind(3, kind);
+  st.bind(4, count);
+  if (via_member_id) {
+    st.bind(5, *via_member_id);
+  } else {
+    st.bind_null(5);
+  }
+  st.bind(6, multiplicity);
+  st.bind(7, access);
+  st.bind(8, is_virtual);
+  if (create_form) {
+    st.bind(9, *create_form);
+  } else {
+    st.bind_null(9);
+  }
+  st.bind(10, partial);
+  st.step_done();
+}
+
+void Storage::clear_entity_edges() {
+  db_.exec("DELETE FROM entity_edge");
+}
+
+// ---------------------------------------------------------------------------
+// materialise_entity_edges: pure-DB roll-up of all 11 entity relation kinds.
+// Mirrors indexer/entity_rollup.py:materialize_entity_edges() byte-identically.
+// ---------------------------------------------------------------------------
+
+// Phase 1: generalizes(1) / realizes(2) from inherits(2) edges.
+static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
+  // Is sym_id a pure Interface (all methods pure-virtual, no data fields)?
+  const auto is_interface = [&](int64_t sym_id) -> bool {
+    // Any non-pure method (excluding destructors kind=25)?
+    auto st1 = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 21 AND is_pure = 0");
+    st1.bind(1, sym_id);
+    if (st1.step() && st1.col_int64(0) > 0) return false;
+    // Any data members?
+    auto st2 = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 6");
+    st2.bind(1, sym_id);
+    if (st2.step() && st2.col_int64(0) > 0) return false;
+    // Must have at least one pure method
+    auto st3 = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 21 AND is_pure = 1");
+    st3.bind(1, sym_id);
+    return st3.step() && st3.col_int64(0) > 0;
+  };
+
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id, e.base_access, e.is_virtual "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind = 2 "
+      "  AND src.kind IN (2,3,4,5) "
+      "  AND dst.kind IN (2,3,4,5)");
+
+  struct InhRow { int64_t src; int64_t dst; int64_t acc; int64_t virt; };
+  std::vector<InhRow> rows;
+  while (st.step()) {
+    InhRow r;
+    r.src  = st.col_int64(0);
+    r.dst  = st.col_int64(1);
+    r.acc  = st.col_int64(2);
+    r.virt = st.col_int64(3);
+    rows.push_back(r);
+  }
+
+  for (const auto &r : rows) {
+    int64_t ek = is_interface(r.dst) ? 2 : 1;  // realizes=2 or generalizes=1
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, ?, 1, NULL, 1, ?, ?, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  access     = excluded.access, "
+        "  is_virtual = excluded.is_virtual");
+    ins.bind(1, r.src);
+    ins.bind(2, r.dst);
+    ins.bind(3, ek);
+    ins.bind(4, r.acc);
+    ins.bind(5, r.virt);
+    ins.step_done();
+  }
+}
+
+// Phase 2: specializes(3) from specializes(4) edges between entity symbols.
+static void cpp_materialise_specializes(cidx::SqliteDb &db) {
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind = 4 "
+      "  AND src.kind IN (2,3,4,5,31) "
+      "  AND dst.kind IN (2,3,4,5,31)");
+  std::vector<std::pair<int64_t,int64_t>> rows;
+  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  for (const auto &[src, dst] : rows) {
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 3, 1, NULL, 1, 0, 0, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1");
+    ins.bind(1, src);
+    ins.bind(2, dst);
+    ins.step_done();
+  }
+}
+
+// Classify field type spelling → (entity_edge kind, multiplicity).
+static std::pair<int64_t,int64_t> cpp_classify_field_type(
+    const std::string &type_info) {
+  const std::string s = [&] {
+    std::string r = type_info;
+    // Strip const/volatile
+    for (const auto *q : {"const ", "volatile "}) {
+      std::string::size_type p;
+      while ((p = r.find(q)) != std::string::npos) r.erase(p, strlen(q));
+    }
+    while (!r.empty() && r.front() == ' ') r.erase(r.begin());
+    while (!r.empty() && r.back()  == ' ') r.pop_back();
+    return r;
+  }();
+  // Array
+  if (!s.empty() && s.back() == ']') return {4, 4};
+  // Containers
+  static const char *containers[] = {
+    "std::vector<", "vector<", "std::list<", "list<",
+    "std::deque<", "deque<", "std::set<", "set<",
+    "std::unordered_set<", "unordered_set<",
+    "std::map<", "std::unordered_map<", nullptr
+  };
+  for (const char **c = containers; *c; ++c) {
+    if (s.substr(0, strlen(*c)) == *c) {
+      std::string inner = s.substr(strlen(*c));
+      // strip trailing >
+      while (!inner.empty() && (inner.back() == '>' || inner.back() == ' '))
+        inner.pop_back();
+      auto [ik, _] = cpp_classify_field_type(inner);
+      return {ik, 3};
+    }
+  }
+  // Smart pointers
+  static const char *uniq[] = {"std::unique_ptr<", "unique_ptr<",
+                                "std::shared_ptr<", "shared_ptr<", nullptr};
+  for (const char **u = uniq; *u; ++u) {
+    if (s.substr(0, strlen(*u)) == *u) return {5, 2};  // aggregates=5
+  }
+  static const char *weak_raw[] = {"std::weak_ptr<", "weak_ptr<", nullptr};
+  for (const char **w = weak_raw; *w; ++w) {
+    if (s.substr(0, strlen(*w)) == *w) return {6, 2};  // associates=6
+  }
+  if (!s.empty() && s.back() == '*') return {6, 2};
+  if (!s.empty() && s.back() == '&') return {6, 2};
+  return {4, 1};  // composes=4, multiplicity=1 (value)
+}
+
+// Resolve entity from type spelling (strips wrappers, looks up by qual_name/spelling).
+static std::optional<int64_t> cpp_resolve_entity_from_type(
+    cidx::SqliteDb &db, std::string type_info) {
+  // Strip qualifiers
+  for (const auto *q : {"const ", "volatile "}) {
+    std::string::size_type p;
+    while ((p = type_info.find(q)) != std::string::npos)
+      type_info.erase(p, strlen(q));
+  }
+  while (!type_info.empty() && type_info.front() == ' ')
+    type_info.erase(type_info.begin());
+  while (!type_info.empty() && type_info.back() == ' ') type_info.pop_back();
+  // Strip trailing * & []
+  bool stripped = true;
+  while (stripped) {
+    stripped = false;
+    if (!type_info.empty() && type_info.back() == '*') {
+      type_info.pop_back(); stripped = true;
+    } else if (!type_info.empty() && type_info.back() == '&') {
+      type_info.pop_back(); stripped = true;
+    } else if (!type_info.empty() && type_info.back() == ']') {
+      auto p = type_info.rfind('[');
+      if (p != std::string::npos) { type_info = type_info.substr(0,p); stripped = true; }
+    }
+    while (!type_info.empty() && type_info.back() == ' ') type_info.pop_back();
+  }
+  // Strip smart-ptr / container wrappers
+  static const char *wrappers[] = {
+    "std::unique_ptr<", "unique_ptr<", "std::shared_ptr<", "shared_ptr<",
+    "std::weak_ptr<",   "weak_ptr<",
+    "std::vector<", "vector<", "std::list<", "list<",
+    "std::deque<", "deque<", "std::set<", "set<",
+    "std::unordered_set<", "unordered_set<",
+    "std::map<", "std::unordered_map<", nullptr
+  };
+  for (const char **w = wrappers; *w; ++w) {
+    if (type_info.substr(0, strlen(*w)) == *w) {
+      std::string inner = type_info.substr(strlen(*w));
+      while (!inner.empty() && (inner.back() == '>' || inner.back() == ' '))
+        inner.pop_back();
+      return cpp_resolve_entity_from_type(db, inner);
+    }
+  }
+  // Lookup by qual_name
+  auto st1 = db.prepare(
+      "SELECT id FROM symbol WHERE qual_name = ? AND kind IN (2,3,4,5) LIMIT 1");
+  st1.bind(1, std::string_view(type_info));
+  if (st1.step()) return st1.col_int64(0);
+  // Lookup by spelling
+  auto st2 = db.prepare(
+      "SELECT id FROM symbol WHERE spelling = ? AND kind IN (2,3,4,5) LIMIT 1");
+  st2.bind(1, std::string_view(type_info));
+  if (st2.step()) return st2.col_int64(0);
+  return std::nullopt;
+}
+
+// Phase 3: composes/aggregates/associates from field_of(8) edges.
+static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
+  struct FieldRow {
+    int64_t field_id, owner_id, field_kind_int;
+    std::string type_info, field_access;
+  };
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id, s.type_info, s.kind AS field_kind, "
+      "       s.access AS field_access "
+      "FROM edge e "
+      "JOIN symbol s ON s.id = e.src_id "
+      "JOIN symbol owner ON owner.id = e.dst_id "
+      "WHERE e.kind = 8 "
+      "  AND owner.kind IN (2,3,4,5) "
+      "  AND s.kind IN (6, 21)");
+  std::vector<FieldRow> rows;
+  while (st.step()) {
+    FieldRow r;
+    r.field_id       = st.col_int64(0);
+    r.owner_id       = st.col_int64(1);
+    r.type_info      = st.col_text(2);
+    r.field_kind_int = st.col_int64(3);
+    r.field_access   = st.col_text(4);
+    rows.push_back(r);
+  }
+
+  static const std::map<std::string,int64_t> acc_map = {
+    {"public",0}, {"protected",1}, {"private",2}
+  };
+
+  for (const auto &r : rows) {
+    if (r.field_kind_int != 6) continue;  // only data members
+    if (r.type_info.empty()) continue;
+
+    // Try template_arg.ref_id first
+    std::optional<int64_t> ref_entity_id;
+    auto tst = db.prepare(
+        "SELECT ref_id FROM template_arg WHERE owner_id = ? AND position = 0 "
+        "AND arg_kind = 1 AND ref_id IS NOT NULL LIMIT 1");
+    tst.bind(1, r.field_id);
+    if (tst.step()) ref_entity_id = tst.col_int64(0);
+
+    if (!ref_entity_id)
+      ref_entity_id = cpp_resolve_entity_from_type(db, r.type_info);
+    if (!ref_entity_id) continue;
+
+    // Confirm referent is entity
+    auto ck = db.prepare("SELECT kind FROM symbol WHERE id = ?");
+    ck.bind(1, *ref_entity_id);
+    if (!ck.step()) continue;
+    const int64_t ref_kind = ck.col_int64(0);
+    if (ref_kind != 2 && ref_kind != 3 && ref_kind != 4 && ref_kind != 5) continue;
+
+    auto [ek, mult] = cpp_classify_field_type(r.type_info);
+    int64_t access_int = 0;
+    if (acc_map.count(r.field_access)) access_int = acc_map.at(r.field_access);
+
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1");
+    ins.bind(1, r.owner_id);
+    ins.bind(2, *ref_entity_id);
+    ins.bind(3, ek);
+    ins.bind(4, r.field_id);
+    ins.bind(5, mult);
+    ins.bind(6, access_int);
+    ins.step_done();
+  }
+}
+
+// Phase 4: creates(7) / destroys(9) from PR1 construction/destruction edges.
+static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
+  // Layer-0 construct/destroy edge.kind -> create_form
+  static const std::map<int64_t,int64_t> form_map = {
+    {10,3},{11,4},{12,5},{13,7},{14,8},{15,6}
+  };
+  constexpr int64_t destroy_kind = 16;
+
+  struct SiteRow { int64_t src_fn, dst_sym, l0_kind; };
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id, e.kind "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind IN (10,11,12,13,14,15,16)");
+  std::vector<SiteRow> rows;
+  while (st.step()) {
+    rows.push_back({st.col_int64(0), st.col_int64(1), st.col_int64(2)});
+  }
+
+  for (const auto &r : rows) {
+    // Enclosing entity (method_of=9, owner must be entity)
+    auto own_st = db.prepare(
+        "SELECT e.dst_id FROM edge e "
+        "JOIN symbol owner ON owner.id = e.dst_id "
+        "WHERE e.src_id = ? AND e.kind = 9 "
+        "  AND owner.kind IN (2,3,4,5) LIMIT 1");
+    own_st.bind(1, r.src_fn);
+    if (!own_st.step()) continue;  // free fn: no entity src
+    const int64_t owner_entity = own_st.col_int64(0);
+
+    // Target entity: ctor/dtor parent → record
+    std::optional<int64_t> target;
+    auto par_st = db.prepare(
+        "SELECT id FROM symbol "
+        "WHERE usr = (SELECT parent_usr FROM symbol WHERE id = ?) "
+        "  AND kind IN (2,3,4,5) LIMIT 1");
+    par_st.bind(1, r.dst_sym);
+    if (par_st.step()) {
+      target = par_st.col_int64(0);
+    } else {
+      // dst itself might be entity (rare)
+      auto dk = db.prepare("SELECT kind FROM symbol WHERE id = ?");
+      dk.bind(1, r.dst_sym);
+      if (dk.step()) {
+        int64_t k = dk.col_int64(0);
+        if (k==2||k==3||k==4||k==5) target = r.dst_sym;
+      }
+    }
+    if (!target) continue;
+
+    if (r.l0_kind == destroy_kind) {
+      auto ins = db.prepare(
+          "INSERT INTO entity_edge "
+          "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+          " access, is_virtual, create_form, partial) "
+          "VALUES (?, ?, 9, 1, NULL, 1, 0, 0, NULL, 0) "
+          "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+          "  count = entity_edge.count + 1");
+      ins.bind(1, owner_entity);
+      ins.bind(2, *target);
+      ins.step_done();
+    } else {
+      int64_t create_form = form_map.at(r.l0_kind);
+      int64_t partial = (r.l0_kind == 15) ? 1 : 0;
+      auto ins = db.prepare(
+          "INSERT INTO entity_edge "
+          "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+          " access, is_virtual, create_form, partial) "
+          "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, ?, ?) "
+          "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+          "  count = entity_edge.count + 1, "
+          "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
+          "  partial = excluded.partial");
+      ins.bind(1, owner_entity);
+      ins.bind(2, *target);
+      ins.bind(3, create_form);
+      ins.bind(4, partial);
+      ins.step_done();
+    }
+  }
+
+  // By-value return (create_form=2): method return type → creates(7, partial=1)
+  struct RetRow { int64_t method_id, owner_id; std::string type_info; };
+  auto rst = db.prepare(
+      "SELECT s.id, s.type_info, e.dst_id AS owner_id "
+      "FROM symbol s "
+      "JOIN edge e ON e.src_id = s.id AND e.kind = 9 "
+      "JOIN symbol owner ON owner.id = e.dst_id AND owner.kind IN (2,3,4,5) "
+      "WHERE s.kind IN (21, 24) AND s.type_info IS NOT NULL");
+  std::vector<RetRow> ret_rows;
+  while (rst.step()) {
+    ret_rows.push_back({rst.col_int64(0), rst.col_int64(2), rst.col_text(1)});
+  }
+  for (const auto &r : ret_rows) {
+    const std::string &ti = r.type_info;
+    std::string ret_type;
+    auto paren = ti.find('(');
+    if (paren != std::string::npos && paren > 0) {
+      ret_type = ti.substr(0, paren);
+      while (!ret_type.empty() && ret_type.back() == ' ') ret_type.pop_back();
+    } else {
+      ret_type = ti;
+    }
+    if (ret_type.empty() || ret_type == "void" || ret_type == "auto") continue;
+    auto ret_eid = cpp_resolve_entity_from_type(db, ret_type);
+    if (!ret_eid || *ret_eid == r.owner_id) continue;
+
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, 2, 1) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1");
+    ins.bind(1, r.owner_id);
+    ins.bind(2, *ret_eid);
+    ins.step_done();
+  }
+}
+
+// Phase 5: uses(8) from method→method calls across entity boundaries.
+static void cpp_materialise_uses(cidx::SqliteDb &db) {
+  struct UseRow { int64_t caller, callee, is_pure; };
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id, dst.is_pure "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind IN (1, 7) "
+      "  AND src.kind IN (21, 8, 24, 25, 30) "
+      "  AND dst.kind IN (21, 8, 24, 25, 30)");
+  std::vector<UseRow> rows;
+  while (st.step()) {
+    rows.push_back({st.col_int64(0), st.col_int64(1), st.col_int64(2)});
+  }
+  for (const auto &r : rows) {
+    // Caller owner entity
+    auto co = db.prepare(
+        "SELECT e.dst_id FROM edge e "
+        "JOIN symbol owner ON owner.id = e.dst_id "
+        "WHERE e.src_id = ? AND e.kind = 9 "
+        "  AND owner.kind IN (2,3,4,5) LIMIT 1");
+    co.bind(1, r.caller);
+    if (!co.step()) continue;
+    int64_t src_eid = co.col_int64(0);
+
+    // Callee owner entity
+    auto coe = db.prepare(
+        "SELECT e.dst_id FROM edge e "
+        "JOIN symbol owner ON owner.id = e.dst_id "
+        "WHERE e.src_id = ? AND e.kind = 9 "
+        "  AND owner.kind IN (2,3,4,5) LIMIT 1");
+    coe.bind(1, r.callee);
+    if (!coe.step()) continue;
+    int64_t dst_eid = coe.col_int64(0);
+
+    if (src_eid == dst_eid) continue;
+    int64_t partial = r.is_pure ? 1 : 0;
+
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 8, 1, ?, 1, 0, 0, NULL, ?) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1, "
+        "  partial = MAX(entity_edge.partial, excluded.partial)");
+    ins.bind(1, src_eid);
+    ins.bind(2, dst_eid);
+    ins.bind(3, r.callee);
+    ins.bind(4, partial);
+    ins.step_done();
+  }
+}
+
+// Phase 6: nests(10) from contains(3) edges between entity symbols.
+static void cpp_materialise_nests(cidx::SqliteDb &db) {
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind = 3 "
+      "  AND src.kind IN (2,3,4,5) "
+      "  AND dst.kind IN (2,3,4,5)");
+  std::vector<std::pair<int64_t,int64_t>> rows;
+  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  for (const auto &[src, dst] : rows) {
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 10, 1, NULL, 1, 0, 0, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1");
+    ins.bind(1, src);
+    ins.bind(2, dst);
+    ins.step_done();
+  }
+}
+
+// Phase 7: befriends(11) from friend(17) edges between entity symbols.
+static void cpp_materialise_befriends(cidx::SqliteDb &db) {
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind = 17 "
+      "  AND src.kind IN (2,3,4,5) "
+      "  AND dst.kind IN (2,3,4,5)");
+  std::vector<std::pair<int64_t,int64_t>> rows;
+  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  for (const auto &[src, dst] : rows) {
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 11, 1, NULL, 1, 0, 0, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1");
+    ins.bind(1, src);
+    ins.bind(2, dst);
+    ins.step_done();
+  }
+}
+
+void Storage::materialise_entity_edges() {
+  // Idempotent: full re-materialise each resolve.
+  db_.exec("DELETE FROM entity_edge");
+
+  {
+    auto txn = transaction();
+    cpp_materialise_inheritance(db_);
+    cpp_materialise_specializes(db_);
+    cpp_materialise_field_relations(db_);
+    cpp_materialise_creates_destroys(db_);
+    cpp_materialise_uses(db_);
+    cpp_materialise_nests(db_);
+    cpp_materialise_befriends(db_);
+    txn.commit();
+  }
+}
+
 int Storage::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
   rollup_edge_counts();
+  // Materialise Layer-1 entity_edge from the Layer-0 graph.
+  materialise_entity_edges();
   // Count remaining stub symbols: a minted placeholder never backfilled by a
   // real symbol -- resolved=0 with NO location (neither a definition nor a decl
   // site). NOT keyed on spelling -- stubs are now minted NAMED, so the absence

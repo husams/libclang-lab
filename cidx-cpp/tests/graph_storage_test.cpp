@@ -79,12 +79,18 @@ TEST_CASE("T5 edge_kind table seeded with exactly 9 design rows") {
     }
   }
 
-  REQUIRE(rows.size() == 9);
-  // Exact order + id + name from design §2.
+  REQUIRE(rows.size() == 17);  // v17: PR1 adds 7 construct/destroy kinds + friend
+  // Exact order + id + name for the first 9 (original design §2).
   const std::vector<std::pair<int64_t, std::string>> expected = {
       {1, "calls"},    {2, "inherits"}, {3, "contains"},
       {4, "specializes"}, {5, "instantiates"}, {6, "overrides"},
       {7, "uses"},     {8, "field_of"}, {9, "method_of"},
+      // PR1 (v17): construction/destruction forms
+      {10, "construct-value"}, {11, "construct-temp"}, {12, "construct-heap"},
+      {13, "construct-copy"}, {14, "construct-move"},
+      {15, "factory-construct"}, {16, "destroy"},
+      // PR2 (v17): friend (rolled up to befriends)
+      {17, "friend"},
   };
   for (std::size_t i = 0; i < expected.size(); ++i) {
     CHECK(rows[i].id == expected[i].first);

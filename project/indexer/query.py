@@ -63,6 +63,16 @@ EDGE_KINDS = {
     "uses": 7,
     "field_of": 8,
     "method_of": 9,
+    # PR1 (v17): Layer-0 construction / destruction form edges
+    "construct-value": 10,
+    "construct-temp": 11,
+    "construct-heap": 12,
+    "construct-copy": 13,
+    "construct-move": 14,
+    "factory-construct": 15,
+    "destroy": 16,
+    # PR2 (v17): Layer-0 friend declaration (rolled up to befriends entity_edge)
+    "friend": 17,
 }
 EDGE_NAMES = {v: k for k, v in EDGE_KINDS.items()}
 

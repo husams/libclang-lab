@@ -747,6 +747,28 @@ def _classify_value_source(
     return "unknown", None, None, None
 
 
+def _ctor_form_kind(ctor_cursor: cx.Cursor) -> int:
+    """Return the Layer-0 edge kind for a constructor call.
+
+    Discriminates copy (13) / move (14) / value (10) based on the ctor's
+    single parameter type spelling:
+    - move: one param whose type ends with ``&&``
+    - copy: one param whose type contains ``&`` (but not ``&&``)
+    - value: everything else (default-ctor, int param, etc.)
+    """
+    params = [
+        p for p in ctor_cursor.get_children()
+        if p.kind == cx.CursorKind.PARM_DECL
+    ]
+    if len(params) == 1:
+        pt = params[0].type.spelling
+        if "&&" in pt:
+            return 14  # construct-move
+        if "&" in pt:
+            return 13  # construct-copy
+    return 10  # construct-value
+
+
 def _receiver_subexpr(call: cx.Cursor) -> Optional[cx.Cursor]:
     """Return the receiver sub-expression of a C++ member call, or None.
 
@@ -1284,6 +1306,74 @@ def _body_descent(
                                         _mint_instantiation_nodes(
                                             db, ref, dst_id, prim_sym.id
                                         )
+            # PR1 Layer-0: emit construction form edges (10/11/13/14) and
+            # factory-construct (15) when the callee is a known constructor or
+            # a make_unique / make_shared factory function.
+            # Lookup-only discipline: only emits when B is already indexed.
+            # parent-kind context: fn_cursor is the immediate parent of `child`.
+            if ref is not None:
+                ref_kind_val = ref.kind
+                if ref_kind_val == cx.CursorKind.CONSTRUCTOR:
+                    # Skip if the parent is CXX_NEW_EXPR — that case is
+                    # handled by the construct-heap (12) branch below so the
+                    # heap form is authoritative and value (10) is not emitted.
+                    parent_kind = fn_cursor.kind
+                    if parent_kind != cx.CursorKind.CXX_NEW_EXPR:
+                        _type_usr = _record_usr_of_type(child.type)
+                        if _type_usr:
+                            _dst_sym = db.lookup_symbol(_type_usr)
+                            if _dst_sym is not None:
+                                # Discriminate value/copy/move/temp by parent kind
+                                # and ctor parameter signature.
+                                if parent_kind == cx.CursorKind.VAR_DECL:
+                                    _form_kind = _ctor_form_kind(ref)
+                                else:
+                                    # Standalone temporary: Widget{} / Widget(x)
+                                    # not stored in a named variable.
+                                    _form_kind = 11  # construct-temp
+                                    # But copy / move still wins inside a temp.
+                                    _form_sig = _ctor_form_kind(ref)
+                                    if _form_sig in (13, 14):
+                                        _form_kind = _form_sig
+                                db.add_edge(src_id, _dst_sym.id, _form_kind)
+                elif (
+                    ref_kind_val == cx.CursorKind.FUNCTION_DECL
+                    and child.spelling in ("make_unique", "make_shared")
+                    and ref.location.is_in_system_header
+                ):
+                    # Factory: recover the constructed type from template arg 0
+                    # of the call's canonical result type (e.g. unique_ptr<B>).
+                    _result_type = child.type.get_canonical()
+                    _nargs = _lib.clang_Type_getNumTemplateArguments(_result_type)
+                    if _nargs > 0:
+                        _arg0 = _lib.clang_Type_getTemplateArgumentAsType(
+                            _result_type, 0
+                        )
+                        _fact_usr = _record_usr_of_type(_arg0)
+                        if _fact_usr:
+                            _fact_sym = db.lookup_symbol(_fact_usr)
+                            if _fact_sym is not None:
+                                db.add_edge(
+                                    src_id, _fact_sym.id, 15
+                                )  # factory-construct
+        elif kind == cx.CursorKind.CXX_NEW_EXPR:
+            # PR1 Layer-0: construct-heap (12). The new expression type is the
+            # pointer to the allocated record (e.g. Widget*).
+            _heap_usr = _record_usr_of_type(child.type)
+            if _heap_usr:
+                _heap_sym = db.lookup_symbol(_heap_usr)
+                if _heap_sym is not None:
+                    db.add_edge(src_id, _heap_sym.id, 12)  # construct-heap
+        elif kind == cx.CursorKind.CXX_DELETE_EXPR:
+            # PR1 Layer-0: destroy (16). The operand's static pointee type
+            # names the destroyed record.
+            for _del_child in child.get_children():
+                _del_usr = _record_usr_of_type(_del_child.type)
+                if _del_usr:
+                    _del_sym = db.lookup_symbol(_del_usr)
+                    if _del_sym is not None:
+                        db.add_edge(src_id, _del_sym.id, 16)  # destroy
+                break
         elif kind in (cx.CursorKind.DECL_REF_EXPR, cx.CursorKind.MEMBER_REF_EXPR):
             # B2 uses: non-function indexed symbols referenced in function body.
             # Only emit for symbols already in the DB (lookup, no stub) —
@@ -1637,6 +1727,44 @@ def _index_edges_notxn(
                         decl_path=_dpath,
                     )
                     db.add_edge(src_sym.id, dst_ov, 6)  # overrides
+            continue
+
+        # -- FRIEND_DECL: friend (Layer-0 kind 17 -> befriends entity_edge) --
+        # `friend class B;` inside record A. The friend target B is a child
+        # TYPE_REF whose referenced declaration is the friended record. Emit
+        # friend(A, B); PR2's befriends roll-up reads this when both A and B
+        # are entities. Lookup-only (no stub) and record-friends only — friend
+        # FUNCTIONS (no record TYPE_REF child) are ignored.
+        if ck == cx.CursorKind.FRIEND_DECL:
+            owner = cursor.semantic_parent
+            if owner is None or owner.kind not in (
+                cx.CursorKind.CLASS_DECL,
+                cx.CursorKind.STRUCT_DECL,
+            ):
+                continue
+            owner_usr = owner.get_usr()
+            if not owner_usr:
+                continue
+            src_sym = db.lookup_symbol(owner_usr)
+            if src_sym is None:
+                continue
+            for child in cursor.get_children():
+                if child.kind != cx.CursorKind.TYPE_REF:
+                    continue
+                friend_decl = child.referenced
+                if friend_decl is None or friend_decl.kind not in (
+                    cx.CursorKind.CLASS_DECL,
+                    cx.CursorKind.STRUCT_DECL,
+                    cx.CursorKind.CLASS_TEMPLATE,
+                ):
+                    continue
+                friend_usr = friend_decl.get_usr()
+                if not friend_usr:
+                    continue
+                dst_sym = db.lookup_symbol(friend_usr)
+                if dst_sym is None:
+                    continue
+                db.add_edge(src_sym.id, dst_sym.id, 17)  # friend
             continue
 
         # -- CLASS_TEMPLATE/FUNCTION_TEMPLATE: template_param -------------
