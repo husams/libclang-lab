@@ -100,7 +100,7 @@ def test_schema_version_is_17():
 
 def test_product_version_is_0180():
     from indexer import cli
-    assert cli.VERSION == "0.18.0", f"Expected '0.18.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.18.1", f"Expected '0.18.1', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -331,7 +331,11 @@ def test_kind_realizes(tmp_path):
     assert rows, "realizes(2) missing"
 
 
-def test_kind_specializes(tmp_path):
+def test_kind_specializes_collapses_to_primary(tmp_path):
+    """A specialization's specializes(4) edge points instance -> primary; after
+    template-instance collapse (ADR-008 decision 6 / OQ-3) BOTH endpoints are the
+    primary, so the self-edge is SUPPRESSED -- no bogus Vec<int>->Vec (which would
+    display as the spurious Wrapper->Wrapper self-edge BUG 1 fixes)."""
     if not _HAS_ROLLUP:
         pytest.skip()
     db, dir_id = _fresh(tmp_path)
@@ -342,8 +346,13 @@ def test_kind_specializes(tmp_path):
     db.add_edge(spec_id, primary_id, EDGE_KINDS["specializes"])
 
     materialize_entity_edges(db)
-    rows = db.entity_edges(src_id=spec_id, kind=3)
-    assert rows, "specializes(3) missing"
+    # spec_id collapses to primary_id; src == dst -> suppressed.
+    assert not db.entity_edges(src_id=spec_id, kind=3), (
+        "specializes self-edge from the instance must be suppressed"
+    )
+    assert not db.entity_edges(src_id=primary_id, kind=3), (
+        "no Vec->Vec self-edge after collapse"
+    )
 
 
 def test_kind_composes(tmp_path):
@@ -447,6 +456,44 @@ def test_kind_uses(tmp_path):
     rows = db.entity_edges(src_id=renderer_id, dst_id=shape_id, kind=8)
     assert rows, "uses(8) missing"
     assert rows[0]["partial"] == 1, "partial=1 expected for virtual dispatch"
+
+
+def test_collapse_instance_endpoint_to_primary(tmp_path):
+    """A non-specializes edge whose endpoint is a template INSTANCE collapses
+    onto the primary (ADR-008 decision 6). uses(Box<int> -> Sink) becomes
+    uses(Box -> Sink): the entity_edge is keyed on the primary, never the
+    per-instantiation node."""
+    if not _HAS_ROLLUP:
+        pytest.skip()
+    db, dir_id = _fresh(tmp_path)
+    root = db.add_file(dir_id, "h.hpp")
+    C = EDGE_KINDS
+
+    # primary class-template Box + its implicit instantiation Box<int>
+    box_id = _sym(db, root, "Box", "c:@ST@Box", "Box", "class-template", 1)
+    box_int_id = _sym(db, root, "Box<int>", "c:@S@Box>#I", "Box", "class", 2)
+    db.add_edge(box_int_id, box_id, C["instantiates"])  # instance -> primary
+
+    # Box<int>::use() (owned by the INSTANCE) calls Sink::accept()
+    use_meth = _sym(db, root, "Box<int>::use", "c:@S@Box>#I@F@use#",
+                    "use", "method", 3, parent="c:@S@Box>#I",
+                    type_info="void ()", access="public")
+    sink_id = _sym(db, root, "Sink", "c:@S@Sink", "Sink", "class", 10)
+    accept_id = _sym(db, root, "Sink::accept", "c:@S@Sink@F@accept#",
+                     "accept", "method", 11, parent="c:@S@Sink",
+                     type_info="void ()", access="public")
+    db.add_edge(use_meth, box_int_id, C["method_of"])
+    db.add_edge(accept_id, sink_id, C["method_of"])
+    db.add_edge(use_meth, accept_id, C["calls"])
+
+    materialize_entity_edges(db)
+    # The use edge is attributed to the PRIMARY Box, not the instance Box<int>.
+    assert db.entity_edges(src_id=box_id, dst_id=sink_id, kind=8), (
+        "uses(8) must be keyed on the primary template Box"
+    )
+    assert not db.entity_edges(src_id=box_int_id, kind=8), (
+        "no uses(8) keyed on the Box<int> instantiation node"
+    )
 
 
 def test_kind_destroys(tmp_path):

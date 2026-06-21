@@ -11,6 +11,7 @@
 #include <exception>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 
 #include "compiledb/compiledb.hpp"
@@ -2043,6 +2044,26 @@ void Storage::clear_entity_edges() {
 // Mirrors indexer/entity_rollup.py:materialize_entity_edges() byte-identically.
 // ---------------------------------------------------------------------------
 
+// Template-instance collapse (ADR-008 decision 6 / OQ-3): map a template
+// instance/specialization symbol onto its primary template. Both the Layer-0
+// instantiates(5) and specializes(4) edges point instance -> primary, so we
+// follow an outgoing 4/5 edge until none remains. Returns sym_id unchanged
+// when it is not an instance/specialization. Mirrors entity_rollup._collapse_to_primary.
+static int64_t cpp_collapse_to_primary(cidx::SqliteDb &db, int64_t sym_id) {
+  std::set<int64_t> seen;
+  int64_t cur = sym_id;
+  while (seen.find(cur) == seen.end()) {
+    seen.insert(cur);
+    auto st = db.prepare(
+        "SELECT dst_id FROM edge WHERE src_id = ? AND kind IN (4, 5) "
+        "ORDER BY kind, dst_id LIMIT 1");
+    st.bind(1, cur);
+    if (!st.step()) break;
+    cur = st.col_int64(0);
+  }
+  return cur;
+}
+
 // Phase 1: generalizes(1) / realizes(2) from inherits(2) edges.
 static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
   // Is sym_id a pure Interface (all methods pure-virtual, no data fields)?
@@ -2091,7 +2112,11 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
   }
 
   for (const auto &r : rows) {
-    int64_t ek = is_interface(r.dst) ? 2 : 1;  // realizes=2 or generalizes=1
+    // Collapse template instances/specializations onto their primary.
+    int64_t src = cpp_collapse_to_primary(db, r.src);
+    int64_t dst = cpp_collapse_to_primary(db, r.dst);
+    if (src == dst) continue;  // no self-edge
+    int64_t ek = is_interface(dst) ? 2 : 1;  // realizes=2 or generalizes=1
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -2100,8 +2125,8 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
         "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
         "  access     = excluded.access, "
         "  is_virtual = excluded.is_virtual");
-    ins.bind(1, r.src);
-    ins.bind(2, r.dst);
+    ins.bind(1, src);
+    ins.bind(2, dst);
     ins.bind(3, ek);
     ins.bind(4, r.acc);
     ins.bind(5, r.virt);
@@ -2121,7 +2146,12 @@ static void cpp_materialise_specializes(cidx::SqliteDb &db) {
       "  AND dst.kind IN (2,3,4,5,31)");
   std::vector<std::pair<int64_t,int64_t>> rows;
   while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
-  for (const auto &[src, dst] : rows) {
+  for (const auto &[src0, dst0] : rows) {
+    // Collapse onto primary; an instance->primary specializes edge becomes a
+    // self-edge and is suppressed (no bogus Wrapper->Wrapper row).
+    int64_t src = cpp_collapse_to_primary(db, src0);
+    int64_t dst = cpp_collapse_to_primary(db, dst0);
+    if (src == dst) continue;
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -2296,6 +2326,11 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
     int64_t access_int = 0;
     if (acc_map.count(r.field_access)) access_int = acc_map.at(r.field_access);
 
+    // Collapse both endpoints onto their primary template.
+    int64_t owner_pid = cpp_collapse_to_primary(db, r.owner_id);
+    int64_t ref_pid = cpp_collapse_to_primary(db, *ref_entity_id);
+    if (owner_pid == ref_pid) continue;
+
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -2303,8 +2338,8 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
         "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
         "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
         "  count = entity_edge.count + 1");
-    ins.bind(1, r.owner_id);
-    ins.bind(2, *ref_entity_id);
+    ins.bind(1, owner_pid);
+    ins.bind(2, ref_pid);
     ins.bind(3, ek);
     ins.bind(4, r.field_id);
     ins.bind(5, mult);
@@ -2364,6 +2399,11 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
     }
     if (!target) continue;
 
+    // Collapse both endpoints onto their primary template.
+    int64_t owner_pid = cpp_collapse_to_primary(db, owner_entity);
+    int64_t target_pid = cpp_collapse_to_primary(db, *target);
+    if (owner_pid == target_pid) continue;
+
     if (r.l0_kind == destroy_kind) {
       auto ins = db.prepare(
           "INSERT INTO entity_edge "
@@ -2372,8 +2412,8 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
           "VALUES (?, ?, 9, 1, NULL, 1, 0, 0, NULL, 0) "
           "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
           "  count = entity_edge.count + 1");
-      ins.bind(1, owner_entity);
-      ins.bind(2, *target);
+      ins.bind(1, owner_pid);
+      ins.bind(2, target_pid);
       ins.step_done();
     } else {
       int64_t create_form = form_map.at(r.l0_kind);
@@ -2387,8 +2427,8 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
           "  count = entity_edge.count + 1, "
           "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
           "  partial = excluded.partial");
-      ins.bind(1, owner_entity);
-      ins.bind(2, *target);
+      ins.bind(1, owner_pid);
+      ins.bind(2, target_pid);
       ins.bind(3, create_form);
       ins.bind(4, partial);
       ins.step_done();
@@ -2419,7 +2459,12 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
     }
     if (ret_type.empty() || ret_type == "void" || ret_type == "auto") continue;
     auto ret_eid = cpp_resolve_entity_from_type(db, ret_type);
-    if (!ret_eid || *ret_eid == r.owner_id) continue;
+    if (!ret_eid) continue;
+
+    // Collapse both endpoints onto their primary template.
+    int64_t owner_pid = cpp_collapse_to_primary(db, r.owner_id);
+    int64_t ret_pid = cpp_collapse_to_primary(db, *ret_eid);
+    if (ret_pid == owner_pid) continue;  // constructors return own type
 
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
@@ -2428,8 +2473,8 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
         "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, 2, 1) "
         "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
         "  count = entity_edge.count + 1");
-    ins.bind(1, r.owner_id);
-    ins.bind(2, *ret_eid);
+    ins.bind(1, owner_pid);
+    ins.bind(2, ret_pid);
     ins.step_done();
   }
 }
@@ -2470,6 +2515,9 @@ static void cpp_materialise_uses(cidx::SqliteDb &db) {
     if (!coe.step()) continue;
     int64_t dst_eid = coe.col_int64(0);
 
+    // Collapse both endpoints onto their primary template.
+    src_eid = cpp_collapse_to_primary(db, src_eid);
+    dst_eid = cpp_collapse_to_primary(db, dst_eid);
     if (src_eid == dst_eid) continue;
     int64_t partial = r.is_pure ? 1 : 0;
 
@@ -2501,7 +2549,10 @@ static void cpp_materialise_nests(cidx::SqliteDb &db) {
       "  AND dst.kind IN (2,3,4,5)");
   std::vector<std::pair<int64_t,int64_t>> rows;
   while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
-  for (const auto &[src, dst] : rows) {
+  for (const auto &[src0, dst0] : rows) {
+    int64_t src = cpp_collapse_to_primary(db, src0);
+    int64_t dst = cpp_collapse_to_primary(db, dst0);
+    if (src == dst) continue;
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -2527,7 +2578,10 @@ static void cpp_materialise_befriends(cidx::SqliteDb &db) {
       "  AND dst.kind IN (2,3,4,5)");
   std::vector<std::pair<int64_t,int64_t>> rows;
   while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
-  for (const auto &[src, dst] : rows) {
+  for (const auto &[src0, dst0] : rows) {
+    int64_t src = cpp_collapse_to_primary(db, src0);
+    int64_t dst = cpp_collapse_to_primary(db, dst0);
+    if (src == dst) continue;
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
