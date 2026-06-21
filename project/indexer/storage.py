@@ -32,31 +32,38 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
+
+#: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
+#: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
+#: 1:1 (e.g. CXCursor_CXXMethod == 21). Storing the small int instead of the
+#: name keeps the symbol table compact; the `symbol_kind` table (and the inverse
+#: map below) recover the string for display. Mirrors clang/ast.py:_KIND_MAP.
+SYMBOL_KIND_IDS = {
+    "struct": 2,             # CXCursor_StructDecl
+    "union": 3,              # CXCursor_UnionDecl
+    "class": 4,              # CXCursor_ClassDecl
+    "enum": 5,               # CXCursor_EnumDecl
+    "member": 6,             # CXCursor_FieldDecl
+    "enum-constant": 7,      # CXCursor_EnumConstantDecl
+    "function": 8,           # CXCursor_FunctionDecl
+    "variable": 9,           # CXCursor_VarDecl
+    "typedef": 20,           # CXCursor_TypedefDecl
+    "method": 21,            # CXCursor_CXXMethod
+    "namespace": 22,         # CXCursor_Namespace
+    "constructor": 24,       # CXCursor_Constructor
+    "destructor": 25,        # CXCursor_Destructor
+    "function-template": 30,  # CXCursor_FunctionTemplate
+    "class-template": 31,    # CXCursor_ClassTemplate
+    "type-alias": 36,        # CXCursor_TypeAliasDecl
+    "macro": 501,            # CXCursor_MacroDefinition
+}
+#: stored integer -> symbol.kind name (display / read-side recovery).
+SYMBOL_KIND_NAMES = {v: k for k, v in SYMBOL_KIND_IDS.items()}
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
-SYMBOL_KINDS = frozenset(
-    {
-        "class",
-        "struct",
-        "union",
-        "function",
-        "method",
-        "member",  # data member / field
-        "constructor",
-        "destructor",
-        "enum",
-        "enum-constant",
-        "typedef",
-        "type-alias",
-        "class-template",
-        "function-template",
-        "variable",
-        "namespace",
-        "macro",
-    }
-)
+SYMBOL_KINDS = frozenset(SYMBOL_KIND_IDS)
 
 _SCHEMA = f"""
 PRAGMA foreign_keys = ON;
@@ -106,7 +113,8 @@ CREATE TABLE IF NOT EXISTS symbol (
     spelling     TEXT NOT NULL,
     qual_name    TEXT,                  -- fully qualified, e.g. 'RdKafka::ConfImpl::set'
     display_name TEXT,                  -- spelling + signature, e.g. 'multiply(int, int)'
-    kind         TEXT NOT NULL CHECK (kind IN ({", ".join(repr(k) for k in sorted(SYMBOL_KINDS))})),
+    kind         INTEGER NOT NULL,     -- CXCursorKind value; see symbol_kind table
+                                       -- (v16: was TEXT name; now stored as int)
     type_info    TEXT,                  -- cursor.type.spelling
     file_id      INTEGER REFERENCES file(id) ON DELETE SET NULL,
     line         INTEGER,                     -- definition site once seen,
@@ -143,8 +151,21 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
 
+-- ---- v16: symbol-kind metadata (display only) ----------------------------
+-- Maps the integer stored in symbol.kind (== libclang CXCursorKind) to its
+-- string name. Purely for display/debugging -- no FK from symbol references it;
+-- readers use the in-code SYMBOL_KIND_NAMES map.
+CREATE TABLE IF NOT EXISTS symbol_kind (
+    id   INTEGER PRIMARY KEY,    -- CXCursorKind value
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO symbol_kind (id, name) VALUES
+  {", ".join(f"({i},{k!r})" for k, i in sorted(SYMBOL_KIND_IDS.items(), key=lambda kv: kv[1]))};
+
 -- ---- v7 graph layer (PLAN §2/§6) -----------------------------------------
 
+-- edge.kind metadata (display only, like symbol_kind): no symbol/edge FK
+-- references it -- readers use the in-code EDGE_NAMES map.
 CREATE TABLE IF NOT EXISTS edge_kind (
     id   INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
@@ -158,7 +179,7 @@ CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
     src_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
     dst_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
-    kind        INTEGER NOT NULL REFERENCES edge_kind(id),
+    kind        INTEGER NOT NULL,   -- edge_kind.id (no FK: faster inserts)
     count       INTEGER NOT NULL DEFAULT 1,
     base_access INTEGER,   -- inherits: public/protected/private of the base
     is_virtual  INTEGER,   -- inherits: virtual base
@@ -315,6 +336,8 @@ def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
         return None
     kwargs = {f.name: row[f.name] for f in fields(cls)}
     if cls is Symbol:
+        # kind is stored as a CXCursorKind int (v16); present it as the name.
+        kwargs["kind"] = SYMBOL_KIND_NAMES.get(kwargs["kind"], kwargs["kind"])
         kwargs["is_definition"] = bool(kwargs["is_definition"])
         kwargs["is_pure"] = bool(kwargs["is_pure"])
         kwargs["is_static"] = bool(kwargs["is_static"])
@@ -425,6 +448,19 @@ class Storage:
             # location to recover; a reindex repopulates it from the AST.
             self._conn.execute("ALTER TABLE symbol ADD COLUMN decl_path TEXT")
             changed = True
+        # v15 -> v16: symbol.kind moves from a TEXT name to its CXCursorKind
+        # integer (compact storage; symbol_kind table recovers the string). The
+        # column type changes and the old CHECK constraint must go, so the table
+        # is rebuilt in place with the kind values converted. Runs after the
+        # column-add migrations above so the new table mirrors all columns.
+        kind_type = next(
+            (r[2] for r in self._conn.execute("PRAGMA table_info(symbol)")
+             if r[1] == "kind"),
+            "",
+        )
+        if (kind_type or "").upper() != "INTEGER":
+            self._migrate_symbol_kind_to_int()
+            changed = True
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
             # No backfill possible from stored data -- re-import to populate.
@@ -512,6 +548,58 @@ class Storage:
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    def _migrate_symbol_kind_to_int(self) -> None:
+        """v15 -> v16: rebuild `symbol` with kind stored as its CXCursorKind int.
+
+        SQLite cannot ALTER a column's type or drop the old `kind IN (...)` CHECK,
+        so the table is recreated and the rows copied with the kind names mapped
+        to integers. Foreign keys are disabled for the swap so dropping the old
+        table does not cascade-delete edges (edge.src_id/dst_id keep the same ids
+        the new rows carry). The schema script (run right after) recreates the
+        symbol indexes via CREATE INDEX IF NOT EXISTS.
+        """
+        case = "CASE kind " + " ".join(
+            f"WHEN {name!r} THEN {i}" for name, i in SYMBOL_KIND_IDS.items()
+        ) + " ELSE kind END"
+        self._conn.commit()  # close any open txn so the pragma below takes effect
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        self._conn.executescript(f"""
+            CREATE TABLE symbol_new (
+                id           INTEGER PRIMARY KEY,
+                usr          TEXT NOT NULL UNIQUE,
+                spelling     TEXT NOT NULL,
+                qual_name    TEXT,
+                display_name TEXT,
+                kind         INTEGER NOT NULL,
+                type_info    TEXT,
+                file_id      INTEGER REFERENCES file(id) ON DELETE SET NULL,
+                line         INTEGER,
+                col          INTEGER,
+                decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
+                decl_line    INTEGER,
+                decl_col     INTEGER,
+                decl_path    TEXT,
+                is_definition INTEGER NOT NULL DEFAULT 0,
+                is_pure      INTEGER NOT NULL DEFAULT 0,
+                is_static    INTEGER NOT NULL DEFAULT 0,
+                is_instantiation INTEGER NOT NULL DEFAULT 0,
+                linkage      TEXT,
+                access       TEXT,
+                parent_usr   TEXT,
+                resolved     INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO symbol_new
+                SELECT id, usr, spelling, qual_name, display_name, {case},
+                       type_info, file_id, line, col, decl_file_id, decl_line,
+                       decl_col, decl_path, is_definition, is_pure, is_static,
+                       is_instantiation, linkage, access, parent_usr, resolved
+                FROM symbol;
+            DROP TABLE symbol;
+            ALTER TABLE symbol_new RENAME TO symbol;
+        """)
+        self._conn.commit()
+        self._conn.execute("PRAGMA foreign_keys = ON")
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1237,7 +1325,11 @@ class Storage:
         """
         if sym.kind not in SYMBOL_KINDS:
             raise ValueError(f"unknown symbol kind {sym.kind!r}")
-        vals = tuple(getattr(sym, c) for c in self._SYMBOL_COLS)
+        # kind is stored as its CXCursorKind integer (v16); convert on the way in.
+        vals = tuple(
+            SYMBOL_KIND_IDS[sym.kind] if c == "kind" else getattr(sym, c)
+            for c in self._SYMBOL_COLS
+        )
         cur = self._conn.execute(
             f"INSERT INTO symbol ({', '.join(self._SYMBOL_COLS)}) "
             f"VALUES ({', '.join('?' * len(self._SYMBOL_COLS))}) "
@@ -1276,8 +1368,10 @@ class Storage:
         bad = set(values) - set(self._SYMBOL_COLS)
         if bad:
             raise ValueError(f"unknown symbol column(s): {sorted(bad)}")
-        if "kind" in values and values["kind"] not in SYMBOL_KINDS:
-            raise ValueError(f"unknown symbol kind {values['kind']!r}")
+        if "kind" in values:
+            if values["kind"] not in SYMBOL_KINDS:
+                raise ValueError(f"unknown symbol kind {values['kind']!r}")
+            values = {**values, "kind": SYMBOL_KIND_IDS[values["kind"]]}
         if not values:
             return self.lookup_symbol(usr) is not None
         sets = ", ".join(f"{c} = ?" for c in values)
@@ -1307,7 +1401,7 @@ class Storage:
         args: list[Any] = [spelling]
         if kind is not None:
             sql += " AND kind = ?"
-            args.append(kind)
+            args.append(SYMBOL_KIND_IDS.get(kind, -1))
         sql += " ORDER BY usr"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
@@ -1325,7 +1419,7 @@ class Storage:
         args: list[Any] = [qual_name]
         if kind is not None:
             sql += " AND kind = ?"
-            args.append(kind)
+            args.append(SYMBOL_KIND_IDS.get(kind, -1))
         sql += " ORDER BY usr"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
@@ -1348,7 +1442,7 @@ class Storage:
         args: list[Any] = [like]
         if kind is not None:
             sql += " AND kind = ?"
-            args.append(kind)
+            args.append(SYMBOL_KIND_IDS.get(kind, -1))
         sql += " ORDER BY LENGTH(qual_name), qual_name"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
@@ -1392,7 +1486,7 @@ class Storage:
             args.append(self._fuzzy_like(name))
         if kind is not None:
             where.append("s.kind = ?")
-            args.append(kind)
+            args.append(SYMBOL_KIND_IDS.get(kind, -1))
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += (
@@ -1485,7 +1579,7 @@ class Storage:
                 spelling,
                 qual_name or None,
                 display_name or None,
-                kind,
+                SYMBOL_KIND_IDS.get(kind, -1),  # kind stored as CXCursorKind int (v16)
                 decl_file_id,
                 decl_line,
                 decl_col,
@@ -1707,7 +1801,7 @@ class Storage:
     def stats(self) -> dict[str, Any]:
         one = lambda sql: self._conn.execute(sql).fetchone()[0]  # noqa: E731
         by_kind = {
-            r["kind"]: r["n"]
+            SYMBOL_KIND_NAMES.get(r["kind"], r["kind"]): r["n"]
             for r in self._conn.execute(
                 "SELECT kind, COUNT(*) AS n FROM symbol GROUP BY kind ORDER BY kind"
             )

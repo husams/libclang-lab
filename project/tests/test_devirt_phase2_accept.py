@@ -960,7 +960,8 @@ def _virtual_steps(cb, caller_spelling):
     """devirtualized_callgraph(prune=True) virtual dispatch steps for caller."""
     sym = None
     for (usr,) in cb.graph._c.execute(
-        "SELECT usr FROM symbol WHERE spelling = ? AND kind = 'function'",
+        "SELECT usr FROM symbol WHERE spelling = ? "
+        "AND kind = (SELECT id FROM symbol_kind WHERE name = 'function')",
         (caller_spelling,),
     ).fetchall():
         sym = cb.graph.get(usr)

@@ -135,7 +135,7 @@ def test_schema_version_is_current(extracted_db):
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()
     db.close()
-    assert row is not None and int(row[0]) == 15
+    assert row is not None and int(row[0]) == 16
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +519,7 @@ def test_migration_v12_to_v13(tmp_path):
     version = db._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(version) == 15, f"expected current schema (v15), got {version}"
+    assert int(version) == 16, f"expected current schema (v15), got {version}"
     db.close()
 
     # Second open: idempotent (no error, still current)
@@ -527,12 +527,12 @@ def test_migration_v12_to_v13(tmp_path):
     v2 = db2._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(v2) == 15
+    assert int(v2) == 16
     db2.close()
 
-    # Future DB (v15): must NOT be downgraded
+    # Future DB (v99): must NOT be downgraded
     conn2 = sqlite3.connect(db_path)
-    conn2.execute("UPDATE meta SET value='15' WHERE key='schema_version'")
+    conn2.execute("UPDATE meta SET value='99' WHERE key='schema_version'")
     conn2.commit()
     conn2.close()
 
@@ -540,7 +540,7 @@ def test_migration_v12_to_v13(tmp_path):
     v3 = db3._conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(v3) == 15, "Storage must not downgrade a future-schema DB"
+    assert int(v3) == 99, "Storage must not downgrade a future-schema DB"
     db3.close()
 
 

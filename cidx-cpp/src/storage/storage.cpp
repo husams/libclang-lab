@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS component (
 CREATE TABLE IF NOT EXISTS directory (
     id           INTEGER PRIMARY KEY,
     component_id INTEGER NOT NULL REFERENCES component(id) ON DELETE CASCADE,
-    path         TEXT NOT NULL,
+    path         TEXT NOT NULL,         -- relative to component.path ('' = root)
     UNIQUE (component_id, path)
 );
 
@@ -52,48 +52,55 @@ CREATE TABLE IF NOT EXISTS file (
     id              INTEGER PRIMARY KEY,
     directory_id    INTEGER NOT NULL REFERENCES directory(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
-    mtime           REAL,
-    md5             TEXT,
-    compile_options TEXT,
-    driver          TEXT,
+    mtime           REAL,               -- source mtime at index time
+    md5             TEXT,               -- content hash at import time
+    compile_options TEXT,               -- JSON list of stripped parse args
+    driver          TEXT,               -- argv[0] of the compile command; its
+                                        -- system include paths are replicated
+                                        -- at parse time (custom toolchains)
     indexed         INTEGER NOT NULL DEFAULT 0,
-    indexed_at      TEXT,
-    args_overridden INTEGER NOT NULL DEFAULT 0,
+    indexed_at      TEXT,               -- ISO timestamp of last successful index
+    args_overridden INTEGER NOT NULL DEFAULT 0,  -- compile_options/driver were
+                                        -- edited by `cidx file`; a re-import
+                                        -- (without --force) must NOT clobber them
     UNIQUE (directory_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS symbol (
     id           INTEGER PRIMARY KEY,
-    usr          TEXT NOT NULL UNIQUE,
+    usr          TEXT NOT NULL UNIQUE,  -- clang Unified Symbol Resolution
     spelling     TEXT NOT NULL,
-    qual_name    TEXT,
-    display_name TEXT,
-    kind         TEXT NOT NULL CHECK (kind IN ('class', 'class-template',
-                 'constructor', 'destructor', 'enum', 'enum-constant',
-                 'function', 'function-template', 'macro', 'member', 'method',
-                 'namespace', 'struct', 'type-alias', 'typedef', 'union',
-                 'variable')),
-    type_info    TEXT,
+    qual_name    TEXT,                  -- fully qualified, e.g. 'RdKafka::ConfImpl::set'
+    display_name TEXT,                  -- spelling + signature, e.g. 'multiply(int, int)'
+    kind         INTEGER NOT NULL,     -- CXCursorKind value; see symbol_kind table
+                                       -- (v16: was TEXT name; now stored as int)
+    type_info    TEXT,                  -- cursor.type.spelling
     file_id      INTEGER REFERENCES file(id) ON DELETE SET NULL,
-    line         INTEGER,
-    col          INTEGER,
+    line         INTEGER,                     -- definition site once seen,
+    col          INTEGER,                     -- else the declaration site
     decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
-    decl_line    INTEGER,
-    decl_col     INTEGER,
+    decl_line    INTEGER,                     -- declaration site (e.g. the .h
+    decl_col     INTEGER,                     -- prototype); NULL if none seen
     decl_path    TEXT,                         -- raw decl path for a target in an
-                                              -- UNREGISTERED (system/stdlib) file
-                                              -- no component owns: the AST has the
-                                              -- location but there is no file row,
+                                              -- UNREGISTERED file (system/stdlib
+                                              -- header no component owns): the AST
+                                              -- has the location but there is no
+                                              -- file row to point decl_file_id at,
                                               -- so the stub keeps the path here
     is_definition INTEGER NOT NULL DEFAULT 0,
-    is_pure      INTEGER NOT NULL DEFAULT 0,
+    is_pure      INTEGER NOT NULL DEFAULT 0,  -- C++: pure virtual ('= 0'), so
+                                              -- no definition can ever exist
     is_static    INTEGER NOT NULL DEFAULT 0,  -- v12: C++ static member function
+                                              -- (clang_CXXMethod_isStatic). Free
+                                              -- functions/non-methods are 0; a
+                                              -- file-scope `static` free function
+                                              -- is captured by linkage='internal'
     is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
                                               -- instantiation node (own USR,
-                                              -- definition via instantiates edge)
-    linkage      TEXT,
-    access       TEXT,
-    parent_usr   TEXT,
+                                              -- definition via `instantiates` edge)
+    linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
+    access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
+    parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
     resolved     INTEGER NOT NULL DEFAULT 0
 );
 
@@ -103,8 +110,21 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
 
+-- ---- v16: symbol-kind metadata (display only) ----------------------------
+-- Maps the integer stored in symbol.kind (== libclang CXCursorKind) to its
+-- string name. Purely for display/debugging -- no FK from symbol references it;
+-- readers use the in-code SYMBOL_KIND_NAMES map.
+CREATE TABLE IF NOT EXISTS symbol_kind (
+    id   INTEGER PRIMARY KEY,    -- CXCursorKind value
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO symbol_kind (id, name) VALUES
+  (2,'struct'), (3,'union'), (4,'class'), (5,'enum'), (6,'member'), (7,'enum-constant'), (8,'function'), (9,'variable'), (20,'typedef'), (21,'method'), (22,'namespace'), (24,'constructor'), (25,'destructor'), (30,'function-template'), (31,'class-template'), (36,'type-alias'), (501,'macro');
+
 -- ---- v7 graph layer (PLAN §2/§6) -----------------------------------------
 
+-- edge.kind metadata (display only, like symbol_kind): no symbol/edge FK
+-- references it -- readers use the in-code EDGE_NAMES map.
 CREATE TABLE IF NOT EXISTS edge_kind (
     id   INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
@@ -118,7 +138,7 @@ CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
     src_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
     dst_id      INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
-    kind        INTEGER NOT NULL REFERENCES edge_kind(id),
+    kind        INTEGER NOT NULL,   -- edge_kind.id (no FK: faster inserts)
     count       INTEGER NOT NULL DEFAULT 1,
     base_access INTEGER,   -- inherits: public/protected/private of the base
     is_virtual  INTEGER,   -- inherits: virtual base
@@ -176,8 +196,6 @@ CREATE TABLE IF NOT EXISTS call_arg (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
 
--- ---- v14: label registry (portable paths §5) --------------------------------
-
 CREATE TABLE IF NOT EXISTS label (
     id   INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,   -- label key, e.g. 'libfoo-include'
@@ -186,8 +204,9 @@ CREATE TABLE IF NOT EXISTS label (
 
 -- ---- v15: per-file parse diagnostics (errors/warnings) ---------------------
 -- Clang diagnostics (severity >= warning) emitted while parsing a TU, keyed by
--- the TU's file row. Refreshed wholesale on every (re)index. A diagnostic in an
--- #included header keeps its own file_path/line/col but is owned by the TU.
+-- the TU's file row. Refreshed wholesale on every (re)index of that file. A
+-- diagnostic located in an #included header keeps its own file_path/line/col,
+-- but is owned by the TU that surfaced it.
 CREATE TABLE IF NOT EXISTS diagnostic (
     id        INTEGER PRIMARY KEY,
     file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
@@ -199,7 +218,7 @@ CREATE TABLE IF NOT EXISTS diagnostic (
 );
 CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '15');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '16');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -231,6 +250,32 @@ constexpr std::array<std::string_view, 17> kSymbolKinds = {
     "variable",       "namespace",
     "macro",
 };
+
+// symbol.kind name <-> stored integer (== libclang CXCursorKind). Mirrors
+// storage.py SYMBOL_KIND_IDS / SYMBOL_KIND_NAMES. The metadata symbol_kind
+// table is seeded with the same pairs (display only).
+const std::map<std::string_view, int64_t> &symbol_kind_ids_map() {
+  static const std::map<std::string_view, int64_t> m = {
+      {"struct", 2},      {"union", 3},              {"class", 4},
+      {"enum", 5},        {"member", 6},             {"enum-constant", 7},
+      {"function", 8},    {"variable", 9},           {"typedef", 20},
+      {"method", 21},     {"namespace", 22},         {"constructor", 24},
+      {"destructor", 25}, {"function-template", 30}, {"class-template", 31},
+      {"type-alias", 36}, {"macro", 501},
+  };
+  return m;
+}
+
+const std::map<int64_t, std::string> &symbol_kind_names_map() {
+  static const std::map<int64_t, std::string> m = [] {
+    std::map<int64_t, std::string> r;
+    for (const auto &kv : symbol_kind_ids_map()) {
+      r.emplace(kv.second, std::string(kv.first));
+    }
+    return r;
+  }();
+  return m;
+}
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
@@ -356,7 +401,7 @@ Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.spelling = st.col_text(off + 2);
   s.qual_name = opt_text(st, off + 3);
   s.display_name = opt_text(st, off + 4);
-  s.kind = st.col_text(off + 5);
+  s.kind = symbol_kind_name(st.col_int64(off + 5)); // stored as CXCursorKind int
   s.type_info = opt_text(st, off + 6);
   s.file_id = opt_int64(st, off + 7);
   s.line = opt_int64(st, off + 8);
@@ -440,6 +485,18 @@ std::string prepare_db_path(const std::string &path) {
 bool is_symbol_kind(std::string_view kind) {
   return std::find(kSymbolKinds.begin(), kSymbolKinds.end(), kind) !=
          kSymbolKinds.end();
+}
+
+int64_t symbol_kind_id(std::string_view name) {
+  const auto &m = symbol_kind_ids_map();
+  const auto it = m.find(name);
+  return it != m.end() ? it->second : -1; // unknown -> matches nothing (filters)
+}
+
+std::string symbol_kind_name(int64_t id) {
+  const auto &m = symbol_kind_names_map();
+  const auto it = m.find(id);
+  return it != m.end() ? it->second : std::to_string(id);
 }
 
 // -- Transaction --------------------------------------------------------------
@@ -567,6 +624,32 @@ void Storage::migrate() {
     db_.exec("ALTER TABLE symbol ADD COLUMN decl_path TEXT");
     changed = true;
   }
+  // v15 -> v16: symbol.kind moves from a TEXT name to its CXCursorKind integer
+  // (compact storage; the symbol_kind table recovers the string). The column
+  // type changes and the old CHECK must go, so the table is rebuilt in place
+  // with the kind values converted. Runs after the column-add migrations above
+  // so the new table mirrors all columns. Mirrors storage.py.
+  {
+    std::string kind_type;
+    {
+      // Read the kind column's declared type. Finalize this statement (close
+      // the scope) BEFORE the rebuild -- an open read on `symbol` would make
+      // DROP TABLE fail with "database table is locked".
+      auto st = db_.prepare("PRAGMA table_info(symbol)");
+      while (st.step()) {
+        if (st.col_text(1) == "kind") {
+          kind_type = st.col_text(2);
+        }
+      }
+    }
+    for (char &c : kind_type) {
+      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    if (kind_type != "INTEGER") {
+      migrate_symbol_kind_to_int();
+      changed = true;
+    }
+  }
   if (has_table("file")) {
     const auto fcols = table_columns("file");
     if (!has_col(fcols, "driver")) {
@@ -660,6 +743,57 @@ void Storage::migrate() {
     st.bind(1, std::string_view(std::to_string(kSchemaVersion)));
     st.step_done();
   }
+}
+
+// v15 -> v16: rebuild `symbol` with kind stored as its CXCursorKind int.
+// SQLite cannot ALTER a column's type or drop the old `kind IN (...)` CHECK, so
+// the table is recreated and rows copied with kind names mapped to integers.
+// Foreign keys are disabled for the swap so dropping the old table does not
+// cascade-delete edges (edge.src_id/dst_id keep the ids the new rows carry).
+// The schema script (run right after migrate) recreates the symbol indexes via
+// CREATE INDEX IF NOT EXISTS. Mirrors storage.py _migrate_symbol_kind_to_int.
+void Storage::migrate_symbol_kind_to_int() {
+  std::string cases;
+  for (const auto &kv : symbol_kind_ids_map()) {
+    cases += " WHEN '" + std::string(kv.first) +
+             "' THEN " + std::to_string(kv.second);
+  }
+  db_.exec("PRAGMA foreign_keys = OFF");
+  db_.exec(
+      "CREATE TABLE symbol_new ("
+      " id INTEGER PRIMARY KEY,"
+      " usr TEXT NOT NULL UNIQUE,"
+      " spelling TEXT NOT NULL,"
+      " qual_name TEXT,"
+      " display_name TEXT,"
+      " kind INTEGER NOT NULL,"
+      " type_info TEXT,"
+      " file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,"
+      " line INTEGER,"
+      " col INTEGER,"
+      " decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,"
+      " decl_line INTEGER,"
+      " decl_col INTEGER,"
+      " decl_path TEXT,"
+      " is_definition INTEGER NOT NULL DEFAULT 0,"
+      " is_pure INTEGER NOT NULL DEFAULT 0,"
+      " is_static INTEGER NOT NULL DEFAULT 0,"
+      " is_instantiation INTEGER NOT NULL DEFAULT 0,"
+      " linkage TEXT,"
+      " access TEXT,"
+      " parent_usr TEXT,"
+      " resolved INTEGER NOT NULL DEFAULT 0"
+      ");"
+      "INSERT INTO symbol_new"
+      " SELECT id, usr, spelling, qual_name, display_name,"
+      "        CASE kind" + cases + " ELSE kind END,"
+      "        type_info, file_id, line, col, decl_file_id, decl_line,"
+      "        decl_col, decl_path, is_definition, is_pure, is_static,"
+      "        is_instantiation, linkage, access, parent_usr, resolved"
+      " FROM symbol;"
+      "DROP TABLE symbol;"
+      "ALTER TABLE symbol_new RENAME TO symbol;");
+  db_.exec("PRAGMA foreign_keys = ON");
 }
 
 // -- components
@@ -1329,7 +1463,7 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   st.bind(2, std::string_view(sym.spelling));
   bind_opt(st, 3, sym.qual_name);
   bind_opt(st, 4, sym.display_name);
-  st.bind(5, std::string_view(sym.kind));
+  st.bind(5, symbol_kind_id(sym.kind)); // stored as CXCursorKind int (v16)
   bind_opt(st, 6, sym.type_info);
   bind_opt(st, 7, sym.file_id);
   bind_opt(st, 8, sym.line);
@@ -1437,7 +1571,7 @@ Storage::lookup_symbols_by_name(const std::string &spelling,
   args.emplace_back(spelling);
   if (kind) {
     sql += " AND kind = ?";
-    args.emplace_back(*kind);
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
   }
   sql += " ORDER BY usr";
   auto st = db_.prepare(sql);
@@ -1460,7 +1594,7 @@ Storage::lookup_symbols_by_qual_name(const std::string &qual_name,
   args.emplace_back(qual_name);
   if (kind) {
     sql += " AND kind = ?";
-    args.emplace_back(*kind);
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
   }
   sql += " ORDER BY usr";
   auto st = db_.prepare(sql);
@@ -1510,7 +1644,7 @@ Storage::search_symbols(const std::string &pattern,
   args.emplace_back(like);
   if (kind) {
     sql += " AND kind = ?";
-    args.emplace_back(*kind);
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
   }
   sql += " ORDER BY LENGTH(qual_name), qual_name";
   auto st = db_.prepare(sql);
@@ -1564,7 +1698,7 @@ Storage::list_symbols(const std::optional<int64_t> &component_id,
   }
   if (kind) {
     where.push_back("s.kind = ?");
-    args.emplace_back(*kind);
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
   }
   if (!where.empty()) {
     sql += " WHERE " + join_strings(where, " AND ");
@@ -1655,7 +1789,7 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   } else {
     ins.bind(4, std::string_view(display_name));
   }
-  ins.bind(5, std::string_view(kind));
+  ins.bind(5, symbol_kind_id(kind)); // kind stored as CXCursorKind int (v16)
   bind_opt(ins, 6, decl_file_id);
   bind_opt(ins, 7, decl_line);
   bind_opt(ins, 8, decl_col);
@@ -1875,7 +2009,7 @@ Stats Storage::stats() {
     auto st = db_.prepare(
         "SELECT kind, COUNT(*) AS n FROM symbol GROUP BY kind ORDER BY kind");
     while (st.step()) {
-      s.symbols_by_kind[st.col_text(0)] = st.col_int64(1);
+      s.symbols_by_kind[symbol_kind_name(st.col_int64(0))] = st.col_int64(1);
     }
   }
   s.edges = one("SELECT COUNT(*) FROM edge");
@@ -1984,7 +2118,7 @@ std::vector<Symbol> Storage::find_symbols(const std::string &pattern,
   args.emplace_back(like);
   if (kind) {
     sql += " AND s.kind = ?";
-    args.emplace_back(*kind);
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
   }
   sql += " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
          "COALESCE(s.qual_name, s.spelling) LIMIT ?";

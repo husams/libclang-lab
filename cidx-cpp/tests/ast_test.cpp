@@ -1211,9 +1211,11 @@ TEST_SUITE("clang") {
           "SELECT COUNT(*) FROM edge e "
           "JOIN symbol src ON src.id = e.src_id "
           "JOIN symbol dst ON dst.id = e.dst_id "
-          "WHERE e.kind = 3 "
-          "  AND src.spelling = 'geo' AND src.kind = 'namespace' "
-          "  AND dst.spelling = 'Shape' AND dst.kind = 'class'");
+          "WHERE e.kind = 3 "  // v16: symbol.kind is a CXCursorKind int
+          "  AND src.spelling = 'geo' "
+          "  AND src.kind = (SELECT id FROM symbol_kind WHERE name='namespace') "
+          "  AND dst.spelling = 'Shape' "
+          "  AND dst.kind = (SELECT id FROM symbol_kind WHERE name='class')");
       st.step();
       CHECK(st.col_int64(0) >= 1); // geo contains Shape (class)
     }

@@ -27,11 +27,16 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 15;
+constexpr int kSchemaVersion = 16;
 
-// Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced both by the
-// SQL CHECK and by an application-side StorageError (§3.2).
+// Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
+// application-side StorageError (§3.2). v16: kind is stored on disk as its
+// CXCursorKind integer; these helpers convert name <-> stored int.
 bool is_symbol_kind(std::string_view kind);
+// name -> CXCursorKind int (-1 if unknown); int -> name (decimal string if
+// unknown). Single source mirrored from storage.py SYMBOL_KIND_IDS.
+int64_t symbol_kind_id(std::string_view name);
+std::string symbol_kind_name(int64_t id);
 
 class Storage;
 
@@ -365,6 +370,7 @@ private:
   friend class Transaction;
 
   void migrate(); // column-presence detection, §4.1
+  void migrate_symbol_kind_to_int(); // v15 -> v16: rebuild symbol, kind->int
   // (component_id, relative dir, file name) for an absolute path; nullopt
   // when no component owns it.
   std::optional<std::tuple<int64_t, std::string, std::string>>

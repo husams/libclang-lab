@@ -63,8 +63,10 @@ def db_path():
 
 
 def _by_spelling(conn, spelling):
+    # kind is stored as a CXCursorKind int (v16); join symbol_kind for the name.
     return conn.execute(
-        "SELECT is_static, kind, linkage FROM symbol WHERE spelling = ?",
+        "SELECT s.is_static, sk.name, s.linkage FROM symbol s "
+        "JOIN symbol_kind sk ON sk.id = s.kind WHERE s.spelling = ?",
         (spelling,),
     ).fetchone()
 
