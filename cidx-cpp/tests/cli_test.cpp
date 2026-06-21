@@ -322,7 +322,8 @@ struct GoldFixture {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,realias,index,resolve,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,component,label,set,"
+    "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
@@ -389,9 +390,9 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, add-source, import, realias, index, resolve, component, "
-            "label, set, file, dump-compile-commands, search, show, list, ls, "
-            "delete, graph, ast)\n");
+            "from init, migrate, add-source, import, realias, index, resolve, "
+            "component, label, set, file, dump-compile-commands, search, show, "
+            "list, ls, delete, graph, ast)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -784,7 +785,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.15.0");
+  CHECK(std::string(cli::kVersion) == "0.16.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -808,10 +809,14 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "\n"
           "positional arguments:\n"
           "  "
-          "{init,add-source,import,realias,index,resolve,component,label,set,file,"
+          "{init,migrate,add-source,import,realias,index,resolve,component,label,"
+          "set,file,"
           "dump-compile-commands,search,show,list,ls,delete,graph,ast}"
           "\n"
           "    init                create a blank index database\n"
+          "    migrate             upgrade an existing index to the current "
+          "schema (in\n"
+          "                        place, no re-index)\n"
           "    add-source          register a component\n"
           "    import              import a compile_commands.json\n"
           "    realias             rewrite stored include paths to <label> tokens via "
@@ -1578,6 +1583,109 @@ TEST_CASE("args: init grammar — --force flag, no positionals") {
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kTopUsage) +
                      "cidx: error: unrecognized arguments: extra\n");
+}
+
+TEST_CASE("migrate: missing DB errors; already-current is a no-op (hermetic)") {
+  const std::string t = make_temp_dir();
+  const std::string db = t + "/index.db";
+
+  // No index yet -> error, exit 1.
+  CmdResult r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 1);
+  CHECK(r.out.empty());
+  CHECK(r.err == "error: no index database at " + db +
+                     " (run `cidx init` / `cidx import` first)\n");
+
+  // Fresh init is already current -> no-op message, exit 0.
+  run_cli({"init"}, t);
+  r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  CHECK(r.out == db + " already at schema v" +
+                     std::to_string(cidx::kSchemaVersion) +
+                     "; nothing to migrate\n");
+}
+
+TEST_CASE("migrate: upgrades a v15 DB in place (kind TEXT->int), no re-index") {
+  const std::string t = make_temp_dir();
+  const std::string db = t + "/index.db";
+
+  // Build a minimal v15 DB: symbol.kind is a TEXT name with the old CHECK.
+  {
+    cidx::SqliteDb raw(db);
+    raw.exec(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
+        "INSERT INTO meta VALUES ('schema_version','15');"
+        "CREATE TABLE component (id INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 'repo',"
+        " version TEXT);"
+        "CREATE TABLE directory (id INTEGER PRIMARY KEY, component_id INTEGER,"
+        " path TEXT);"
+        "CREATE TABLE file (id INTEGER PRIMARY KEY, directory_id INTEGER,"
+        " name TEXT NOT NULL, mtime REAL, md5 TEXT, compile_options TEXT,"
+        " driver TEXT, indexed INTEGER NOT NULL DEFAULT 0, indexed_at TEXT,"
+        " args_overridden INTEGER NOT NULL DEFAULT 0,"
+        " UNIQUE(directory_id,name));"
+        "CREATE TABLE symbol (id INTEGER PRIMARY KEY, usr TEXT NOT NULL UNIQUE,"
+        " spelling TEXT NOT NULL, qual_name TEXT, display_name TEXT,"
+        " kind TEXT NOT NULL CHECK (kind IN ('class','struct','function',"
+        "'method','macro')), type_info TEXT, file_id INTEGER, line INTEGER,"
+        " col INTEGER, decl_file_id INTEGER, decl_line INTEGER,"
+        " decl_col INTEGER, decl_path TEXT,"
+        " is_definition INTEGER NOT NULL DEFAULT 0,"
+        " is_pure INTEGER NOT NULL DEFAULT 0,"
+        " is_static INTEGER NOT NULL DEFAULT 0,"
+        " is_instantiation INTEGER NOT NULL DEFAULT 0, linkage TEXT,"
+        " access TEXT, parent_usr TEXT, resolved INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO symbol (usr,spelling,kind) VALUES "
+        "('c:@F@f','f','function'),('c:@S@S','S','struct');");
+  }
+
+  CmdResult r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  CHECK(r.out == "migrated " + db + ": schema v15 -> v" +
+                     std::to_string(cidx::kSchemaVersion) + "\n");
+
+  // kind is now the CXCursorKind int, symbol_kind seeded, rows preserved.
+  {
+    cidx::SqliteDb raw(db);
+    auto st = raw.prepare(
+        "SELECT typeof(kind), kind FROM symbol WHERE usr='c:@F@f'");
+    REQUIRE(st.step());
+    CHECK(st.col_text(0) == "integer");
+    CHECK(st.col_int64(1) == 8); // function == CXCursor_FunctionDecl
+    auto m = raw.prepare("SELECT COUNT(*) FROM symbol_kind");
+    REQUIRE(m.step());
+    CHECK(m.col_int64(0) == 17);
+  }
+
+  // Idempotent: a second migrate is a no-op.
+  r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.out == db + " already at schema v" +
+                     std::to_string(cidx::kSchemaVersion) +
+                     "; nothing to migrate\n");
+}
+
+TEST_CASE("args: migrate grammar — --db option, -h help") {
+  cli::ParsedArgs pa = cli::parse_args({"migrate"});
+  CHECK(pa.command == "migrate");
+  CHECK(!pa.index_db.has_value());
+
+  pa = cli::parse_args({"migrate", "--db", "/tmp/x.db"});
+  CHECK(pa.command == "migrate");
+  REQUIRE(pa.index_db.has_value());
+  CHECK(*pa.index_db == "/tmp/x.db");
+
+  pa = cli::parse_args({"migrate", "-h"});
+  REQUIRE(pa.help_text.has_value());
+  CHECK(*pa.help_text ==
+        "usage: cidx migrate [-h] [--db PATH]\n"
+        "\n"
+        "options:\n"
+        "  -h, --help  show this help message and exit\n"
+        "  --db PATH   index database (default: the standard cache index)\n");
 }
 
 TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {

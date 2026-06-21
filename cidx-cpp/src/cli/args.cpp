@@ -23,23 +23,27 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,realias,index,resolve,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,add-source,import,realias,index,resolve,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,add-source,import,realias,index,resolve,component,label,set,file,"
+    "  {init,migrate,add-source,import,realias,index,resolve,component,label,set,"
+    "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
+    "    migrate             upgrade an existing index to the current schema "
+    "(in\n"
+    "                        place, no re-index)\n"
     "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
     "    realias             rewrite stored include paths to <label> tokens via "
@@ -75,6 +79,15 @@ const char kInitHelp[] =
     "options:\n"
     "  -h, --help  show this help message and exit\n"
     "  --force     overwrite an existing index database\n";
+
+const char kMigrateUsage[] = "usage: cidx migrate [-h] [--db PATH]\n";
+
+const char kMigrateHelp[] =
+    "usage: cidx migrate [-h] [--db PATH]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
 
 const char kAddSourceUsage[] =
     "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
@@ -1104,9 +1117,9 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",      "add-source", "import",               "realias",
-    "index",     "resolve",    "component",             "label",
-    "set",       "file",       "dump-compile-commands",
+    "init",      "migrate",    "add-source",            "import",
+    "realias",   "index",      "resolve",               "component",
+    "label",     "set",        "file",                  "dump-compile-commands",
     "search",    "show",       "list",                  "ls",
     "delete",    "graph",      "ast"};
 const std::vector<std::string> kGraphWhats = {
@@ -1544,6 +1557,18 @@ const Spec kInitSpec = {
     },
     {},
     false,
+    {},
+};
+
+const Spec kMigrateSpec = {
+    "cidx migrate",
+    kMigrateUsage,
+    kMigrateHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {},
+    false, // no positional
     {},
 };
 
@@ -2154,6 +2179,13 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       return pa;
     }
     pa.force = st.flags.count("--force") != 0;
+  } else if (pa.command == "migrate") {
+    ParseState st = parse_leaf(kMigrateSpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kMigrateHelp;
+      return pa;
+    }
+    pa.index_db = opt_value(st, "--db");
   } else if (pa.command == "add-source") {
     ParseState st = parse_leaf(kAddSourceSpec, argv, i, extras);
     if (st.help) {

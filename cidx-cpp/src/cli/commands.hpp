@@ -31,6 +31,7 @@ struct Context {
 };
 
 int cmd_init(const ParsedArgs &args, Context &ctx);
+int cmd_migrate(const ParsedArgs &args, Context &ctx);
 int cmd_add_source(const ParsedArgs &args, Context &ctx);
 int cmd_import(const ParsedArgs &args, Context &ctx);
 int cmd_index(const ParsedArgs &args, Context &ctx);

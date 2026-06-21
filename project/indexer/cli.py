@@ -34,7 +34,7 @@ from datetime import datetime
 
 if __package__ in (None, ""):  # direct execution
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    from indexer.storage import SYMBOL_KINDS, File, Storage  # noqa: E402
+    from indexer.storage import SCHEMA_VERSION, SYMBOL_KINDS, File, Storage  # noqa: E402
     from indexer import compiledb  # noqa: E402
     from indexer import pathx  # noqa: E402
     from indexer.clang import ClangParseError, index_source  # noqa: E402
@@ -52,7 +52,7 @@ if __package__ in (None, ""):  # direct execution
         resolve_file_arg,
     )
 else:
-    from .storage import SYMBOL_KINDS, File, Storage
+    from .storage import SCHEMA_VERSION, SYMBOL_KINDS, File, Storage
     from . import astcmd, compiledb, pathx
     from .clang import ClangParseError, index_source
     from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -184,6 +184,54 @@ def cmd_init(args) -> int:
         pass  # constructing Storage applies the schema
     action = "recreated" if existed else "initialized"
     print(f"{action} empty index database at {path}")
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    """Upgrade an existing index database to the current schema version, in place.
+
+    Opening a Storage runs the schema migration (e.g. v15 -> v16 converts
+    symbol.kind from a TEXT name to its CXCursorKind integer). This command just
+    does that deliberately and reports the before/after version -- it preserves
+    all data (symbols, edges) and never re-indexes. Use --db to target a
+    non-standard index.
+    """
+    import sqlite3
+
+    path = args.index
+    if not os.path.exists(path):
+        print(
+            f"error: no index database at {path} "
+            "(run `cidx init` / `cidx import` first)",
+            file=sys.stderr,
+        )
+        return 1
+
+    def _schema_version() -> int | None:
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+            return int(row[0]) if row and row[0] else None
+        finally:
+            con.close()
+
+    before = _schema_version()
+    if before is not None and before > SCHEMA_VERSION:
+        print(
+            f"index at {path} is schema v{before}, newer than this build "
+            f"(v{SCHEMA_VERSION}); refusing to touch it",
+            file=sys.stderr,
+        )
+        return 1
+    with Storage(path):  # constructing Storage applies the in-place migration
+        pass
+    after = _schema_version()
+    if before == after:
+        print(f"{path} already at schema v{after}; nothing to migrate")
+    else:
+        print(f"migrated {path}: schema v{before} -> v{after}")
     return 0
 
 
@@ -1612,6 +1660,18 @@ def main(argv=None) -> int:
         "--force", action="store_true", help="overwrite an existing index database"
     )
     p.set_defaults(fn=cmd_init)
+
+    p = sub.add_parser(
+        "migrate",
+        help="upgrade an existing index to the current schema (in place, no re-index)",
+    )
+    p.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="index database (default: the standard cache index)",
+    )
+    p.set_defaults(fn=cmd_migrate)
 
     p = sub.add_parser("add-source", help="register a component")
     p.add_argument("--path", required=True, help="repo root or library header dir")

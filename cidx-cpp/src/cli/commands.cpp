@@ -399,6 +399,53 @@ int cmd_init(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// cmd_migrate (cli.py cmd_migrate): upgrade an existing index DB to the current
+// schema in place. Constructing a Storage runs the migration (e.g. v15 -> v16
+// converts symbol.kind from a TEXT name to its CXCursorKind integer); this just
+// does it deliberately and reports the before/after version. Preserves all data
+// (symbols, edges) and never re-indexes. --db targets a non-standard index.
+int cmd_migrate(const ParsedArgs &args, Context &ctx) {
+  (void)args; // --db already folded into ctx.index_path by main()
+  if (!path_exists(ctx.index_path)) {
+    *ctx.err << "error: no index database at " << ctx.index_path
+             << " (run `cidx init` / `cidx import` first)\n";
+    return 1;
+  }
+  // Read schema_version WITHOUT opening a Storage (whose ctor would migrate).
+  auto schema_version = [&]() -> std::optional<int> {
+    SqliteDb db(ctx.index_path);
+    SqliteStmt st =
+        db.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (st.step() && !st.col_is_null(0)) {
+      const std::string v = st.col_text(0);
+      if (!v.empty()) {
+        return std::stoi(v);
+      }
+    }
+    return std::nullopt;
+  };
+  auto vstr = [](const std::optional<int> &v) {
+    return v ? std::to_string(*v) : std::string("None"); // Python f"v{None}"
+  };
+  const std::optional<int> before = schema_version();
+  if (before && *before > kSchemaVersion) {
+    *ctx.err << "index at " << ctx.index_path << " is schema v" << *before
+             << ", newer than this build (v" << kSchemaVersion
+             << "); refusing to touch it\n";
+    return 1;
+  }
+  { Storage db(ctx.index_path); } // constructing Storage applies the migration
+  const std::optional<int> after = schema_version();
+  if (before == after) {
+    *ctx.out << ctx.index_path << " already at schema v" << vstr(after)
+             << "; nothing to migrate\n";
+  } else {
+    *ctx.out << "migrated " << ctx.index_path << ": schema v" << vstr(before)
+             << " -> v" << vstr(after) << "\n";
+  }
+  return 0;
+}
+
 int cmd_add_source(const ParsedArgs &args, Context &ctx) {
   const std::string kind = args.kind ? *args.kind : "repo";
   std::string path = pathutil::abspath(args.path);
@@ -2887,6 +2934,9 @@ int cmd_realias(const ParsedArgs &args, Context &ctx) {
 int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "init") {
     return cmd_init(args, ctx);
+  }
+  if (args.command == "migrate") {
+    return cmd_migrate(args, ctx);
   }
   if (args.command == "add-source") {
     return cmd_add_source(args, ctx);
