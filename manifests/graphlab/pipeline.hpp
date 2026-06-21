@@ -4,7 +4,12 @@
 
 #include "shapes.hpp"
 
+struct Client;  // forward declaration of a struct in another file.
 namespace app {
+
+struct Dashboard{
+    void draw(const Client& c);
+};
 
 // Function taking an ABSTRACT class by reference and calling its methods:
 // measure() -> Shape::area() + Shape::perimeter()  (both dynamic dispatch).

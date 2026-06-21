@@ -1,4 +1,6 @@
 // pipeline.cpp -- the deep call graph and the abstract-parameter function.
+
+#include "Client.hpp"
 #include "pipeline.hpp"
 
 namespace app {
@@ -48,6 +50,10 @@ double run_pipeline(double seed) {
     double r = stage_process(seed);   // call site #1
     r += stage_process(seed + 10.0);  // call site #2
     return r;
+}
+
+void Dashboard::draw(const Client& c) {
+    c.send("drawing dashboard");
 }
 
 } // namespace app
