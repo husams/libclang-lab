@@ -17,13 +17,11 @@ import tempfile
 
 import pytest
 
-import clang.cindex as cx
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
-from _helpers import clang_args  # noqa: E402
 
 from indexer.storage import Storage  # noqa: E402
 from indexer.clang import ast as A  # noqa: E402
+from indexer.clang import util as U  # noqa: E402
 
 try:
     from indexer.entity_rollup import materialize_entity_edges
@@ -32,10 +30,11 @@ except Exception:  # pragma: no cover
     _HAS_ROLLUP = False
 
 # All construction/destruction forms inside class methods (so they roll up to
-# the enclosing record), plus a nested record and a friend declaration. No
-# <memory> dependency: the factory form rolls up from free functions only and
-# is intentionally excluded here.
+# the enclosing record), plus a method-scoped factory (make_owned ->
+# make_unique<Widget>, create_form=6), a nested record and a friend declaration.
 SOURCE = """
+#include <memory>
+
 namespace gl {
 
 struct Widget {
@@ -53,6 +52,7 @@ struct Pool {
     void make_copy(const Widget &s) { Widget c(s); (void)c; }
     void make_move(Widget s) { Widget m(static_cast<Widget &&>(s)); (void)m; }
     void make_and_destroy(int x) { Widget *p = new Widget(x); delete p; }
+    std::unique_ptr<Widget> make_owned(int x) { return std::make_unique<Widget>(x); }
 };
 
 struct Outer {
@@ -78,9 +78,14 @@ def edges() -> dict:
         path = os.path.join(tmp, "fixture.cpp")
         with open(path, "w") as fh:
             fh.write(SOURCE)
-        tu = cx.Index.create().parse(path, args=clang_args(path) + ["-std=c++17"])
+        # Use the indexer's own parse (C++-correct -isystem ordering) so the
+        # std::make_unique factory site in <memory> resolves cleanly -- the lab's
+        # simple clang_args() puts the clang builtin -I before libc++ and trips the
+        # <cstddef> ordering gotcha for C++ TUs.
+        tu = U.parse(path, args=["-std=c++17"], check=False)
         assert not [d for d in tu.diagnostics if d.severity >= 3], (
-            "fixture source must parse cleanly"
+            "fixture source must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
         )
 
         db = Storage(os.path.join(tmp, "i.db"))
@@ -115,14 +120,28 @@ def edges() -> dict:
 
 
 def test_creates_all_forms_from_methods(edges):
-    """Pool methods construct Widget by value/temp/heap/copy/move -> creates(7)."""
+    """Pool methods construct Widget by value/temp/heap/copy/move/factory -> creates(7)."""
     rows = edges["creates"]
     assert rows, "no creates(7) rows materialized -- PR1 extraction not wired?"
     assert all(r["src"] == "Pool" and r["dst"] == "Widget" for r in rows)
     forms = {r["create_form"] for r in rows}
-    # value=3, temp=4, heap=5, copy=7, move=8 (factory=6 excluded: free fn only)
-    for f in (3, 4, 5, 7, 8):
+    # value=3, temp=4, heap=5, factory=6, copy=7, move=8
+    for f in (3, 4, 5, 6, 7, 8):
         assert f in forms, f"create_form {f} missing (got {sorted(forms)})"
+
+
+def test_creates_factory_form_from_method(edges):
+    """Pool::make_owned -> make_unique<Widget> rolls up creates(7, form=6, partial=1).
+
+    BUG 2 regression guard: the factory form (15 -> create_form 6) is only
+    rolled up from a METHOD owner. graphlab's free-function make_unique/make_shared
+    sites have no owner record, so without a method-scoped factory site this path
+    was never exercised end-to-end.
+    """
+    rows = [r for r in edges["creates"] if r["create_form"] == 6]
+    assert rows, "creates(7, create_form=6) factory roll-up missing from a method"
+    assert all(r["src"] == "Pool" and r["dst"] == "Widget" for r in rows)
+    assert all(r["partial"] == 1 for r in rows), "factory creates must be partial=1"
 
 
 def test_destroys_from_method(edges):

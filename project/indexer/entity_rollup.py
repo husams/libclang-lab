@@ -94,6 +94,37 @@ _ACCESS_INT = {"public": 0, "protected": 1, "private": 2}
 
 
 # ---------------------------------------------------------------------------
+# Template-instance collapse (ADR-008 decision 6 / OQ-3)
+# ---------------------------------------------------------------------------
+
+def _collapse_to_primary(conn, sym_id: int) -> int:
+    """Map a template instance/specialization symbol to its primary template.
+
+    At entity (UML/ER) altitude `Foo<int>` and `Foo<double>` are NOT distinct
+    design entities -- they collapse onto the primary template `Foo`.  Both
+    the Layer-0 ``instantiates(5)`` and ``specializes(4)`` edges point
+    instance -> primary (see clang/ast.py), so we follow an outgoing 4/5 edge
+    until we reach a symbol with no such edge (the primary).
+
+    Returns ``sym_id`` unchanged when it is not an instance/specialization.
+    A visited-set guards against any pathological cycle.
+    """
+    seen: set[int] = set()
+    cur = sym_id
+    while cur not in seen:
+        seen.add(cur)
+        row = conn.execute(
+            "SELECT dst_id FROM edge WHERE src_id = ? AND kind IN (4, 5) "
+            "ORDER BY kind, dst_id LIMIT 1",
+            (cur,),
+        ).fetchone()
+        if row is None:
+            break
+        cur = row[0]
+    return cur
+
+
+# ---------------------------------------------------------------------------
 # Interface test
 # ---------------------------------------------------------------------------
 
@@ -310,6 +341,12 @@ def _materialise_inheritance(db: "Storage") -> None:
         is_virtual = r[3] or 0
         access = int(raw_access) if raw_access is not None else 0
 
+        # Collapse template instances/specializations onto their primary.
+        src_id = _collapse_to_primary(conn, src_id)
+        dst_id = _collapse_to_primary(conn, dst_id)
+        if src_id == dst_id:
+            continue  # no self-edge
+
         if _is_interface(db, dst_id):
             ek = _EK_REALIZES
         else:
@@ -347,6 +384,12 @@ def _materialise_specializes(db: "Storage") -> None:
 
     for r in rows:
         src_id, dst_id = r[0], r[1]
+        # Collapse onto primary; an instance->primary specializes edge becomes a
+        # self-edge and is suppressed (no bogus Wrapper->Wrapper row).
+        src_id = _collapse_to_primary(conn, src_id)
+        dst_id = _collapse_to_primary(conn, dst_id)
+        if src_id == dst_id:
+            continue
         conn.execute(
             "INSERT INTO entity_edge "
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -418,6 +461,12 @@ def _materialise_field_relations(db: "Storage") -> None:
         ek, mult = _classify_field_type(type_info)
         access_int = _ACCESS_INT.get(raw_access or "public", 0)
 
+        # Collapse both endpoints onto their primary template.
+        owner_pid = _collapse_to_primary(conn, owner_id)
+        ref_pid = _collapse_to_primary(conn, ref_entity_id)
+        if owner_pid == ref_pid:
+            continue
+
         conn.execute(
             "INSERT INTO entity_edge "
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -425,7 +474,7 @@ def _materialise_field_relations(db: "Storage") -> None:
             "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
             "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
             "  count = entity_edge.count + 1",
-            (owner_id, ref_entity_id, ek, field_id, mult, access_int),
+            (owner_pid, ref_pid, ek, field_id, mult, access_int),
         )
 
 
@@ -497,6 +546,12 @@ def _materialise_creates_destroys(db: "Storage") -> None:
         else:
             target_entity_id = parent_row[0]
 
+        # Collapse both endpoints onto their primary template.
+        owner_entity_id = _collapse_to_primary(conn, owner_entity_id)
+        target_entity_id = _collapse_to_primary(conn, target_entity_id)
+        if owner_entity_id == target_entity_id:
+            continue
+
         if l0_kind == destroy_kind:
             # destroys(9) — no create_form
             conn.execute(
@@ -556,8 +611,12 @@ def _materialise_creates_destroys(db: "Storage") -> None:
         ret_entity_id = _resolve_entity_from_type(conn, ret_type)
         if ret_entity_id is None:
             continue
+
+        # Collapse both endpoints onto their primary template.
+        owner_pid = _collapse_to_primary(conn, owner_entity_id)
+        ret_pid = _collapse_to_primary(conn, ret_entity_id)
         # Same entity as owner → skip (constructors return own type)
-        if ret_entity_id == owner_entity_id:
+        if ret_pid == owner_pid:
             continue
 
         conn.execute(
@@ -567,7 +626,7 @@ def _materialise_creates_destroys(db: "Storage") -> None:
             "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, 2, 1) "
             "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
             "  count = entity_edge.count + 1",
-            (owner_entity_id, ret_entity_id),
+            (owner_pid, ret_pid),
         )
 
 
@@ -624,6 +683,9 @@ def _materialise_uses(db: "Storage") -> None:
             continue
         dst_entity_id = callee_owner[0]
 
+        # Collapse both endpoints onto their primary template.
+        src_entity_id = _collapse_to_primary(conn, src_entity_id)
+        dst_entity_id = _collapse_to_primary(conn, dst_entity_id)
         if src_entity_id == dst_entity_id:
             continue  # self-use: not emitted
 
@@ -659,6 +721,10 @@ def _materialise_nests(db: "Storage") -> None:
 
     for r in rows:
         src_id, dst_id = r[0], r[1]
+        src_id = _collapse_to_primary(conn, src_id)
+        dst_id = _collapse_to_primary(conn, dst_id)
+        if src_id == dst_id:
+            continue
         conn.execute(
             "INSERT INTO entity_edge "
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -690,6 +756,10 @@ def _materialise_befriends(db: "Storage") -> None:
 
     for r in rows:
         src_id, dst_id = r[0], r[1]
+        src_id = _collapse_to_primary(conn, src_id)
+        dst_id = _collapse_to_primary(conn, dst_id)
+        if src_id == dst_id:
+            continue
         conn.execute(
             "INSERT INTO entity_edge "
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "

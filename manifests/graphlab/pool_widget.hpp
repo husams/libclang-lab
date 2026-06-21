@@ -5,12 +5,15 @@
 // can roll them up from the enclosing method's owner record.
 //
 // Widget: a minimal record with default/value/copy/move ctors and a dtor.
-// Pool:   a manager record whose methods exercise all construction forms.
-//
-// Nothing here depends on <memory> — make_unique is tested in pool_widget.cpp
-// which can #include <memory>.
+// Pool:   a manager record whose methods exercise all construction forms,
+//         including a method-scoped factory (make_owned -> make_unique<Widget>)
+//         so PR2 rolls up creates(7, create_form=6, partial=1) from a METHOD
+//         owner. (The free-function factories in pool_widget.cpp have no owner
+//         record, so they never exercise the factory roll-up end-to-end.)
 
 #pragma once
+
+#include <memory>
 
 namespace graphlab {
 
@@ -53,6 +56,13 @@ struct Pool {
     void make_and_destroy(int x) {
         Widget *p = new Widget(x);
         delete p;
+    }
+
+    // factory-construct (kind 15) inside a METHOD: std::make_unique<Widget>(x).
+    // Owner record = Pool, so PR2 rolls up creates(7, create_form=6, partial=1)
+    // Pool -> Widget. This is the only method-scoped factory site in the corpus.
+    std::unique_ptr<Widget> make_owned(int x) {
+        return std::make_unique<Widget>(x);
     }
 };
 
