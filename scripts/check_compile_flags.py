@@ -86,6 +86,13 @@ def _fmt(flags):
     return " ".join(flags) if flags else "(none)"
 
 
+def _diff_sig(flags, differing):
+    """Per-group signature over the varying flags: [+]has / [-]lacks (vs the union)."""
+    have = set(flags)
+    sig = [("[+]" + f) if f in have else ("[-]" + f) for f in differing]
+    return " ".join(sig) if sig else "(no differences)"
+
+
 def write_report(path, db, groups, common, differing):
     n_tu = sum(len(f) for f in groups.values())
     verdict = "CONSISTENT" if len(groups) == 1 else "INCONSISTENT"
@@ -108,16 +115,17 @@ def write_report(path, db, groups, common, differing):
         f"- **Common to all TUs:** `{_fmt(common)}`",
         f"- **Flags that vary across groups:** `{_fmt(differing)}`",
         "",
-        "| Group | # TUs | Flags | Extra vs common |",
-        "| ----- | ----- | ----- | --------------- |",
+        "Per group, only the *varying* flags are shown: `[+]` = present, `[-]` = absent.",
+        "",
+        "| Group | # TUs | Differing flags ([+]present / [-]absent) |",
+        "| ----- | ----- | ---------------------------------------- |",
     ]
     for i, (flags, files) in enumerate(groups.items(), 1):
-        extra = tuple(f for f in flags if f not in common)
-        lines.append(f"| {i} | {len(files)} | `{_fmt(flags)}` | `{_fmt(extra)}` |")
+        lines.append(f"| {i} | {len(files)} | `{_diff_sig(flags, differing)}` |")
     lines.append("")
     lines.append("## Groups in detail")
     for i, (flags, files) in enumerate(groups.items(), 1):
-        lines += ["", f"### Group {i} — `{_fmt(flags)}` ({len(files)} TUs)", ""]
+        lines += ["", f"### Group {i} — `{_diff_sig(flags, differing)}` ({len(files)} TUs)", ""]
         lines += [f"- `{f}`" for f in files]
     lines.append("")
     with open(path, "w") as fh:
@@ -158,8 +166,9 @@ def main():
           f"verdict: {'CONSISTENT' if consistent else 'INCONSISTENT'}")
     print(f"common     : {_fmt(common)}")
     print(f"differing  : {_fmt(differing)}")
+    print("groups (only the varying flags; [+]present / [-]absent):")
     for i, (flags, files) in enumerate(groups.items(), 1):
-        print(f"  [{i}] {len(files):3d} TUs  {_fmt(flags)}")
+        print(f"  [{i}] {len(files):4d} TUs  {_diff_sig(flags, differing)}")
     print(f"report     : {args.out}")
     if not consistent:
         print("=> a single shared PCH is NOT valid (one per group, or reconcile flags).")
