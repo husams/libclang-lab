@@ -532,6 +532,22 @@ def _log_resource_usage(filename: str, tu: cx.TranslationUnit) -> None:
     )
 
 
+def _system_pch_args(cpp: bool, driver: str | None) -> list[str]:
+    """`['-include-pch', <path>]` when a compatible shared system PCH should be
+    prepended to this parse, else `[]`.
+
+    Delegates the compatibility decision to `indexer.pch.consume_args` (lazy
+    import to keep the clang layer independent of the cache layer at module
+    load). Any failure yields `[]` so the PCH is purely best-effort and can
+    never break a parse on this hot path."""
+    try:
+        from .. import pch
+
+        return pch.consume_args(cpp, driver)
+    except Exception:  # noqa: BLE001  (best-effort acceleration; never crash)
+        return []
+
+
 def parse(
     filename: str,
     args: Sequence[str] = (),
@@ -547,15 +563,41 @@ def parse(
     `driver` to replicate that compiler's search paths instead of the host
     defaults. With check=True (default), raise ClangParseError if the parse
     has fatal diagnostics; pass check=False to inspect a broken TU yourself.
+
+    When a compatible shared system PCH exists (see `indexer.pch`), it is
+    prepended as `-include-pch` to skip re-lexing the heavy STL/system headers.
+    That is a transparent speed-up -- the AST is identical -- but if the PCH
+    turns out incompatible with this TU (a fatal), the parse is retried once
+    WITHOUT it so a stale PCH can only slow indexing, never break it.
     """
+    cpp = is_cpp(filename, args)
     # -ferror-limit=0 lifts clang's default 20-error cap: hitting the cap
     # emits a FATAL 'too many errors emitted, stopping now' that aborts an
     # otherwise indexable TU while naming none of the real errors.
-    flags = (
+    base = (
         list(args)
-        + toolchain_flags(cpp=is_cpp(filename, args), driver=driver)
+        + toolchain_flags(cpp=cpp, driver=driver)
         + ["-ferror-limit=0"]
     )
+    pch = _system_pch_args(cpp, driver)
+    try:
+        return _do_parse(filename, pch + base, options, check)
+    except ClangParseError:
+        if pch:
+            _log.warning(
+                "%s: parse with the shared system PCH failed; retrying without it",
+                filename,
+            )
+            return _do_parse(filename, base, options, check)
+        raise
+
+
+def _do_parse(
+    filename: str, flags: list[str], options: int, check: bool
+) -> cx.TranslationUnit:
+    """Run one libclang parse with the fully-assembled `flags` and apply the
+    fatal-diagnostic check / memory reporting. The PCH-injection and retry
+    policy lives in `parse`; this is the single-shot core."""
     index = cx.Index.create()
     try:
         tu = index.parse(filename, args=flags, options=options)

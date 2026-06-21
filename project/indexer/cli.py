@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.16.0"
+VERSION = "0.17.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -565,6 +565,34 @@ def cmd_resolve(args) -> int:
         stubs, cross = db.resolve_pass()
     print(f"resolve: {stubs} still-stub, {cross} cross-repo edge(s)")
     return 0
+
+
+def cmd_pch_build(args) -> int:
+    """`cidx pch build`: build & cache the shared system/C++ PCH."""
+    from indexer import pch
+
+    return pch.cmd_build(
+        args.index,
+        add_flags=args.add_flags,
+        add_headers=args.add_headers,
+        driver=args.driver,
+        std=args.std,
+        force=args.force,
+    )
+
+
+def cmd_pch_status(args) -> int:
+    """`cidx pch status`: show the cached system PCH (size, flags, validity)."""
+    from indexer import pch
+
+    return pch.cmd_status()
+
+
+def cmd_pch_clear(args) -> int:
+    """`cidx pch clear`: remove the cached system PCH + sidecar + umbrella."""
+    from indexer import pch
+
+    return pch.cmd_clear()
 
 
 # -- set ----------------------------------------------------------------------
@@ -1761,6 +1789,59 @@ def main(argv=None) -> int:
         "resolve", help="finalize cross-repo edges and roll up edge counts"
     )
     p.set_defaults(fn=cmd_resolve)
+
+    # -- pch: build / status / clear ------------------------------------------
+    p = sub.add_parser(
+        "pch",
+        help="build & cache one shared system/C++ PCH to speed up indexing",
+    )
+    psub = p.add_subparsers(dest="pch_action", required=True)
+
+    q = psub.add_parser(
+        "build", help="compile a system/C++ umbrella header into a cached PCH"
+    )
+    q.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="index database to derive the common C++ flags from "
+        "(default: the standard cache index)",
+    )
+    q.add_argument(
+        "--add",
+        dest="add_flags",
+        action="append",
+        default=[],
+        metavar="FLAG",
+        help="extra compile flag to bake into the PCH (repeatable)",
+    )
+    q.add_argument(
+        "--include",
+        dest="add_headers",
+        action="append",
+        default=[],
+        metavar="HEADER",
+        help="extra header to add to the umbrella, e.g. boost/optional.hpp "
+        "(repeatable)",
+    )
+    q.add_argument(
+        "--driver",
+        help="compiler driver to replicate search paths from "
+        "(default: the index's dominant C++ driver)",
+    )
+    q.add_argument("--std", help="override the C++ standard, e.g. c++17")
+    q.add_argument(
+        "--force", action="store_true", help="rebuild even if a PCH already exists"
+    )
+    q.set_defaults(fn=cmd_pch_build)
+
+    q = psub.add_parser(
+        "status", help="show the cached system PCH (size, flags, validity)"
+    )
+    q.set_defaults(fn=cmd_pch_status)
+
+    q = psub.add_parser("clear", help="remove the cached system PCH")
+    q.set_defaults(fn=cmd_pch_clear)
 
     # -- component: show / set-version ----------------------------------------
     p = sub.add_parser("component", help="inspect or modify a component")
