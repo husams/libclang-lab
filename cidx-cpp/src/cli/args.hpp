@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.16.0";
+inline constexpr const char *kVersion = "0.17.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -103,6 +103,13 @@ struct ParsedArgs {
 
   // -- aliasing (v0.6.0) fields ----------------------------------------------
   bool no_alias = false; // import --no-alias (skip alias_options encoding)
+
+  // -- pch sub-command fields (cidx pch build|status|clear, v0.17.0) ----------
+  // build|status|clear is carried in `what`; --db in index_db; --force in force.
+  std::vector<std::string> pch_add_flags;   // pch build --add FLAG (repeatable)
+  std::vector<std::string> pch_add_headers; // pch build --include HEADER (repeat)
+  std::optional<std::string> pch_driver;    // pch build --driver DRIVER
+  std::optional<std::string> pch_std;       // pch build --std STD
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

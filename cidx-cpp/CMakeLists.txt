@@ -257,6 +257,7 @@ add_library(cidx_core STATIC
   src/clangx/libclang.cpp
   src/clangx/toolchain.cpp
   src/clangx/parse.cpp
+  src/clangx/pch.cpp
   src/clangx/ast.cpp
   src/clangx/ast_query.cpp
   src/astcache/astcache.cpp

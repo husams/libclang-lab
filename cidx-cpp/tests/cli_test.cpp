@@ -322,7 +322,8 @@ struct GoldFixture {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,component,label,set,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,"
+    "set,"
     "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
@@ -368,6 +369,8 @@ const char kListFilesUsage[] =
     "                       --pending]\n"
     "                       [pattern]\n";
 
+const char kPchUsage[] = "usage: cidx pch [-h] {build,status,clear} ...\n";
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -391,8 +394,53 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, migrate, add-source, import, realias, index, resolve, "
-            "component, label, set, file, dump-compile-commands, search, show, "
+            "pch, component, label, set, file, dump-compile-commands, search, "
+            "show, "
             "list, ls, delete, graph, ast)\n");
+}
+
+TEST_CASE("args: pch build/status/clear parse + help (v0.17.0)") {
+  // build: --db, repeatable --add/--include, --driver, --std, --force
+  // option-looking values (-DA) need the inline = form -- argparse rejects
+  // `--add -DA` as "expected one argument" (Python and C++ alike).
+  cli::ParsedArgs pa = cli::parse_args(
+      {"pch", "build", "--db", "/x.db", "--add=-DA", "--add=-DB",
+       "--include=boost/optional.hpp", "--driver", "g++", "--std", "c++20",
+       "--force"});
+  CHECK(pa.command == "pch");
+  CHECK(pa.what == "build");
+  CHECK(pa.index_db == std::optional<std::string>("/x.db"));
+  CHECK(pa.pch_add_flags == std::vector<std::string>{"-DA", "-DB"});
+  CHECK(pa.pch_add_headers ==
+        std::vector<std::string>{"boost/optional.hpp"});
+  CHECK(pa.pch_driver == std::optional<std::string>("g++"));
+  CHECK(pa.pch_std == std::optional<std::string>("c++20"));
+  CHECK(pa.force);
+
+  CHECK(cli::parse_args({"pch", "status"}).what == "status");
+  CHECK(cli::parse_args({"pch", "clear"}).what == "clear");
+
+  // help text on each leaf
+  pa = cli::parse_args({"pch", "--help"});
+  REQUIRE(pa.help_text);
+  CHECK(pa.help_text->find("{build,status,clear}") != std::string::npos);
+  pa = cli::parse_args({"pch", "build", "-h"});
+  REQUIRE(pa.help_text);
+  CHECK(pa.help_text->find("extra header to add to the umbrella") !=
+        std::string::npos);
+
+  // missing / invalid sub-action -> exit 2 with argparse parity
+  ParseFail mf = parse_fail({"pch"});
+  CHECK(mf.code == 2);
+  CHECK(mf.msg ==
+        std::string(kPchUsage) +
+            "cidx pch: error: the following arguments are required: "
+            "pch_action\n");
+  ParseFail bf = parse_fail({"pch", "bogus"});
+  CHECK(bf.code == 2);
+  CHECK(bf.msg == std::string(kPchUsage) +
+                      "cidx pch: error: argument pch_action: invalid choice: "
+                      "'bogus' (choose from build, status, clear)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -785,7 +833,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.16.0");
+  CHECK(std::string(cli::kVersion) == "0.17.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -809,7 +857,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "\n"
           "positional arguments:\n"
           "  "
-          "{init,migrate,add-source,import,realias,index,resolve,component,label,"
+          "{init,migrate,add-source,import,realias,index,resolve,pch,component,"
+          "label,"
           "set,file,"
           "dump-compile-commands,search,show,list,ls,delete,graph,ast}"
           "\n"
@@ -824,6 +873,9 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "    index               index imported C/C++ files\n"
           "    resolve             finalize cross-repo edges and roll up edge "
           "counts\n"
+          "    pch                 build & cache one shared system/C++ PCH to "
+          "speed up\n"
+          "                        indexing\n"
           "    component           inspect or modify a component\n"
           "    label               manage include/arg label registry\n"
           "    set                 set a mutable file attribute (e.g. pending "
