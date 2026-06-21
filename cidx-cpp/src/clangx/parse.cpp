@@ -7,6 +7,7 @@
 #include <cstddef>
 
 #include "clangx/libclang.hpp"
+#include "clangx/pch.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
 
@@ -234,7 +235,29 @@ ParsedTu Parser::parse(const std::string &abs_path,
   // real libclang major instead of the unloaded-0 fallback (S04 handoff).
   lib.load();
 
-  const std::vector<std::string> flags = final_args(abs_path, args, driver);
+  const bool cpp = Toolchain::is_cpp(abs_path, args);
+  const std::vector<std::string> base = final_args(abs_path, args, driver);
+  // pch.py: prepend a compatible shared system PCH; on a PCH-induced fatal,
+  // retry ONCE without it so a stale/mismatched PCH can only slow indexing.
+  const std::vector<std::string> pchf = pch::consume_args(cpp, driver);
+  if (!pchf.empty()) {
+    std::vector<std::string> with = pchf;
+    with.insert(with.end(), base.begin(), base.end());
+    try {
+      return run_parse(abs_path, with);
+    } catch (const ClangParseError &) {
+      log_.warning(kLogName, abs_path +
+                                 ": parse with the shared system PCH failed; "
+                                 "retrying without it");
+      return run_parse(abs_path, base);
+    }
+  }
+  return run_parse(abs_path, base);
+}
+
+ParsedTu Parser::run_parse(const std::string &abs_path,
+                           const std::vector<std::string> &flags) {
+  LibClang &lib = LibClang::instance();
   std::vector<const char *> argv;
   argv.reserve(flags.size());
   for (const std::string &f : flags) {

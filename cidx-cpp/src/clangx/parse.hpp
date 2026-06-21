@@ -88,6 +88,12 @@ public:
                                       const std::optional<std::string> &driver);
 
 private:
+  // One libclang parse with the fully-assembled `flags` + the diagnostic
+  // policy / memory reporting. PCH injection + retry policy lives in parse();
+  // this is the single-shot core (mirrors util.py _do_parse).
+  ParsedTu run_parse(const std::string &abs_path,
+                     const std::vector<std::string> &flags);
+
   // util.py:432-455 -- abort level Fatal (default) or Error (CIDX_STRICT=1,
   // G6); see the header comment for the fatal/tolerated log shapes.
   void apply_diagnostic_policy(CXTranslationUnit tu, const std::string &path,

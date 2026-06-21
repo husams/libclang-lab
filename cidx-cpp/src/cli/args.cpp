@@ -23,21 +23,21 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,migrate,add-source,import,realias,index,resolve,component,label,set,"
+    "  {init,migrate,add-source,import,realias,index,resolve,pch,component,label,set,"
     "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
@@ -50,6 +50,8 @@ const char kTopHelp[] =
     "the registry\n"
     "    index               index imported C/C++ files\n"
     "    resolve             finalize cross-repo edges and roll up edge counts\n"
+    "    pch                 build & cache one shared system/C++ PCH to speed up\n"
+    "                        indexing\n"
     "    component           inspect or modify a component\n"
     "    label               manage include/arg label registry\n"
     "    set                 set a mutable file attribute (e.g. pending "
@@ -162,6 +164,59 @@ const char kResolveUsage[] =
 
 const char kResolveHelp[] =
     "usage: cidx resolve [-h]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n";
+
+// -- pch (v0.17.0) -----------------------------------------------------------
+const char kPchUsage[] = "usage: cidx pch [-h] {build,status,clear} ...\n";
+
+const char kPchHelp[] =
+    "usage: cidx pch [-h] {build,status,clear} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {build,status,clear}\n"
+    "    build               compile a system/C++ umbrella header into a cached "
+    "PCH\n"
+    "    status              show the cached system PCH (size, flags, validity)\n"
+    "    clear               remove the cached system PCH\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kPchBuildUsage[] =
+    "usage: cidx pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
+    "                      [--driver DRIVER] [--std STD] [--force]\n";
+
+const char kPchBuildHelp[] =
+    "usage: cidx pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
+    "                      [--driver DRIVER] [--std STD] [--force]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help        show this help message and exit\n"
+    "  --db PATH         index database to derive the common C++ flags from\n"
+    "                    (default: the standard cache index)\n"
+    "  --add FLAG        extra compile flag to bake into the PCH (repeatable)\n"
+    "  --include HEADER  extra header to add to the umbrella, e.g.\n"
+    "                    boost/optional.hpp (repeatable)\n"
+    "  --driver DRIVER   compiler driver to replicate search paths from "
+    "(default:\n"
+    "                    the index's dominant C++ driver)\n"
+    "  --std STD         override the C++ standard, e.g. c++17\n"
+    "  --force           rebuild even if a PCH already exists\n";
+
+const char kPchStatusUsage[] = "usage: cidx pch status [-h]\n";
+
+const char kPchStatusHelp[] =
+    "usage: cidx pch status [-h]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n";
+
+const char kPchClearUsage[] = "usage: cidx pch clear [-h]\n";
+
+const char kPchClearHelp[] =
+    "usage: cidx pch clear [-h]\n"
     "\n"
     "options:\n"
     "  -h, --help  show this help message and exit\n";
@@ -1118,10 +1173,11 @@ const std::vector<std::string> kSymbolKinds = {
     "variable"};
 const std::vector<std::string> kCommands = {
     "init",      "migrate",    "add-source",            "import",
-    "realias",   "index",      "resolve",               "component",
-    "label",     "set",        "file",                  "dump-compile-commands",
-    "search",    "show",       "list",                  "ls",
-    "delete",    "graph",      "ast"};
+    "realias",   "index",      "resolve",               "pch",
+    "component", "label",      "set",                   "file",
+    "dump-compile-commands",   "search",                "show",
+    "list",      "ls",         "delete",                "graph",
+    "ast"};
 const std::vector<std::string> kGraphWhats = {
     "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
     "dispatch"};
@@ -1146,7 +1202,8 @@ struct OptSpec {
   ValueKind value;      // kNone = store_true flag
   const char *err_name; // argparse's name in messages: "--component/-c"
   const std::vector<std::string> *choices = nullptr;
-  int mutex = 0; // mutually-exclusive group id; 0 = none
+  int mutex = 0;            // mutually-exclusive group id; 0 = none
+  bool repeatable = false;  // argparse action="append" (collect every value)
 };
 
 struct Spec {
@@ -1168,6 +1225,7 @@ struct Spec {
 
 struct ParseState {
   std::map<std::string, std::string> values; // long name -> raw value
+  std::map<std::string, std::vector<std::string>> multi; // append-action values
   std::map<std::string, bool> flags;
   std::vector<std::string> positionals;
   std::vector<std::string> rest;
@@ -1413,6 +1471,9 @@ ParseState parse_leaf(const Spec &spec, const std::vector<std::string> &tokens,
       }
       check_value(spec, *opt, val);
       st.values[opt->name] = val; // repeated flags: last one wins (argparse)
+      if (opt->repeatable) {
+        st.multi[opt->name].push_back(val); // append action: keep every value
+      }
       ++i;
       continue;
     }
@@ -1475,6 +1536,15 @@ std::optional<std::string> opt_value(const ParseState &st, const char *name) {
   auto it = st.values.find(name);
   if (it == st.values.end()) {
     return std::nullopt;
+  }
+  return it->second;
+}
+
+// Every value of an append-action option (`--add`, `--include`), in order.
+std::vector<std::string> opt_values(const ParseState &st, const char *name) {
+  auto it = st.multi.find(name);
+  if (it == st.multi.end()) {
+    return {};
   }
   return it->second;
 }
@@ -1643,6 +1713,34 @@ const Spec kResolveSpec = {
     {},
     false,
     {},
+};
+
+// pch (v0.17.0): build|status|clear is a sub-action carried in `what`.
+const std::vector<std::string> kPchWhats = {"build", "status", "clear"};
+
+const Spec kPchBuildSpec = {
+    "cidx pch build",
+    kPchBuildUsage,
+    kPchBuildHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db"},
+        {"--add", '\0', ValueKind::kString, "--add", nullptr, 0, true},
+        {"--include", '\0', ValueKind::kString, "--include", nullptr, 0, true},
+        {"--driver", '\0', ValueKind::kString, "--driver"},
+        {"--std", '\0', ValueKind::kString, "--std"},
+        {"--force", '\0', ValueKind::kNone, "--force"},
+    },
+    {},
+    false,
+    {},
+};
+
+const Spec kPchStatusSpec = {
+    "cidx pch status", kPchStatusUsage, kPchStatusHelp, {}, {}, false, {},
+};
+
+const Spec kPchClearSpec = {
+    "cidx pch clear", kPchClearUsage, kPchClearHelp, {}, {}, false, {},
 };
 
 const Spec kSetSpec = {
@@ -2237,6 +2335,48 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     if (st.help) {
       pa.help_text = kResolveHelp;
       return pa;
+    }
+  } else if (pa.command == "pch") {
+    // -- pch sub-command (v0.17.0): build|status|clear ------------------------
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kPchHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kPchUsage, "cidx pch",
+           "the following arguments are required: pch_action");
+    }
+    if (!contains(kPchWhats, *what.command)) {
+      fail(kPchUsage, "cidx pch",
+           "argument pch_action: invalid choice: '" + *what.command +
+               "' (choose from " + join(kPchWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+    if (pa.what == "build") {
+      ParseState st = parse_leaf(kPchBuildSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kPchBuildHelp;
+        return pa;
+      }
+      pa.index_db = opt_value(st, "--db");
+      pa.pch_add_flags = opt_values(st, "--add");
+      pa.pch_add_headers = opt_values(st, "--include");
+      pa.pch_driver = opt_value(st, "--driver");
+      pa.pch_std = opt_value(st, "--std");
+      pa.force = st.flags.count("--force") != 0;
+    } else if (pa.what == "status") {
+      ParseState st = parse_leaf(kPchStatusSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kPchStatusHelp;
+        return pa;
+      }
+    } else { // clear
+      ParseState st = parse_leaf(kPchClearSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kPchClearHelp;
+        return pa;
+      }
     }
   } else if (pa.command == "set") {
     ParseState st = parse_leaf(kSetSpec, argv, i, extras);

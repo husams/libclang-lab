@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -26,6 +27,7 @@
 #include "clangx/ast_query.hpp"
 #include "clangx/libclang.hpp"
 #include "clangx/parse.hpp"
+#include "clangx/pch.hpp"
 #include "clangx/toolchain.hpp"
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
@@ -1240,6 +1242,104 @@ int cmd_resolve(const ParsedArgs &args, Context &ctx) {
   *ctx.out << "resolve: " << stubs << " still-stub, "
            << cross.size() << " cross-repo edge(s)\n";
   return 0;
+}
+
+// cmd_pch_build (pch.py cmd_build) -- derive the common C++ flags + dominant
+// driver from the index, then compile the umbrella into a cached PCH.
+int cmd_pch_build(const ParsedArgs &args, Context &ctx) {
+  Logger &log = ctx.logger != nullptr ? *ctx.logger : Logger::root();
+  {
+    struct stat st {};
+    if (::stat(pch::pch_path().c_str(), &st) == 0 && !args.force) {
+      *ctx.err << "system PCH already exists: " << pch::pch_path()
+               << " (use --force to rebuild)\n";
+      return 1;
+    }
+  }
+
+  std::optional<std::set<std::string>> common;
+  std::map<std::optional<std::string>, int> driver_counts;
+  int n_cpp = 0;
+  {
+    Storage db(ctx.index_path);
+    for (const std::pair<File, std::string> &pr : db.list_files()) {
+      const File &rec = pr.first;
+      const std::string &path = pr.second;
+      if (!rec.compile_options || rec.compile_options->empty()) {
+        continue;
+      }
+      const std::vector<std::string> opts = CompileDb::resolve_options(
+          CompileDb::sanitize(*rec.compile_options),
+          [&db](const std::string &n) { return db.get_alias(n); });
+      if (!Toolchain::is_cpp(path, opts)) {
+        continue;
+      }
+      ++n_cpp;
+      const std::vector<std::string> rel = pch::pch_relevant(opts);
+      std::set<std::string> s(rel.begin(), rel.end());
+      if (!common) {
+        common = std::move(s);
+      } else {
+        std::set<std::string> inter;
+        std::set_intersection(common->begin(), common->end(), s.begin(),
+                              s.end(),
+                              std::inserter(inter, inter.begin()));
+        common = std::move(inter);
+      }
+      ++driver_counts[rec.driver];
+    }
+  }
+  if (n_cpp == 0) {
+    *ctx.err << "error: no C++ translation units in the index; nothing to "
+                "build a C++ PCH from\n";
+    return 1;
+  }
+
+  std::optional<std::string> dom_driver;
+  int best = -1;
+  for (const auto &kv : driver_counts) {
+    if (kv.second > best) {
+      best = kv.second;
+      dom_driver = kv.first;
+    }
+  }
+  const std::optional<std::string> driver =
+      args.pch_driver ? args.pch_driver : dom_driver;
+
+  std::vector<std::string> flags(common->begin(), common->end()); // sorted set
+  if (args.pch_std) {
+    std::vector<std::string> kept;
+    for (const std::string &f : flags) {
+      if (f.rfind("-std=", 0) != 0) {
+        kept.push_back(f);
+      }
+    }
+    kept.push_back("-std=" + *args.pch_std);
+    flags = std::move(kept);
+  }
+  for (const std::string &f : args.pch_add_flags) {
+    flags.push_back(f);
+  }
+
+  std::vector<std::string> headers = pch::default_headers();
+  for (const std::string &h : args.pch_add_headers) {
+    headers.push_back(h);
+  }
+
+  Toolchain toolchain(log);
+  Parser parser(toolchain, log);
+  return pch::build_pch(parser, flags, headers, driver, n_cpp, *ctx.out,
+                        *ctx.err);
+}
+
+int cmd_pch_status(const ParsedArgs &args, Context &ctx) {
+  (void)args;
+  return pch::status_pch(*ctx.out);
+}
+
+int cmd_pch_clear(const ParsedArgs &args, Context &ctx) {
+  (void)args;
+  return pch::clear_pch(*ctx.out);
 }
 
 namespace {
@@ -2952,6 +3052,15 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   }
   if (args.command == "resolve") {
     return cmd_resolve(args, ctx);
+  }
+  if (args.command == "pch") {
+    if (args.what == "build") {
+      return cmd_pch_build(args, ctx);
+    }
+    if (args.what == "status") {
+      return cmd_pch_status(args, ctx);
+    }
+    return cmd_pch_clear(args, ctx);
   }
   if (args.command == "set") {
     return cmd_set(args, ctx);
