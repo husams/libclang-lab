@@ -1,6 +1,9 @@
 """Tests for indexer.relink -- published-library -> cloned-repo include rewrite.
 
 Hermetic: exercises the pure transforms plus a storage round-trip; no libclang.
+
+DEFAULT output is the full cloned absolute path; --alias / alias=True opts into
+the portable <component> token.
 """
 
 from __future__ import annotations
@@ -23,19 +26,17 @@ def _frag_map(*comps):
     return relink.build_fragment_map(comps)
 
 
-def test_relink_value_published_to_alias():
+def test_relink_value_default_is_full_cloned_path():
+    """Default (no alias): the published path becomes the FULL cloned path."""
+    fm = _frag_map(Component(_NAME, _CLONE))
+    assert relink.relink_value(_PUB, fm) == _CLONE + "/src/bom/generate/cat"
+
+
+def test_relink_value_alias_opt_in():
     fm = _frag_map(Component(_NAME, _CLONE))
     assert (
-        relink.relink_value(_PUB, fm)
+        relink.relink_value(_PUB, fm, alias=True)
         == "<dcs::cml::coredata::flight>/src/bom/generate/cat"
-    )
-
-
-def test_relink_value_published_to_absolute_clone():
-    fm = _frag_map(Component(_NAME, _CLONE))
-    assert (
-        relink.relink_value(_PUB, fm, alias=False)
-        == _CLONE + "/src/bom/generate/cat"
     )
 
 
@@ -48,7 +49,7 @@ def test_relink_value_requires_version_by_default():
     assert relink.relink_value(no_ver, fm) == no_ver  # unchanged
     assert (
         relink.relink_value(no_ver, fm, require_version=False)
-        == "<dcs::cml::coredata::flight>/src/bom"
+        == _CLONE + "/src/bom"  # full cloned path
     )
 
 
@@ -69,10 +70,7 @@ def test_relink_longest_fragment_wins():
         Component("dcs::cml::coredata", "/clone/parent"),
         Component(_NAME, _CLONE),
     )
-    assert (
-        relink.relink_value(_PUB, fm)
-        == "<dcs::cml::coredata::flight>/src/bom/generate/cat"
-    )
+    assert relink.relink_value(_PUB, fm) == _CLONE + "/src/bom/generate/cat"
 
 
 def test_relink_options_space_and_glued_forms():
@@ -80,9 +78,9 @@ def test_relink_options_space_and_glued_forms():
     opts = ["-I", _PUB, "-DKEEP", "-I" + _PUB, "-isystem", "/sys/inc"]
     assert relink.relink_options(opts, fm) == [
         "-I",
-        "<dcs::cml::coredata::flight>/src/bom/generate/cat",
+        _CLONE + "/src/bom/generate/cat",
         "-DKEEP",
-        "-I<dcs::cml::coredata::flight>/src/bom/generate/cat",
+        "-I" + _CLONE + "/src/bom/generate/cat",
         "-isystem",
         "/sys/inc",
     ]
@@ -106,7 +104,36 @@ def test_run_end_to_end_rewrites_stored_options(tmp_path):
         index = db_path
         component = None
         apply = True
-        absolute = False
+        alias = False  # default: full cloned path
+        no_require_version = False
+        verbose = False
+
+    assert relink.run(A()) == 0
+    with Storage(db_path) as db:
+        opts = [o for f, _ in db.list_files() for o in (f.compile_options or [])]
+        assert "-I" + _CLONE + "/src/bom/generate/cat" in opts  # full cloned path
+        assert "-DFOO" in opts  # untouched
+        assert "-I<other>/inc" in opts  # already aliased, untouched
+        assert not any(_PUB in o for o in opts)  # no published path survives
+
+
+def test_run_alias_mode(tmp_path):
+    db_path = str(tmp_path / "idx.db")
+    with Storage(db_path) as db:
+        db.add_component(_NAME, _CLONE, kind="repo")
+        db.add_file_path(
+            _CLONE + "/src/x.cpp",
+            mtime=None,
+            md5=None,
+            compile_options=["-I" + _PUB],
+            driver="g++",
+        )
+
+    class A:
+        index = db_path
+        component = None
+        apply = True
+        alias = True  # opt into the <component> token
         no_require_version = False
         verbose = False
 
@@ -114,6 +141,3 @@ def test_run_end_to_end_rewrites_stored_options(tmp_path):
     with Storage(db_path) as db:
         opts = [o for f, _ in db.list_files() for o in (f.compile_options or [])]
         assert "-I<dcs::cml::coredata::flight>/src/bom/generate/cat" in opts
-        assert "-DFOO" in opts  # untouched
-        assert "-I<other>/inc" in opts  # already aliased, untouched
-        assert not any(_PUB in o for o in opts)  # no published path survives
