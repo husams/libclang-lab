@@ -698,18 +698,21 @@ bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
   return result;
 }
 
-// Stage 2: mint a NAMED template instance `X<B>` from a `using`/typedef.
-// `using Y = X<B>;` / `typedef X<B> Y;` name a concrete class-template
-// specialization but mint no `X<B>` symbol on a plain parse -- only the primary
-// `X` and any explicit `X<int>` decls exist. Mint the `X<B>` instance as its own
-// entity (is_named_instance=1) so the roll-up can give it composes/aggregates/
+// Stage 2/3 core: mint a NAMED template instance `X<B>` from a CXType that is a
+// class-template specialization. `X<B>` is named -- by an alias, a member, or a
+// variable -- but a plain parse mints no `X<B>` symbol; only the primary `X` and
+// any explicit `X<int>` decls exist. Mint the `X<B>` instance as its own entity
+// (is_named_instance=1) so the roll-up can give it composes/aggregates/
 // associates B (T->B substituted into the primary's members). Emits the symbol,
 // an instantiates(5) edge X<B> -> X, and template_arg rows (TYPE args, T->B).
-// Gated to NAMED aliases of a NON-system primary (a `using V = std::vector<F>`
-// is left to collapse onto the primary). Mirrors ast.py:_mint_named_instance.
-void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
-  const CXType underlying = lib.clang_getTypedefDeclUnderlyingType(cursor);
-  const CXCursor decl = lib.clang_getTypeDeclaration(underlying);
+// Shared by three call sites that each name a concrete `X<B>`:
+//   - `using Y = X<B>;` / `typedef X<B> Y;` (alias underlying type)  [Stage 2]
+//   - a member `X<B> field;`                (FieldDecl type)         [Stage 3]
+//   - a variable/local `X<B> v;`            (VarDecl type)           [Stage 3]
+// Gated to a NON-system primary (a `std::vector<F>` member/alias/local is left
+// to collapse onto the primary). Mirrors ast.py:_mint_instance_from_type.
+void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
+  const CXCursor decl = lib.clang_getTypeDeclaration(type_obj);
   if (lib.clang_Cursor_isNull(decl) ||
       is_invalid_kind(lib.clang_getCursorKind(decl))) {
     return;
@@ -717,7 +720,7 @@ void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
   const CXCursor primary = lib.clang_getSpecializedCursorTemplate(decl);
   if (lib.clang_Cursor_isNull(primary) ||
       is_invalid_kind(lib.clang_getCursorKind(primary))) {
-    return; // underlying type is not a class-template specialization
+    return; // type is not a class-template specialization
   }
   // Skip std:: / system templates -- keep them collapsed onto the primary.
   if (lib.clang_Location_isInSystemHeader(
@@ -736,7 +739,7 @@ void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
   const int64_t inst_id = db.mint_symbol_id(
       inst_usr, CxString(lib, lib.clang_getCursorSpelling(decl)).str(),
       qualified_name(lib, decl),
-      CxString(lib, lib.clang_getTypeSpelling(underlying)).str(),  // 'X<B>'
+      CxString(lib, lib.clang_getTypeSpelling(type_obj)).str(),  // 'X<B>'
       stub_kind(lib, decl), inst_dl.file_id, inst_dl.line, inst_dl.col,
       inst_dl.path, /*is_instantiation=*/true, /*is_named_instance=*/true);
 
@@ -756,10 +759,10 @@ void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
 
   // template_arg rows on the instance. The Type API exposes TYPE args only,
   // which is all the roll-up needs (T->B); non-type args are skipped.
-  const int nargs = lib.clang_Type_getNumTemplateArguments(underlying);
+  const int nargs = lib.clang_Type_getNumTemplateArguments(type_obj);
   for (int ai = 0; ai < nargs; ++ai) {
     const CXType arg_type = lib.clang_Type_getTemplateArgumentAsType(
-        underlying, static_cast<unsigned>(ai));
+        type_obj, static_cast<unsigned>(ai));
     TemplateArg ta;
     ta.owner_id = inst_id;
     ta.position = static_cast<int64_t>(ai);
@@ -782,6 +785,14 @@ void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
     }
     db.add_template_arg(ta);
   }
+}
+
+// Stage 2: mint the `X<B>` instance named by a `using`/typedef alias. Thin
+// wrapper over mint_instance_from_type using the alias's underlying type.
+// Mirrors ast.py:_mint_named_instance.
+void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
+  mint_instance_from_type(lib, db,
+                          lib.clang_getTypedefDeclUnderlyingType(cursor));
 }
 
 // Context for the recursive body descent (calls + uses).
@@ -1824,6 +1835,11 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // using Conf even when no method is called on it.
       emit_type_use(lib, *ctx->db, ctx->src_id, lib.clang_getCursorType(cursor),
                     ctx->file_id, cursor, ctx->cond_depth > 0 ? 1 : 0);
+      // Stage 3: a LOCAL `X<B> v;` mints the X<B> instance entity (its own
+      // composes/aggregates/associates via T->B). The file-cursor walk in
+      // index_edges does not descend bodies, so locals are minted here;
+      // file-scope vars + members are minted there.
+      mint_instance_from_type(lib, *ctx->db, lib.clang_getCursorType(cursor));
       // B3 class-template instantiates (kind=5): when a variable's type is a
       // class-template instantiation, emit instantiates (src=enclosing fn,
       // dst=primary template) + template_arg rows.
@@ -2033,6 +2049,9 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                         file_id, cursor, 0);
         }
       }
+      // Stage 3: a member/file-scope `X<B>` mints the X<B> instance entity (its
+      // own composes/aggregates/associates via T->B), exactly like an alias.
+      mint_instance_from_type(lib, db_, lib.clang_getCursorType(cursor));
     } else if (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl) {
       const std::string td_usr =
           CxString(lib, lib.clang_getCursorUSR(cursor)).str();

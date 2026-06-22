@@ -691,11 +691,21 @@ def _materialise_instance_composition(db: "Storage") -> None:
                 continue
             core = _strip_to_param_core(type_info)
             pos = param_pos.get(core)
-            if pos is None:
-                continue  # member type does not bind a template parameter
-            ref_entity_id = bound.get(pos)
-            if ref_entity_id is None:
-                continue  # bound arg is a builtin / not an indexed entity
+            if pos is not None:
+                # Parameterised member (binds T): substitute the instance's
+                # bound type -> X<B> <ownership> B.
+                ref_entity_id = bound.get(pos)
+                if ref_entity_id is None:
+                    continue  # bound arg is a builtin / not an indexed entity
+            else:
+                # Stage 3: CONCRETE (non-parameterised) member, e.g. `Widget w;`
+                # on the primary -> carry `X<B> <ownership> Widget` onto the
+                # instance too (not only the substituted-parameter relations).
+                # System / unindexed concrete types resolve to None and are
+                # skipped, so no std:: explosion.
+                ref_entity_id = _resolve_entity_from_type(conn, type_info)
+                if ref_entity_id is None:
+                    continue
 
             kind_row = conn.execute(
                 "SELECT kind FROM symbol WHERE id = ?", (ref_entity_id,)
