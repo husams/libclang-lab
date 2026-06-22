@@ -600,6 +600,82 @@ def test_migration_entity_edge_empty_post_migrate(tmp_path):
     assert rows == [], "entity_edge should be empty immediately after schema creation"
 
 
+@pytest.mark.parametrize("stamped_version", ["17", "18"])
+def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version):
+    """The nests-removal migration cleans the DB in place: drop the defunct
+    nests(10) rows, renumber befriends 11 -> 10, reseed entity_edge_kind.
+
+    Gated on the stale 'nests' seed row, NOT the version -- so it fires even on a
+    DB an earlier build already stamped v18 WITHOUT cleaning (stamped_version=18).
+    """
+    import sqlite3
+
+    db_path = str(tmp_path / "index.db")
+    # Build a current DB, then mutate it to carry the old (stale) entity_edge
+    # state: old kind table + one nests(10) edge and one befriends(11) edge.
+    s = Storage(db_path)
+    s.close()
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "INSERT INTO symbol (usr,spelling,kind) VALUES "
+        "('c:@S@A','A',4),('c:@S@B','B',4);"
+        "DELETE FROM entity_edge_kind;"
+        "INSERT INTO entity_edge_kind (id,name) VALUES "
+        "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
+        "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
+        "(9,'destroys'),(10,'nests'),(11,'befriends');"
+    )
+    a = conn.execute("SELECT id FROM symbol WHERE usr='c:@S@A'").fetchone()[0]
+    b = conn.execute("SELECT id FROM symbol WHERE usr='c:@S@B'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO entity_edge (src_id,dst_id,kind) VALUES (?,?,10),(?,?,11)",
+        (a, b, a, b),
+    )
+    conn.execute(
+        "UPDATE meta SET value=? WHERE key='schema_version'", (stamped_version,)
+    )
+    conn.commit()
+    conn.close()
+
+    # Reopen -> _migrate() runs in the constructor.
+    Storage(db_path).close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        ver = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        edges = conn.execute("SELECT kind FROM entity_edge").fetchall()
+        kinds = conn.execute(
+            "SELECT id,name FROM entity_edge_kind ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert ver == "18", f"schema_version not at 18: {ver}"
+    # the nests row is gone; only befriends survives, renumbered 11 -> 10
+    assert edges == [(10,)], f"expected only befriends(10); got {edges}"
+    assert len(kinds) == 10, f"entity_edge_kind should have 10 rows; got {kinds}"
+    names = [n for _, n in kinds]
+    assert "nests" not in names, "stale 'nests' seed row still present"
+    assert dict(kinds)[10] == "befriends", "id 10 should be befriends after migrate"
+
+
+def test_migration_nests_cleanup_is_idempotent(tmp_path):
+    """A clean v18 DB (no 'nests' marker) is left untouched on re-open."""
+    db_path = str(tmp_path / "index.db")
+    Storage(db_path).close()
+    # second open must not raise and must keep the 10-row seed intact
+    Storage(db_path).close()
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    try:
+        kinds = conn.execute("SELECT id,name FROM entity_edge_kind ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert len(kinds) == 10 and "nests" not in [n for _, n in kinds]
+
+
 def test_migration_entity_edge_populated_after_resolve(tmp_path):
     """After resolve_pass(), entity_edge has rows when inheritance exists."""
     if not _HAS_ROLLUP:

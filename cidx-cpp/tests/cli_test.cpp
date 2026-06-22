@@ -1720,6 +1720,132 @@ TEST_CASE("migrate: upgrades a v15 DB in place (kind TEXT->int), no re-index") {
                      "; nothing to migrate\n");
 }
 
+TEST_CASE("migrate: v17 -> v18 drops nests edges and renumbers befriends") {
+  const std::string t = make_temp_dir();
+  const std::string db = t + "/index.db";
+
+  // Build a current DB, then mutate it to look like v17: the old kind table
+  // (nests=10, befriends=11) plus one nests(10) edge and one befriends(11) edge
+  // between two entity symbols.
+  {
+    cidx::Storage s(db);
+    auto &raw = s.raw_db();
+    raw.exec("INSERT INTO symbol (usr,spelling,kind) VALUES "
+             "('c:@S@A','A',4),('c:@S@B','B',4);"
+             "DELETE FROM entity_edge_kind;"
+             "INSERT INTO entity_edge_kind (id,name) VALUES "
+             "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
+             "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
+             "(9,'destroys'),(10,'nests'),(11,'befriends');"
+             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,10 "
+             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
+             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
+             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
+             "UPDATE meta SET value='17' WHERE key='schema_version';");
+  }
+
+  // migrate via the CLI: reports the in-place upgrade.
+  CmdResult r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  CHECK(r.out == "migrated " + db + ": schema v17 -> v" +
+                     std::to_string(cidx::kSchemaVersion) + "\n");
+
+  {
+    cidx::SqliteDb raw(db);
+    {
+      auto st =
+          raw.prepare("SELECT value FROM meta WHERE key='schema_version'");
+      REQUIRE(st.step());
+      CHECK(st.col_text(0) == "18");
+    }
+    // the nests row is gone; only befriends survives, renumbered 11 -> 10.
+    {
+      auto st = raw.prepare("SELECT COUNT(*), MIN(kind) FROM entity_edge");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 1);
+      CHECK(st.col_int64(1) == 10);
+    }
+    // entity_edge_kind reseeded: 10 rows, id 10 = befriends, no 'nests'.
+    {
+      auto st = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 10);
+    }
+    {
+      auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=10");
+      REQUIRE(st.step());
+      CHECK(st.col_text(0) == "befriends");
+    }
+    {
+      auto st =
+          raw.prepare("SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 0);
+    }
+  }
+
+  // Idempotent: a second migrate is a no-op.
+  r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.out == db + " already at schema v" +
+                     std::to_string(cidx::kSchemaVersion) +
+                     "; nothing to migrate\n");
+}
+
+TEST_CASE("migrate: cleans a DB already stamped v18 but still carrying nests") {
+  // Regression: an earlier build bumped schema_version to 18 WITHOUT cleaning,
+  // so the migration must be gated on the stale 'nests' marker, not the version.
+  const std::string t = make_temp_dir();
+  const std::string db = t + "/index.db";
+
+  {
+    cidx::Storage s(db);
+    auto &raw = s.raw_db();
+    raw.exec("INSERT INTO symbol (usr,spelling,kind) VALUES "
+             "('c:@S@A','A',4),('c:@S@B','B',4);"
+             "DELETE FROM entity_edge_kind;"
+             "INSERT INTO entity_edge_kind (id,name) VALUES "
+             "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
+             "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
+             "(9,'destroys'),(10,'nests'),(11,'befriends');"
+             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,10 "
+             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
+             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
+             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;");
+    // NOTE: schema_version stays at 18 (the fresh stamp) -- the dirty case.
+  }
+
+  // migrate reports the cleanup even though the version does not change.
+  CmdResult r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  CHECK(r.out == "migrated " + db + ": removed defunct nests edges (schema v" +
+                     std::to_string(cidx::kSchemaVersion) + ")\n");
+
+  {
+    cidx::SqliteDb raw(db);
+    auto st = raw.prepare("SELECT COUNT(*), MIN(kind) FROM entity_edge");
+    REQUIRE(st.step());
+    CHECK(st.col_int64(0) == 1);  // only befriends survives
+    CHECK(st.col_int64(1) == 10); // renumbered 11 -> 10
+    auto k = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
+    REQUIRE(k.step());
+    CHECK(k.col_int64(0) == 0);
+  }
+
+  // Now clean -> second migrate is a true no-op.
+  r = run_cli({"migrate"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.out == db + " already at schema v" +
+                     std::to_string(cidx::kSchemaVersion) +
+                     "; nothing to migrate\n");
+}
+
 TEST_CASE("args: migrate grammar — --db option, -h help") {
   cli::ParsedArgs pa = cli::parse_args({"migrate"});
   CHECK(pa.command == "migrate");

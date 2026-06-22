@@ -574,6 +574,29 @@ class Storage:
             # entity_edge is a derived, materialized table -- populate via
             # `cidx resolve`. No backfill on migration.
             changed = True
+        else:
+            # The `nests` entity_edge kind was removed (lexical nesting is a
+            # symbol declaration-scope property, not a relation). Clean the DB in
+            # place: drop the defunct nests rows (kind 10) and renumber befriends
+            # 11 -> 10 to match the new contiguous seed. Order matters -- delete
+            # the old kind-10 rows BEFORE renumbering 11 -> 10 so the two never
+            # collide on UNIQUE(src,dst,kind,via). Also drop the stale
+            # entity_edge_kind rows so _SCHEMA's INSERT OR IGNORE reseeds
+            # (10,'befriends').
+            #
+            # Gate on the STALE DATA (a leftover 'nests' seed row), NOT the schema
+            # version: an earlier build bumped schema_version to 18 WITHOUT
+            # cleaning, so a version gate would skip those already-stamped DBs.
+            # Idempotent -- after cleanup there is no 'nests' row, so it never
+            # runs again.
+            stale = self._conn.execute(
+                "SELECT 1 FROM entity_edge_kind WHERE name = 'nests' LIMIT 1"
+            ).fetchone()
+            if stale is not None:
+                self._conn.execute("DELETE FROM entity_edge WHERE kind = 10")
+                self._conn.execute("UPDATE entity_edge SET kind = 10 WHERE kind = 11")
+                self._conn.execute("DELETE FROM entity_edge_kind WHERE id IN (10, 11)")
+                changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
             # the tables + indexes + seeds edge_kind; nothing to backfill from
