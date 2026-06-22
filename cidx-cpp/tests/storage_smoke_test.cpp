@@ -454,6 +454,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_edge_src", "idx_edge_dst",
                                          "idx_call_arg_edge",
                                          "idx_diagnostic_file",
+                                         "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
                                          "idx_entity_edge_dst"});
 
@@ -462,7 +463,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "20");
+    CHECK(st.col_text(0) == std::to_string(cidx::kSchemaVersion));
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

@@ -233,7 +233,8 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 -- Entity = a symbol whose kind is in {class,struct,union,enum}; no separate table.
 -- All columns are INTEGER (zero text in the table itself). The 11 relation names
 -- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
--- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
+-- as edge_kind). A NULL-safe unique identity index (see below) keeps one row
+-- per logical edge so re-materialise = DELETE + re-run stays idempotent.
 -- (Lexical nesting is a declaration-scope property of the symbol, not a relation,
 --  so it is NOT an entity_edge kind.)
 
@@ -261,13 +262,23 @@ CREATE TABLE IF NOT EXISTS entity_edge (
     create_form   INTEGER,            -- creates/destroys only:
                                       -- 1=ctor_call 2=return 3=value 4=temp
                                       -- 5=heap 6=factory 7=copy 8=move
-    partial       INTEGER NOT NULL DEFAULT 0,  -- 1 = top-soundness flag
-    UNIQUE (src_id, dst_id, kind, via_member_id)
+    partial       INTEGER NOT NULL DEFAULT 0   -- 1 = top-soundness flag
+);
+-- One row per logical entity edge.  A plain UNIQUE(...via_member_id) cannot
+-- enforce this: SQLite treats NULL != NULL, so the very common NULL-via edges
+-- (generalizes/specializes/uses/creates/...) would never collide and the
+-- INSERT ... ON CONFLICT upserts in the materialise pass would silently fan out
+-- into duplicate rows on every materialise.  A COALESCE expression index folds
+-- NULL to a sentinel so the identity is NULL-safe; create_form is part of the
+-- key so distinct creates/destroys forms (value/temp/heap/...) stay separate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_edge_identity ON entity_edge(
+    src_id, dst_id, kind,
+    COALESCE(via_member_id, -1), COALESCE(create_form, -1)
 );
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '20');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '21');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -842,6 +853,30 @@ void Storage::migrate() {
     }
     if (renamed) {
       db_.exec("UPDATE entity_edge_kind SET name = 'implements' WHERE id = 2");
+      changed = true;
+    }
+    // v20 -> v21: NULL-safe entity_edge identity. The old table-level
+    // UNIQUE(src,dst,kind,via_member_id) never collided on NULL-via rows
+    // (SQLite NULL != NULL), so every materialise fanned NULL-via edges out into
+    // duplicate copies. The schema script now builds a COALESCE unique index
+    // idx_entity_edge_identity; it would fail to create over a DB that already
+    // carries those duplicates, so dedup in place first (keep the lowest rowid
+    // per logical key). Gate on the index's absence so it runs exactly once;
+    // entity_edge is derived, so `cidx resolve` repopulates cleanly. Mirrors
+    // storage.py.
+    bool has_identity_idx = false;
+    {
+      auto st = db_.prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+          "AND name = 'idx_entity_edge_identity'");
+      has_identity_idx = st.step();
+    }
+    if (!has_identity_idx) {
+      db_.exec(
+          "DELETE FROM entity_edge WHERE rowid NOT IN ("
+          "  SELECT MIN(rowid) FROM entity_edge GROUP BY "
+          "    src_id, dst_id, kind, "
+          "    COALESCE(via_member_id, -1), COALESCE(create_form, -1))");
       changed = true;
     }
   }
@@ -2108,7 +2143,7 @@ void Storage::add_entity_edge(int64_t src_id, int64_t dst_id, int64_t kind,
       "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
       " access, is_virtual, create_form, partial) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-      "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+      "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
       "  count       = excluded.count, "
       "  multiplicity = excluded.multiplicity, "
       "  access      = excluded.access, "
@@ -2223,7 +2258,7 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, ?, 1, NULL, 1, ?, ?, NULL, 0) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  access     = excluded.access, "
         "  is_virtual = excluded.is_virtual");
     ins.bind(1, src);
@@ -2264,7 +2299,7 @@ static void cpp_materialise_specializes(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, 3, 1, NULL, 1, 0, 0, NULL, 0) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  count = entity_edge.count + 1");
     ins.bind(1, src);
     ins.bind(2, dst);
@@ -2298,7 +2333,7 @@ static void cpp_materialise_instantiates(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, 11, 1, NULL, 1, 0, 0, NULL, 0) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  count = entity_edge.count + 1");
     ins.bind(1, src);
     ins.bind(2, dst);
@@ -2544,7 +2579,7 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  count = entity_edge.count + 1");
     ins.bind(1, owner_pid);
     ins.bind(2, ref_pid);
@@ -2706,7 +2741,7 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
           "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
           " access, is_virtual, create_form, partial) "
           "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
-          "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+          "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
           "  count = entity_edge.count + 1");
       ins.bind(1, inst.inst_id);
       ins.bind(2, ref_entity_id);
@@ -2781,7 +2816,7 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
           "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
           " access, is_virtual, create_form, partial) "
           "VALUES (?, ?, 9, 1, NULL, 1, 0, 0, NULL, 0) "
-          "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+          "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
           "  count = entity_edge.count + 1");
       ins.bind(1, owner_pid);
       ins.bind(2, target_pid);
@@ -2794,7 +2829,7 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
           "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
           " access, is_virtual, create_form, partial) "
           "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, ?, ?) "
-          "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+          "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
           "  count = entity_edge.count + 1, "
           "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
           "  partial = excluded.partial");
@@ -2842,7 +2877,7 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, 2, 1) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  count = entity_edge.count + 1");
     ins.bind(1, owner_pid);
     ins.bind(2, ret_pid);
@@ -2897,7 +2932,7 @@ static void cpp_materialise_uses(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, 8, 1, ?, 1, 0, 0, NULL, ?) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  count = entity_edge.count + 1, "
         "  partial = MAX(entity_edge.partial, excluded.partial)");
     ins.bind(1, src_eid);
@@ -2929,7 +2964,7 @@ static void cpp_materialise_befriends(cidx::SqliteDb &db) {
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
         " access, is_virtual, create_form, partial) "
         "VALUES (?, ?, 10, 1, NULL, 1, 0, 0, NULL, 0) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
         "  count = entity_edge.count + 1");
     ins.bind(1, src);
     ins.bind(2, dst);

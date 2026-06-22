@@ -456,7 +456,7 @@ def _materialise_inheritance(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, ?, 1, NULL, 1, ?, ?, NULL, 0) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  access     = excluded.access, "
             "  is_virtual = excluded.is_virtual",
             (src_id, dst_id, ek, access, is_virtual),
@@ -498,7 +498,7 @@ def _materialise_specializes(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, ?, 1, NULL, 1, 0, 0, NULL, 0) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (src_id, dst_id, _EK_SPECIALIZES),
         )
@@ -537,7 +537,7 @@ def _materialise_instantiates(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, ?, 1, NULL, 1, 0, 0, NULL, 0) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (src_id, dst_id, _EK_INSTANTIATES),
         )
@@ -644,7 +644,7 @@ def _materialise_field_relations(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (owner_pid, ref_pid, ek, field_id, mult, access_int),
         )
@@ -752,7 +752,7 @@ def _materialise_instance_composition(db: "Storage") -> None:
                 "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
                 " access, is_virtual, create_form, partial) "
                 "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
-                "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+                "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
                 "  count = entity_edge.count + 1",
                 (inst_id, ref_entity_id, ek, f["field_id"], mult, access_int),
             )
@@ -839,7 +839,7 @@ def _materialise_creates_destroys(db: "Storage") -> None:
                 "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
                 " access, is_virtual, create_form, partial) "
                 "VALUES (?, ?, 9, 1, NULL, 1, 0, 0, NULL, 0) "
-                "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+                "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
                 "  count = entity_edge.count + 1",
                 (owner_entity_id, target_entity_id),
             )
@@ -852,7 +852,7 @@ def _materialise_creates_destroys(db: "Storage") -> None:
                 "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
                 " access, is_virtual, create_form, partial) "
                 "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, ?, ?) "
-                "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+                "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
                 "  count = entity_edge.count + 1, "
                 "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
                 "  partial = excluded.partial",
@@ -904,7 +904,7 @@ def _materialise_creates_destroys(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, 7, 1, NULL, 1, 0, 0, 2, 1) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (owner_pid, ret_pid),
         )
@@ -976,7 +976,7 @@ def _materialise_uses(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, 8, 1, ?, 1, 0, 0, NULL, ?) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  count = entity_edge.count + 1, "
             "  partial = MAX(entity_edge.partial, excluded.partial)",
             (src_entity_id, dst_entity_id, callee_id, partial),
@@ -1012,7 +1012,7 @@ def _materialise_befriends(db: "Storage") -> None:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, 10, 1, NULL, 1, 0, 0, NULL, 0) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (src_id, dst_id),
         )

@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -277,7 +277,8 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 -- Entity = a symbol whose kind is in {{class,struct,union,enum}}; no separate table.
 -- All columns are INTEGER (zero text in the table itself). The 11 relation names
 -- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
--- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
+-- as edge_kind). A NULL-safe unique identity index (see below) keeps one row
+-- per logical edge so re-materialise = DELETE + re-run stays idempotent.
 -- (Lexical nesting is a declaration-scope property of the symbol, not a relation,
 --  so it is NOT an entity_edge kind.)
 
@@ -305,8 +306,18 @@ CREATE TABLE IF NOT EXISTS entity_edge (
     create_form   INTEGER,            -- creates/destroys only:
                                       -- 1=ctor_call 2=return 3=value 4=temp
                                       -- 5=heap 6=factory 7=copy 8=move
-    partial       INTEGER NOT NULL DEFAULT 0,  -- 1 = top-soundness flag
-    UNIQUE (src_id, dst_id, kind, via_member_id)
+    partial       INTEGER NOT NULL DEFAULT 0   -- 1 = top-soundness flag
+);
+-- One row per logical entity edge.  A plain UNIQUE(...via_member_id) cannot
+-- enforce this: SQLite treats NULL != NULL, so the very common NULL-via edges
+-- (generalizes/specializes/uses/creates/...) would never collide and the
+-- INSERT ... ON CONFLICT upserts in entity_rollup would silently fan out into
+-- duplicate rows on every materialise.  A COALESCE expression index folds NULL
+-- to a sentinel so the identity is NULL-safe; create_form is part of the key so
+-- distinct creates/destroys forms (value/temp/heap/...) stay separate rows.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_edge_identity ON entity_edge(
+    src_id, dst_id, kind,
+    COALESCE(via_member_id, -1), COALESCE(create_form, -1)
 );
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
@@ -630,6 +641,27 @@ class Storage:
             if renamed is not None:
                 self._conn.execute(
                     "UPDATE entity_edge_kind SET name = 'implements' WHERE id = 2"
+                )
+                changed = True
+            # v20 -> v21: NULL-safe entity_edge identity. The old table-level
+            # UNIQUE(src,dst,kind,via_member_id) never collided on NULL-via rows
+            # (SQLite NULL != NULL), so every materialise fanned NULL-via edges
+            # out into duplicate copies. _SCHEMA now builds a COALESCE unique
+            # index idx_entity_edge_identity; it would fail to create over a DB
+            # that already carries those duplicates, so dedup in place first
+            # (keep the lowest rowid per logical key). Gate on the index's
+            # absence so it runs exactly once; entity_edge is derived, so `cidx
+            # resolve` repopulates cleanly regardless.
+            has_identity_idx = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'idx_entity_edge_identity'"
+            ).fetchone()
+            if has_identity_idx is None:
+                self._conn.execute(
+                    "DELETE FROM entity_edge WHERE rowid NOT IN ("
+                    "  SELECT MIN(rowid) FROM entity_edge GROUP BY "
+                    "    src_id, dst_id, kind, "
+                    "    COALESCE(via_member_id, -1), COALESCE(create_form, -1))"
                 )
                 changed = True
         if "edge" not in tables:
@@ -1906,7 +1938,9 @@ class Storage:
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "ON CONFLICT(src_id, dst_id, kind, "
+            "            COALESCE(via_member_id, -1), COALESCE(create_form, -1)) "
+            "DO UPDATE SET "
             "  count       = excluded.count, "
             "  multiplicity = excluded.multiplicity, "
             "  access      = excluded.access, "
