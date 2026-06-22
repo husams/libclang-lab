@@ -3,7 +3,8 @@
 Modules:
     storage -- SQLite-backed symbol index (components / directories / files / symbols).
     query   -- low-level read-only graph-query API over the index (GraphQuery).
-    model   -- high-level OO view over the graph (CodeBase + typed entities).
+    model   -- high-level OO view over the symbol graph (CodeBase + typed entities).
+    entity_graph -- OO reader over the Layer-1 entity_edge (design-entity) graph.
 """
 
 from .storage import Storage, Component, Directory, File, Symbol, SYMBOL_KINDS
@@ -43,6 +44,17 @@ from .model import (
     Macro,
     FunctionTemplate,
     ClassTemplate,
+)
+from .entity_graph import (
+    EntityGraph,
+    EntityNode,
+    EntityEdge,
+    EdgeKind,
+    EntityKind,
+    Multiplicity,
+    Access,
+    CreateForm,
+    open_entity_graph,
 )
 
 __all__ = [
@@ -86,4 +98,14 @@ __all__ = [
     "Macro",
     "FunctionTemplate",
     "ClassTemplate",
+    # Layer-1 entity-graph reader
+    "EntityGraph",
+    "EntityNode",
+    "EntityEdge",
+    "EdgeKind",
+    "EntityKind",
+    "Multiplicity",
+    "Access",
+    "CreateForm",
+    "open_entity_graph",
 ]
