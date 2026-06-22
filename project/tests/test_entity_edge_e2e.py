@@ -386,3 +386,151 @@ def test_named_instance_associates_raw_ptr(named_inst_edges):
         "associates(6) Box<Widget> -> Widget missing; got "
         f"{[(r['src'], r['dst']) for r in rows]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: mint named instances from PLAIN declarations (member / var / local)
+# and carry CONCRETE primary members onto the instance.
+# ---------------------------------------------------------------------------
+
+# No `using`/typedef here -- the `Box<B>` instance must be minted purely from a
+# plain member (`Box<B> m;`), a file-scope variable (`Box<B> g;`) and a local
+# (`Box<B> v;`). The primary `Box` mixes a parameterised member (`T value`) with
+# a CONCRETE member (`Widget w`), so the instance must carry BOTH `Box<B>
+# composes B` and `Box<B> composes Widget`. `Reg<7>` exercises a non-type
+# (value) template arg: minted, but no TYPE-arg relation (documented no-op).
+_PLAIN_INST_SOURCE = """
+namespace s3 {
+
+struct Widget { int v; };
+struct B { int y; };
+
+template <typename T>
+struct Box {
+    T value;          // parameterised -> composes B (mult 1)
+    T *ptr;           // T*            -> associates B
+    Widget w;         // CONCRETE      -> composes Widget (Stage 3 #2)
+};
+
+template <int N>
+struct Reg { int slot; };   // non-type arg (Stage 3 #3)
+
+struct Holder { Box<B> m; };                 // plain member  -> mints Box<B>
+Box<B> g_box;                                // file-scope var -> mints Box<B>
+Reg<7> g_reg;                                // non-type arg   -> mints Reg<7>
+void use() { Box<B> local; (void)local; }    // local var     -> mints Box<B>
+
+}  // namespace s3
+"""
+
+
+@pytest.fixture
+def plain_inst():
+    """Index the plain-declaration TU for real; return symbols + edges-by-kind."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "plain.cpp")
+        with open(path, "w") as fh:
+            fh.write(_PLAIN_INST_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst, "
+                "       ee.multiplicity "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src, dst",
+                (kind,),
+            ).fetchall()
+
+        named = [
+            r["display_name"]
+            for r in conn.execute(
+                "SELECT display_name FROM symbol WHERE is_named_instance = 1 "
+                "ORDER BY display_name"
+            ).fetchall()
+        ]
+        return {
+            "named": named,
+            "composes": by_kind(4),
+            "aggregates": by_kind(5),
+            "associates": by_kind(6),
+            "instantiates": by_kind(11),
+        }
+
+
+def test_plain_member_mints_named_instance(plain_inst):
+    """A plain `Box<B> m;` member (no alias) mints the Box<B> instance."""
+    assert "Box<B>" in plain_inst["named"], (
+        f"Box<B> not minted from plain declarations; got {plain_inst['named']}"
+    )
+
+
+def test_plain_instance_instantiates_primary(plain_inst):
+    """The minted Box<B> -> instantiates(11) Box<T> (Stage 1 edge holds)."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "Box<T>"
+        for r in plain_inst["instantiates"]
+    ), f"instantiates Box<B> -> Box<T> missing; got {plain_inst['instantiates']}"
+
+
+def test_plain_instance_composes_parameterised_member(plain_inst):
+    """Box<B> composes B (mult 1) from the parameterised `T value` member."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "B" and r["multiplicity"] == 1
+        for r in plain_inst["composes"]
+    ), f"Box<B> composes B (mult 1) missing; got {plain_inst['composes']}"
+
+
+def test_plain_instance_associates_parameterised_ptr(plain_inst):
+    """Box<B> associates B from the parameterised `T* ptr` member."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "B"
+        for r in plain_inst["associates"]
+    ), f"Box<B> associates B missing; got {plain_inst['associates']}"
+
+
+def test_instance_carries_concrete_member(plain_inst):
+    """Stage 3 #2: the CONCRETE `Widget w` member surfaces on the instance too."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "Widget"
+        for r in plain_inst["composes"]
+    ), (
+        "Box<B> composes Widget (concrete member) missing; got "
+        f"{plain_inst['composes']}"
+    )
+
+
+def test_nontype_arg_instance_minted_without_type_relation(plain_inst):
+    """Stage 3 #3: a non-type-arg instance Reg<7> is minted but carries no
+    TYPE-arg relation (documented no-op -- the Type API exposes TYPE args only).
+    Reg's only member is a builtin `int slot`, so no composes/aggregates row."""
+    assert "Reg<7>" in plain_inst["named"], (
+        f"Reg<7> not minted; got {plain_inst['named']}"
+    )
+    assert not any(
+        r["src"] == "Reg<7>" for r in plain_inst["composes"]
+    ), f"Reg<7> must carry no composes relation; got {plain_inst['composes']}"
+    # It still instantiates its primary.
+    assert any(
+        r["src"] == "Reg<7>" and r["dst"] == "Reg<N>"
+        for r in plain_inst["instantiates"]
+    ), f"instantiates Reg<7> -> Reg<N> missing; got {plain_inst['instantiates']}"

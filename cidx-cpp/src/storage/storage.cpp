@@ -2609,10 +2609,22 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
       if (f.type_info.empty()) continue;
       const std::string core = cpp_strip_to_param_core(f.type_info);
       auto pit = param_pos.find(core);
-      if (pit == param_pos.end()) continue;  // type does not bind a param
-      auto bit = bound.find(pit->second);
-      if (bit == bound.end() || !bit->second) continue;  // builtin / unindexed
-      const int64_t ref_entity_id = *bit->second;
+      int64_t ref_entity_id;
+      if (pit != param_pos.end()) {
+        // Parameterised member (binds T): substitute the instance's bound type
+        // -> X<B> <ownership> B.
+        auto bit = bound.find(pit->second);
+        if (bit == bound.end() || !bit->second) continue;  // builtin/unindexed
+        ref_entity_id = *bit->second;
+      } else {
+        // Stage 3: CONCRETE (non-parameterised) member, e.g. `Widget w;` on the
+        // primary -> carry `X<B> <ownership> Widget` onto the instance too.
+        // System / unindexed concrete types resolve to nullopt and are skipped,
+        // so no std:: explosion.
+        auto re = cpp_resolve_entity_from_type(db, f.type_info);
+        if (!re) continue;
+        ref_entity_id = *re;
+      }
 
       auto ck = db.prepare("SELECT kind FROM symbol WHERE id = ?");
       ck.bind(1, ref_entity_id);

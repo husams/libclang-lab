@@ -1450,6 +1450,11 @@ def _body_descent(
                 child.location,
                 conditional=1 if cond_depth > 0 else 0,
             )
+            # Stage 3: a LOCAL `X<B> v;` mints the X<B> instance entity (its own
+            # composes/aggregates/associates via T->B). The file-cursor walk in
+            # _index_edges_notxn does not descend bodies, so locals are minted
+            # here; file-scope vars + members are minted there.
+            _mint_instance_from_type(db, child.type)
             # B3 class-template instantiates (kind=5): when a variable's type is
             # a class-template instantiation, emit instantiates (src=enclosing fn,
             # dst=primary template) + template_arg rows.
@@ -1533,35 +1538,44 @@ def _invalid_cursor(c: Optional[cx.Cursor]) -> bool:
     )
 
 
-def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
-    """Stage 2: mint a NAMED template instance `X<B>` from a `using`/typedef.
+def _mint_instance_from_type(db: Storage, type_obj: Optional[cx.Type]) -> None:
+    """Stage 2/3 core: mint a NAMED template instance `X<B>` from a clang.Type
+    that is a class-template specialization.
 
-    `using Y = X<B>;` (TYPE_ALIAS_DECL) and `typedef X<B> Y;` (TYPEDEF_DECL)
-    name a *concrete* class-template specialization but mint NO `X<B>` symbol on
-    a plain parse -- only the primary template `X` and any explicit `X<int>`
-    decls exist.  Here we mint the `X<B>` instance as its own entity so the
-    Layer-1 roll-up can give it `composes/aggregates/associates B` (T->B
+    `X<B>` is named -- by an alias, a member, or a variable -- but a plain parse
+    mints NO `X<B>` symbol; only the primary template `X` and any *explicit*
+    `X<int>` decls exist.  Here we mint the `X<B>` instance as its own entity so
+    the Layer-1 roll-up can give it `composes/aggregates/associates B` (T->B
     substituted into the primary's members; see entity_rollup).
 
+    Shared by three call sites that each name a concrete `X<B>`:
+      - `using Y = X<B>;` / `typedef X<B> Y;` (alias underlying type)  [Stage 2]
+      - a member `X<B> field;`                (FIELD_DECL type)       [Stage 3]
+      - a variable/local `X<B> v;`            (VAR_DECL type)         [Stage 3]
+    All three resolve the SAME `X<B>` declaration + USR off the type (probed:
+    FIELD_DECL/VAR_DECL of an `X<B>` type expose the specialization decl + USR
+    exactly as TYPE_ALIAS_DECL.underlying_typedef_type does), so they mint the
+    same idempotent symbol keyed on that USR.
+
     Emits, mirroring the explicit-instantiation handler:
-      - the `X<B>` symbol (own USR from the underlying type's declaration),
-        flagged is_named_instance=1 (the roll-up gate) + is_instantiation=1;
+      - the `X<B>` symbol (own USR from the type's declaration), flagged
+        is_named_instance=1 (the roll-up gate) + is_instantiation=1;
       - an instantiates(5) Layer-0 edge `X<B>` -> primary `X`;
       - template_arg rows (TYPE args, T->B with ref_id when B is indexed).
 
-    Gated to NAMED aliases of a NON-system primary: a `using V = std::vector<F>`
-    is left to collapse onto the primary (avoids the std:: graph explosion that
-    _collapse_to_primary exists to prevent).
+    Gated to a NON-system primary: a `std::vector<F>` member/alias/local is left
+    to collapse onto the primary (avoids the std:: graph explosion that
+    _collapse_to_primary exists to prevent).  Non-type template args are skipped
+    -- the Type API exposes TYPE args only -- matching _mint_instantiation_nodes.
     """
-    underlying = cursor.underlying_typedef_type
-    if underlying is None:
+    if type_obj is None:
         return
-    decl = underlying.get_declaration()
+    decl = type_obj.get_declaration()
     if _invalid_cursor(decl):
         return
     primary = _lib.clang_getSpecializedCursorTemplate(decl)
     if _invalid_cursor(primary):
-        return  # underlying type is not a class-template specialization
+        return  # type is not a class-template specialization
     # Skip std:: / system templates -- keep them collapsed onto the primary.
     if primary.location.is_in_system_header:
         return
@@ -1575,7 +1589,7 @@ def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
         inst_usr,
         decl.spelling,
         _qualified_name(decl),
-        underlying.spelling,  # display: 'X<B>' (decl.spelling is bare 'X')
+        type_obj.spelling,  # display: 'X<B>' (decl.spelling is bare 'X')
         _KIND_MAP.get(decl.kind, "struct"),
         decl_file_id=_dfid,
         decl_line=_dln,
@@ -1603,9 +1617,9 @@ def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
     # (no get_template_argument_kind on a clang.Type), which is all the roll-up
     # needs to bind T->B; non-type args are skipped (consistent with
     # _mint_instantiation_nodes).
-    nargs = underlying.get_num_template_arguments()
+    nargs = type_obj.get_num_template_arguments()
     for ai in range(nargs if nargs >= 0 else 0):
-        arg_type = underlying.get_template_argument_type(ai)
+        arg_type = type_obj.get_template_argument_type(ai)
         arg_decl = arg_type.get_declaration()
         ref_id: Optional[int] = None
         if arg_decl is not None and arg_decl.kind != cx.CursorKind.NO_DECL_FOUND:
@@ -1617,6 +1631,14 @@ def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
         db.add_template_arg(
             inst_id, ai, 1, ref_id=ref_id, literal=arg_type.spelling or None
         )
+
+
+def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
+    """Stage 2: mint the `X<B>` instance named by a `using`/typedef alias.
+
+    Thin wrapper over _mint_instance_from_type using the alias's underlying
+    type (TYPE_ALIAS_DECL/TYPEDEF_DECL.underlying_typedef_type)."""
+    _mint_instance_from_type(db, cursor.underlying_typedef_type)
 
 
 def _index_edges_notxn(
@@ -1698,6 +1720,9 @@ def _index_edges_notxn(
                 _m_sym = db.lookup_symbol(_m_usr)
                 if _m_sym is not None:
                     _emit_type_use(db, _m_sym.id, cursor.type, file_id, cursor.location)
+            # Stage 3: a member `X<B> field;` mints the X<B> instance entity (its
+            # own composes/aggregates/associates via T->B), exactly like an alias.
+            _mint_instance_from_type(db, cursor.type)
         elif ck == cx.CursorKind.VAR_DECL:
             # File-scope variable (locals are reached via _body_descent).
             _v_usr = cursor.get_usr()
@@ -1705,6 +1730,8 @@ def _index_edges_notxn(
                 _v_sym = db.lookup_symbol(_v_usr)
                 if _v_sym is not None:
                     _emit_type_use(db, _v_sym.id, cursor.type, file_id, cursor.location)
+            # Stage 3: a file-scope `X<B> v;` mints the X<B> instance entity.
+            _mint_instance_from_type(db, cursor.type)
         elif ck in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):
             _t_usr = cursor.get_usr()
             if _t_usr:
