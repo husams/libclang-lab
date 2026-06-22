@@ -21,8 +21,8 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.19.0"  (nests removal bumps 0.18.1 -> 0.19.0)
-  version-2     C++ kVersion == "0.19.0"
+  version-1     Python VERSION == "0.21.0"  (unique_ptr/optional -> composes)
+  version-2     C++ kVersion == "0.21.0"
   version-3     C++ kSchemaVersion == 18
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
@@ -117,7 +117,7 @@ def test_entity_edge_table_in_schema():
 
 _REQUIRED_ENTITY_EDGE_KINDS = [
     (1, "generalizes"),
-    (2, "realizes"),
+    (2, "implements"),
     (3, "specializes"),
     (4, "composes"),
     (5, "aggregates"),
@@ -294,27 +294,27 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_019():
-    """Python VERSION must be 0.19.0 after the nests-removal bump."""
+def test_python_version_is_021():
+    """Python VERSION must be 0.21.0 after the unique_ptr/optional->composes fix."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.19.0", (
-        f"Python VERSION is '{version}'; expected '0.19.0'. "
-        "Bump VERSION to 0.19.0 in cli.py (nests entity_edge kind removed)."
+    assert version == "0.21.0", (
+        f"Python VERSION is '{version}'; expected '0.21.0'. "
+        "Bump VERSION to 0.21.0 in cli.py (unique_ptr/optional -> composes)."
     )
 
 
-def test_cpp_version_is_019():
-    """C++ kVersion must be 0.19.0 after the nests-removal bump."""
+def test_cpp_version_is_021():
+    """C++ kVersion must be 0.21.0 after the unique_ptr/optional->composes fix."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.19.0", (
-        f"C++ kVersion is '{version}'; expected '0.19.0'. "
-        "Bump kVersion to 0.19.0 in args.hpp (nests entity_edge kind removed)."
+    assert version == "0.21.0", (
+        f"C++ kVersion is '{version}'; expected '0.21.0'. "
+        "Bump kVersion to 0.21.0 in args.hpp (unique_ptr/optional -> composes)."
     )
 
 
@@ -472,7 +472,7 @@ def test_fresh_db_entity_edge_kind_has_10_rows(tmp_path):
         f"Rows found: {rows}"
     )
     expected_names = [
-        "generalizes", "realizes", "specializes", "composes", "aggregates",
+        "generalizes", "implements", "specializes", "composes", "aggregates",
         "associates", "creates", "uses", "destroys", "befriends",
     ]
     actual_names = [r[1] for r in rows]
@@ -482,14 +482,14 @@ def test_fresh_db_entity_edge_kind_has_10_rows(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Parametrised: realizes XOR generalizes boundary
+# Parametrised: implements XOR generalizes boundary
 # This tests the LOGIC contract (ADR-008 §5b) using the conftest hermetic DB.
 # Since entity_rollup.py doesn't exist yet, these will FAIL with ImportError.
 # ---------------------------------------------------------------------------
 
 
-def test_realizes_xor_generalizes_contract():
-    """No (src,dst) pair may have both realizes(2) and generalizes(1) in entity_edge."""
+def test_implements_xor_generalizes_contract():
+    """No (src,dst) pair may have both implements(2) and generalizes(1) in entity_edge."""
     try:
         from indexer import entity_rollup  # noqa: F401
     except ImportError:

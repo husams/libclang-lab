@@ -275,7 +275,7 @@ CREATE TABLE IF NOT EXISTS entity_edge_kind (
     name TEXT NOT NULL UNIQUE
 );
 INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
-  (1,'generalizes'), (2,'realizes'), (3,'specializes'),
+  (1,'generalizes'), (2,'implements'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
   (10,'befriends');
@@ -596,6 +596,18 @@ class Storage:
                 self._conn.execute("DELETE FROM entity_edge WHERE kind = 10")
                 self._conn.execute("UPDATE entity_edge SET kind = 10 WHERE kind = 11")
                 self._conn.execute("DELETE FROM entity_edge_kind WHERE id IN (10, 11)")
+                changed = True
+            # Rename kind 2 'realizes' -> 'implements' (display name only; the
+            # stored entity_edge.kind int is unchanged). Data-gated on the old
+            # name so it fires regardless of schema_version; _SCHEMA's INSERT OR
+            # IGNORE would otherwise leave the stale (2,'realizes') row in place.
+            renamed = self._conn.execute(
+                "SELECT 1 FROM entity_edge_kind WHERE id = 2 AND name = 'realizes'"
+            ).fetchone()
+            if renamed is not None:
+                self._conn.execute(
+                    "UPDATE entity_edge_kind SET name = 'implements' WHERE id = 2"
+                )
                 changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
