@@ -225,9 +225,11 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 
 -- ---- v17: Layer-1 entity-edge graph (UML/ER relations over record/enum symbols) --
 -- Entity = a symbol whose kind is in {class,struct,union,enum}; no separate table.
--- All columns are INTEGER (zero text in the table itself). The 11 relation names
+-- All columns are INTEGER (zero text in the table itself). The 10 relation names
 -- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
 -- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
+-- (Lexical nesting is a declaration-scope property of the symbol, not a relation,
+--  so it is NOT an entity_edge kind.)
 
 CREATE TABLE IF NOT EXISTS entity_edge_kind (
     id   INTEGER PRIMARY KEY,
@@ -237,7 +239,7 @@ INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
   (1,'generalizes'), (2,'realizes'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
-  (10,'nests'), (11,'befriends');
+  (10,'befriends');
 
 CREATE TABLE IF NOT EXISTS entity_edge (
     src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -259,7 +261,7 @@ CREATE TABLE IF NOT EXISTS entity_edge (
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '17');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '18');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -2041,7 +2043,7 @@ void Storage::clear_entity_edges() {
 }
 
 // ---------------------------------------------------------------------------
-// materialise_entity_edges: pure-DB roll-up of all 11 entity relation kinds.
+// materialise_entity_edges: pure-DB roll-up of all 10 entity relation kinds.
 // Mirrors indexer/entity_rollup.py:materialize_entity_edges() byte-identically.
 // ---------------------------------------------------------------------------
 
@@ -2538,14 +2540,14 @@ static void cpp_materialise_uses(cidx::SqliteDb &db) {
   }
 }
 
-// Phase 6: nests(10) from contains(3) edges between entity symbols.
-static void cpp_materialise_nests(cidx::SqliteDb &db) {
+// Phase 6: befriends(10) from friend(17) edges between entity symbols.
+static void cpp_materialise_befriends(cidx::SqliteDb &db) {
   auto st = db.prepare(
       "SELECT e.src_id, e.dst_id "
       "FROM edge e "
       "JOIN symbol src ON src.id = e.src_id "
       "JOIN symbol dst ON dst.id = e.dst_id "
-      "WHERE e.kind = 3 "
+      "WHERE e.kind = 17 "
       "  AND src.kind IN (2,3,4,5) "
       "  AND dst.kind IN (2,3,4,5)");
   std::vector<std::pair<int64_t,int64_t>> rows;
@@ -2567,35 +2569,6 @@ static void cpp_materialise_nests(cidx::SqliteDb &db) {
   }
 }
 
-// Phase 7: befriends(11) from friend(17) edges between entity symbols.
-static void cpp_materialise_befriends(cidx::SqliteDb &db) {
-  auto st = db.prepare(
-      "SELECT e.src_id, e.dst_id "
-      "FROM edge e "
-      "JOIN symbol src ON src.id = e.src_id "
-      "JOIN symbol dst ON dst.id = e.dst_id "
-      "WHERE e.kind = 17 "
-      "  AND src.kind IN (2,3,4,5) "
-      "  AND dst.kind IN (2,3,4,5)");
-  std::vector<std::pair<int64_t,int64_t>> rows;
-  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
-  for (const auto &[src0, dst0] : rows) {
-    int64_t src = cpp_collapse_to_primary(db, src0);
-    int64_t dst = cpp_collapse_to_primary(db, dst0);
-    if (src == dst) continue;
-    auto ins = db.prepare(
-        "INSERT INTO entity_edge "
-        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
-        " access, is_virtual, create_form, partial) "
-        "VALUES (?, ?, 11, 1, NULL, 1, 0, 0, NULL, 0) "
-        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
-        "  count = entity_edge.count + 1");
-    ins.bind(1, src);
-    ins.bind(2, dst);
-    ins.step_done();
-  }
-}
-
 void Storage::materialise_entity_edges() {
   // Idempotent: full re-materialise each resolve.
   db_.exec("DELETE FROM entity_edge");
@@ -2607,7 +2580,6 @@ void Storage::materialise_entity_edges() {
     cpp_materialise_field_relations(db_);
     cpp_materialise_creates_destroys(db_);
     cpp_materialise_uses(db_);
-    cpp_materialise_nests(db_);
     cpp_materialise_befriends(db_);
     txn.commit();
   }

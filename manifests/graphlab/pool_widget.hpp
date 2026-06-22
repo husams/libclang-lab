@@ -66,8 +66,10 @@ struct Pool {
     }
 };
 
-// nests (kind 10): a record type declared inside another record. Outer also
-// composes Inner (kind 4) via the `inner` value field.
+// Nested record: Inner is declared inside Outer. Lexical nesting is NOT an
+// entity_edge relation (it is a declaration-scope property of the symbol, read
+// from decl_path / the Layer-0 contains edge); Outer composes Inner (kind 4)
+// via the `inner` value field, and that compose edge IS materialised.
 struct Outer {
     struct Inner {
         int depth;
@@ -75,7 +77,7 @@ struct Outer {
     Inner inner;
 };
 
-// befriends (kind 11): a record granting friendship to another record.
+// befriends (kind 10): a record granting friendship to another record.
 // `Vault` declares `Pool` a friend -> befriends(Vault -> Pool).
 class Vault {
     friend class Pool;

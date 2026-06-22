@@ -52,10 +52,10 @@ roll-up that writes it). The query engine that reads them is EXPLICITLY OUT OF S
 - Concepts D-1..D-4 LOCKED; relations R-1..R-4 LOCKED. R-1 retired: an Entity IS a record/enum SYMBOL
   (filter symbol.kind ∈ {class,struct,union,enum}); NO separate entity table; entity_edge endpoints
   reference symbol(id).
-- NEW table 'entity_edge', ALL-INTEGER / ZERO TEXT. The ONLY strings in the feature = the 11 rows of the
+- NEW table 'entity_edge', ALL-INTEGER / ZERO TEXT. The ONLY strings in the feature = the 10 rows of the
   'entity_edge_kind' lookup table.
-- 11 kinds: 1 generalizes, 2 realizes, 3 specializes, 4 composes, 5 aggregates, 6 associates, 7 creates,
-  8 uses, 9 destroys, 10 nests, 11 befriends.
+- 10 kinds: 1 generalizes, 2 realizes, 3 specializes, 4 composes, 5 aggregates, 6 associates, 7 creates,
+  8 uses, 9 destroys, 10 befriends. (Lexical nesting is a symbol declaration-scope property, not a relation.)
 - Columns: src_id, dst_id (record/enum symbol ids), kind (FK→entity_edge_kind), count,
   via_member_id (carrying field/method — ALSO the role, name is one join away), multiplicity (int enum
   1=one,2=0..1,3=0..*,4=N), access (int 0=pub,1=prot,2=priv), is_virtual (0/1 virtual base),

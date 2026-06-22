@@ -114,8 +114,7 @@ def edges() -> dict:
         return {
             "creates": by_kind(7),
             "destroys": by_kind(9),
-            "nests": by_kind(10),
-            "befriends": by_kind(11),
+            "befriends": by_kind(10),
         }
 
 
@@ -152,17 +151,9 @@ def test_destroys_from_method(edges):
     )
 
 
-def test_nests_record_in_record(edges):
-    """Outer::Inner -> nests(10) Outer->Inner."""
-    rows = edges["nests"]
-    assert any(r["src"] == "Outer" and r["dst"] == "Inner" for r in rows), (
-        "nests(10) Outer->Inner missing"
-    )
-
-
 def test_befriends_friend_decl(edges):
-    """`class Vault { friend class Pool; }` -> befriends(11) Vault->Pool."""
+    """`class Vault { friend class Pool; }` -> befriends(10) Vault->Pool."""
     rows = edges["befriends"]
     assert any(r["src"] == "Vault" and r["dst"] == "Pool" for r in rows), (
-        "befriends(11) Vault->Pool missing -- FRIEND_DECL extraction not wired?"
+        "befriends(10) Vault->Pool missing -- FRIEND_DECL extraction not wired?"
     )
