@@ -1030,3 +1030,61 @@ def test_import_rejects_version_flags(tmp_path, capsys, monkeypatch):
 # ---------------------------------------------------------------------------
 
 # (Parse-time arg resolution involves a live libclang parse; deferred to QA.)
+
+
+# ---------------------------------------------------------------------------
+# 16. command prefix: env-var assignments + launcher wrappers (v0.27.1)
+# ---------------------------------------------------------------------------
+
+
+def test_command_start_skips_env_assignments_and_launcher():
+    from indexer.compiledb import command_start
+
+    raw = [
+        "CCACHE_DIR=/workspace/.ccache",
+        "CCACHE_COMPRESS=1",
+        "CCACHE_AOPS-52378DIR=",  # name with a hyphen, empty value
+        "ccache",
+        "g++",
+        "-g",
+    ]
+    assert command_start(raw) == 4  # index of g++
+    # plain `cc ...` has no prefix
+    assert command_start(["cc", "-I.", "-c", "a.c"]) == 0
+    # -DFOO=bar must NOT be mistaken for an env assignment
+    assert command_start(["g++", "-DFOO=bar"]) == 0
+
+
+def test_strip_and_driver_skip_ccache_prefix():
+    from indexer.compiledb import driver, strip_for_libclang
+
+    cmd = _FakeCmd(
+        [
+            "CCACHE_DIR=/workspace/.ccache",
+            "CCACHE_COMPRESS=1",
+            "ccache",
+            "g++",
+            "-g",
+            "-std=gnu++17",
+            "-I/foo/include",
+            "-lbar",
+            "-c",
+            "x.cpp",
+            "-o",
+            "x.o",
+        ],
+        directory="/work",
+        filename="x.cpp",
+    )
+    assert driver(cmd) == "g++"  # real compiler, not the env prefix
+    assert strip_for_libclang(cmd) == ["-g", "-std=gnu++17", "-I/foo/include"]
+
+
+def test_sanitize_heals_stored_env_launcher_prefix():
+    from indexer.compiledb import sanitize
+
+    # what an older import stored (only argv[0]=CCACHE_DIR=... was dropped)
+    stored = ["CCACHE_COMPRESS=1", "ccache", "g++", "-g", "-I/abs", "-DX=1"]
+    assert sanitize(stored) == ["-g", "-I/abs", "-DX=1"]
+    # clean options are untouched
+    assert sanitize(["-I/abs", "-std=c11"]) == ["-I/abs", "-std=c11"]

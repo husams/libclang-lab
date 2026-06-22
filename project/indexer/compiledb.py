@@ -8,6 +8,7 @@ must NOT see; relative -I paths are resolved against the command's directory.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 
 from clang.cindex import CompilationDatabase
@@ -52,6 +53,44 @@ def load_commands(db_path: str):
 
 def _abs(p: str, base: str) -> str:
     return p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
+
+
+#: A leading token of the form NAME=value is an environment-variable assignment
+#: (e.g. CCACHE_DIR=/x, CCACHE_AOPS-52378DIR=). The name must start with a
+#: letter/underscore so a flag like -DFOO=bar (starts with '-') is never matched.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*=", re.ASCII)
+
+#: Compiler-launcher wrappers that sit BEFORE the real compiler in a command
+#: (matched by basename). libclang must see neither these nor the env
+#: assignments — clang reports them as "'linker' input unused", and the driver
+#: must point at the actual compiler.
+_LAUNCHERS = frozenset(
+    {"ccache", "sccache", "distcc", "icecc", "icerun", "env", "time", "nice"}
+)
+
+
+def command_start(args: list[str]) -> int:
+    """Index of the real compiler driver in a raw command vector.
+
+    A compile_commands.json `command` may be prefixed with environment-variable
+    assignments (CCACHE_DIR=..., FOO=bar) and compiler-launcher wrappers
+    (ccache, sccache, distcc, icecc, env, time, nice) before the actual
+    compiler. Returns the index of the first token that is neither an env
+    assignment nor a known launcher (0 for a plain `cc ...`). If the whole
+    vector is prefix (degenerate), returns 0 so callers stay in bounds.
+    """
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if os.path.basename(tok) in _LAUNCHERS:
+            i += 1
+            continue
+        break
+    return i if i < n else 0
 
 
 #: Flags libclang must not see, beyond the driver/source/-c/-o basics.
@@ -138,9 +177,22 @@ def sanitize(args: list[str]) -> list[str]:
     version may still carry flags the current rules would drop (-Werror,
     -MF ...); sanitizing again at parse time heals such databases without
     a re-import.
+
+    Also heals a command PREFIX an older import stored when argv[0] was an
+    env-var assignment rather than the compiler (e.g. CCACHE_DIR=... was
+    dropped, leaving ["CCACHE_COMPRESS=1", ..., "ccache", "g++", "-g", ...]).
+    When the first stored token is an env assignment or a launcher, everything
+    up to and including the real compiler is dropped. (A re-import is still the
+    proper fix — it also corrects the stored driver field.)
     """
+    items = list(args)
+    if items and (
+        _ENV_ASSIGN_RE.match(items[0])
+        or os.path.basename(items[0]) in _LAUNCHERS
+    ):
+        items = items[command_start(items) + 1 :]
     out: list[str] = []
-    it = iter(args)
+    it = iter(items)
     for tok in it:
         if tok in _DROP:
             continue
@@ -172,7 +224,9 @@ def strip_for_libclang(cmd) -> list[str]:
     raw, directory = list(cmd.arguments), cmd.directory
     src = {cmd.filename, os.path.basename(cmd.filename)}
     out: list[str] = []
-    it = iter(raw[1:])  # drop argv[0] (the driver)
+    # Drop the whole command prefix: leading env-var assignments + launcher
+    # wrappers (ccache ...) AND the real compiler token at command_start.
+    it = iter(raw[command_start(raw) + 1 :])
     for tok in it:
         if tok in _DROP:
             continue
@@ -217,9 +271,14 @@ def driver(cmd) -> str:
     A custom-toolchain driver (e.g. /opt/1A/toolchain/.../bin/g++) carries its
     own header search paths; storing it lets parse() replicate them later.
     Bare names ('cc', 'g++') are kept as-is and resolved via PATH at parse
-    time; relative paths are resolved against the command's directory.
+    time; relative paths are resolved against the command's directory. Leading
+    env-var assignments and launcher wrappers (CCACHE_DIR=... ccache g++) are
+    skipped so the REAL compiler is returned, not the env prefix.
     """
-    argv0 = list(cmd.arguments)[0]
+    args = list(cmd.arguments)
+    if not args:
+        return ""
+    argv0 = args[command_start(args)]
     return _abs(argv0, cmd.directory) if os.sep in argv0 else argv0
 
 
