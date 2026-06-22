@@ -833,7 +833,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.28.1");
+  CHECK(std::string(cli::kVersion) == "0.28.2");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1759,7 +1759,7 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
       auto st =
           raw.prepare("SELECT value FROM meta WHERE key='schema_version'");
       REQUIRE(st.step());
-      CHECK(st.col_text(0) == "20");
+      CHECK(st.col_text(0) == std::to_string(cidx::kSchemaVersion));
     }
     // the nests row is gone; only befriends survives, renumbered 11 -> 10.
     {

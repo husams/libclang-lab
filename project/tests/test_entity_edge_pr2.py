@@ -1,7 +1,7 @@
 """PR2: v17 entity_edge materialisation tests.
 
 Covers:
-  * schema/version invariants (SCHEMA_VERSION=20, VERSION='0.28.1')
+  * schema/version invariants (SCHEMA_VERSION=21, VERSION='0.28.2')
   * entity_rollup module importable
   * entity_edge + entity_edge_kind tables present in schema
   * PR1 edge_kind seed rows 10-16 present
@@ -94,13 +94,13 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_20():
-    assert SCHEMA_VERSION == 20, f"Expected 20, got {SCHEMA_VERSION}"
+def test_schema_version_is_21():
+    assert SCHEMA_VERSION == 21, f"Expected 21, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0281():
+def test_product_version_is_0282():
     from indexer import cli
-    assert cli.VERSION == "0.28.1", f"Expected '0.28.1', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.28.2", f"Expected '0.28.2', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -668,6 +668,79 @@ def test_rollup_idempotency(tmp_path):
     assert first == second, "entity_edge rows differ on second materialise (not idempotent)"
 
 
+def test_null_via_edges_dedup_within_materialise(tmp_path):
+    """v20→v21 regression: NULL-via edges that collapse to the same logical
+    (src,dst,kind) must produce ONE row, not duplicate copies.
+
+    Two template instantiations (Derived<int>, Derived<float>) both inherit
+    Base; both collapse onto the primary Derived, so the roll-up inserts the
+    same NULL-via generalizes edge twice. The old UNIQUE(src,dst,kind,via)
+    never collided on NULL via (SQLite NULL != NULL), so the ON CONFLICT merge
+    silently fanned out into 2 rows. The COALESCE identity index folds NULL to a
+    sentinel so the second insert upserts the first.
+    """
+    if not _HAS_ROLLUP:
+        pytest.skip()
+    db, dir_id = _fresh(tmp_path)
+    root = db.add_file(dir_id, "h.hpp")
+    C = EDGE_KINDS
+
+    base = _sym(db, root, "Base", "c:@S@Base", "Base", "class", 1)
+    prim = _sym(db, root, "Derived", "c:@ST>1#T@Derived", "Derived",
+                "class-template", 2)
+    i1 = _sym(db, root, "Di", "c:@S@Derived>#I", "Derived<int>", "class", 3)
+    i2 = _sym(db, root, "Df", "c:@S@Derived>#f", "Derived<float>", "class", 4)
+    db.add_edge(i1, prim, C["instantiates"])
+    db.add_edge(i2, prim, C["instantiates"])
+    db.add_edge(i1, base, C["inherits"], base_access=0)
+    db.add_edge(i2, base, C["inherits"], base_access=0)
+
+    # Running resolve/materialise repeatedly must never accumulate copies.
+    for _ in range(3):
+        materialize_entity_edges(db)
+        gens = [
+            r for r in db._conn.execute(
+                "SELECT src_id, dst_id FROM entity_edge WHERE kind IN (1, 2)"
+            )
+        ]
+        assert len(gens) == 1, (
+            f"expected exactly one Derived→Base generalizes row, got {gens}"
+        )
+
+    # The NULL-safe identity index must be present.
+    idx = db._conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_entity_edge_identity'"
+    ).fetchone()
+    assert idx is not None, "idx_entity_edge_identity missing from schema"
+
+
+def test_null_via_add_entity_edge_upserts(tmp_path):
+    """Direct add_entity_edge with NULL via must upsert, but distinct
+    create_form values stay separate rows (form is part of the identity)."""
+    db, _ = _fresh(tmp_path)
+    a = db.mint_symbol_id("c:@S@A", "A", kind="struct")
+    b = db.mint_symbol_id("c:@S@B", "B", kind="struct")
+
+    for _ in range(3):
+        db.add_entity_edge(a, b, 8, via_member_id=None)  # uses(8), NULL via
+    n_uses = db._conn.execute(
+        "SELECT count(*) FROM entity_edge WHERE src_id=? AND dst_id=? AND kind=8",
+        (a, b),
+    ).fetchone()[0]
+    assert n_uses == 1, f"NULL-via uses(8) not deduped: {n_uses} rows"
+
+    for form in (3, 4, 5):
+        db.add_entity_edge(a, b, 7, via_member_id=None, create_form=form)
+    n_creates = db._conn.execute(
+        "SELECT count(*) FROM entity_edge WHERE src_id=? AND dst_id=? AND kind=7",
+        (a, b),
+    ).fetchone()[0]
+    assert n_creates == 3, (
+        f"distinct create_form values must stay separate rows: got {n_creates}"
+    )
+
+
 def test_rematerialise_after_clear(tmp_path):
     """DELETE FROM entity_edge + re-run → same rows."""
     if not _HAS_ROLLUP:
@@ -758,7 +831,9 @@ def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version
     finally:
         conn.close()
 
-    assert ver == "20", f"schema_version not at 20: {ver}"
+    assert ver == str(SCHEMA_VERSION), (
+        f"schema_version not at {SCHEMA_VERSION}: {ver}"
+    )
     # the nests row is gone; only befriends survives, renumbered 11 -> 10
     assert edges == [(10,)], f"expected only befriends(10); got {edges}"
     # 11 rows: 1-10 plus the reseeded instantiates(11). The old (11,'befriends')
