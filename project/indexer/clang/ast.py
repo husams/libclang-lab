@@ -1523,6 +1523,102 @@ def _body_descent(
         )
 
 
+def _invalid_cursor(c: Optional[cx.Cursor]) -> bool:
+    """True when a libclang cursor is null / not-found / invalid."""
+    return (
+        c is None
+        or c.kind == cx.CursorKind.NO_DECL_FOUND
+        or c.kind == cx.CursorKind.INVALID_FILE
+        or c.kind.value <= 0
+    )
+
+
+def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
+    """Stage 2: mint a NAMED template instance `X<B>` from a `using`/typedef.
+
+    `using Y = X<B>;` (TYPE_ALIAS_DECL) and `typedef X<B> Y;` (TYPEDEF_DECL)
+    name a *concrete* class-template specialization but mint NO `X<B>` symbol on
+    a plain parse -- only the primary template `X` and any explicit `X<int>`
+    decls exist.  Here we mint the `X<B>` instance as its own entity so the
+    Layer-1 roll-up can give it `composes/aggregates/associates B` (T->B
+    substituted into the primary's members; see entity_rollup).
+
+    Emits, mirroring the explicit-instantiation handler:
+      - the `X<B>` symbol (own USR from the underlying type's declaration),
+        flagged is_named_instance=1 (the roll-up gate) + is_instantiation=1;
+      - an instantiates(5) Layer-0 edge `X<B>` -> primary `X`;
+      - template_arg rows (TYPE args, T->B with ref_id when B is indexed).
+
+    Gated to NAMED aliases of a NON-system primary: a `using V = std::vector<F>`
+    is left to collapse onto the primary (avoids the std:: graph explosion that
+    _collapse_to_primary exists to prevent).
+    """
+    underlying = cursor.underlying_typedef_type
+    if underlying is None:
+        return
+    decl = underlying.get_declaration()
+    if _invalid_cursor(decl):
+        return
+    primary = _lib.clang_getSpecializedCursorTemplate(decl)
+    if _invalid_cursor(primary):
+        return  # underlying type is not a class-template specialization
+    # Skip std:: / system templates -- keep them collapsed onto the primary.
+    if primary.location.is_in_system_header:
+        return
+    inst_usr = decl.get_usr()
+    prim_usr = primary.get_usr()
+    if not inst_usr or not prim_usr or inst_usr == prim_usr:
+        return
+
+    _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, decl)
+    inst_id = db.mint_symbol_id(
+        inst_usr,
+        decl.spelling,
+        _qualified_name(decl),
+        underlying.spelling,  # display: 'X<B>' (decl.spelling is bare 'X')
+        _KIND_MAP.get(decl.kind, "struct"),
+        decl_file_id=_dfid,
+        decl_line=_dln,
+        decl_col=_dcol,
+        decl_path=_dpath,
+        is_instantiation=True,
+        is_named_instance=True,
+    )
+
+    _pfid, _pln, _pcol, _ppath = _ref_decl_loc(db, primary)
+    prim_id = db.mint_symbol_id(
+        prim_usr,
+        primary.spelling,
+        _qualified_name(primary),
+        primary.displayname,
+        _KIND_MAP.get(primary.kind, "class-template"),
+        decl_file_id=_pfid,
+        decl_line=_pln,
+        decl_col=_pcol,
+        decl_path=_ppath,
+    )
+    db.add_edge(inst_id, prim_id, 5)  # instantiates: X<B> -> X
+
+    # template_arg rows on the instance. The Type API exposes TYPE args only
+    # (no get_template_argument_kind on a clang.Type), which is all the roll-up
+    # needs to bind T->B; non-type args are skipped (consistent with
+    # _mint_instantiation_nodes).
+    nargs = underlying.get_num_template_arguments()
+    for ai in range(nargs if nargs >= 0 else 0):
+        arg_type = underlying.get_template_argument_type(ai)
+        arg_decl = arg_type.get_declaration()
+        ref_id: Optional[int] = None
+        if arg_decl is not None and arg_decl.kind != cx.CursorKind.NO_DECL_FOUND:
+            ref_usr = arg_decl.get_usr()
+            if ref_usr:
+                rsym = db.lookup_symbol(ref_usr)
+                if rsym is not None:
+                    ref_id = rsym.id
+        db.add_template_arg(
+            inst_id, ai, 1, ref_id=ref_id, literal=arg_type.spelling or None
+        )
+
+
 def _index_edges_notxn(
     db: Storage, tu: cx.TranslationUnit, filename: str, file_id: int
 ) -> None:
@@ -1621,6 +1717,9 @@ def _index_edges_notxn(
                         file_id,
                         cursor.location,
                     )
+            # Stage 2: a named alias of a class-template specialization mints the
+            # X<B> instance entity (own composes/aggregates/associates via T->B).
+            _mint_named_instance(db, cursor)
 
         # -- CXX_BASE_SPECIFIER: inherits ---------------------------------
         # Derived class is the enclosing record from the walk parent, NOT

@@ -698,6 +698,92 @@ bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
   return result;
 }
 
+// Stage 2: mint a NAMED template instance `X<B>` from a `using`/typedef.
+// `using Y = X<B>;` / `typedef X<B> Y;` name a concrete class-template
+// specialization but mint no `X<B>` symbol on a plain parse -- only the primary
+// `X` and any explicit `X<int>` decls exist. Mint the `X<B>` instance as its own
+// entity (is_named_instance=1) so the roll-up can give it composes/aggregates/
+// associates B (T->B substituted into the primary's members). Emits the symbol,
+// an instantiates(5) edge X<B> -> X, and template_arg rows (TYPE args, T->B).
+// Gated to NAMED aliases of a NON-system primary (a `using V = std::vector<F>`
+// is left to collapse onto the primary). Mirrors ast.py:_mint_named_instance.
+void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
+  const CXType underlying = lib.clang_getTypedefDeclUnderlyingType(cursor);
+  const CXCursor decl = lib.clang_getTypeDeclaration(underlying);
+  if (lib.clang_Cursor_isNull(decl) ||
+      is_invalid_kind(lib.clang_getCursorKind(decl))) {
+    return;
+  }
+  const CXCursor primary = lib.clang_getSpecializedCursorTemplate(decl);
+  if (lib.clang_Cursor_isNull(primary) ||
+      is_invalid_kind(lib.clang_getCursorKind(primary))) {
+    return; // underlying type is not a class-template specialization
+  }
+  // Skip std:: / system templates -- keep them collapsed onto the primary.
+  if (lib.clang_Location_isInSystemHeader(
+          lib.clang_getCursorLocation(primary)) != 0) {
+    return;
+  }
+  const std::string inst_usr =
+      CxString(lib, lib.clang_getCursorUSR(decl)).str();
+  const std::string prim_usr =
+      CxString(lib, lib.clang_getCursorUSR(primary)).str();
+  if (inst_usr.empty() || prim_usr.empty() || inst_usr == prim_usr) {
+    return;
+  }
+
+  const RefDeclLoc inst_dl = ref_decl_loc(lib, db, decl);
+  const int64_t inst_id = db.mint_symbol_id(
+      inst_usr, CxString(lib, lib.clang_getCursorSpelling(decl)).str(),
+      qualified_name(lib, decl),
+      CxString(lib, lib.clang_getTypeSpelling(underlying)).str(),  // 'X<B>'
+      stub_kind(lib, decl), inst_dl.file_id, inst_dl.line, inst_dl.col,
+      inst_dl.path, /*is_instantiation=*/true, /*is_named_instance=*/true);
+
+  const RefDeclLoc prim_dl = ref_decl_loc(lib, db, primary);
+  const int64_t prim_id = db.mint_symbol_id(
+      prim_usr, CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
+      qualified_name(lib, primary),
+      CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
+      stub_kind(lib, primary), prim_dl.file_id, prim_dl.line, prim_dl.col,
+      prim_dl.path);
+  Edge e;
+  e.src_id = inst_id;
+  e.dst_id = prim_id;
+  e.kind = 5; // instantiates: X<B> -> X
+  e.count = 1;
+  db.add_edge(e);
+
+  // template_arg rows on the instance. The Type API exposes TYPE args only,
+  // which is all the roll-up needs (T->B); non-type args are skipped.
+  const int nargs = lib.clang_Type_getNumTemplateArguments(underlying);
+  for (int ai = 0; ai < nargs; ++ai) {
+    const CXType arg_type = lib.clang_Type_getTemplateArgumentAsType(
+        underlying, static_cast<unsigned>(ai));
+    TemplateArg ta;
+    ta.owner_id = inst_id;
+    ta.position = static_cast<int64_t>(ai);
+    ta.arg_kind = 1;
+    const std::string spelling =
+        CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+    if (!spelling.empty()) {
+      ta.literal = spelling;
+    }
+    const CXCursor arg_decl = lib.clang_getTypeDeclaration(arg_type);
+    if (!lib.clang_Cursor_isNull(arg_decl) &&
+        !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+      const std::string ref_usr =
+          CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+      if (!ref_usr.empty()) {
+        if (const auto rsym = db.lookup_symbol(ref_usr)) {
+          ta.ref_id = rsym->id;
+        }
+      }
+    }
+    db.add_template_arg(ta);
+  }
+}
+
 // Context for the recursive body descent (calls + uses).
 struct BodyDescentCtx {
   LibClang *lib = nullptr;
@@ -1958,6 +2044,9 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                         file_id, cursor, 0);
         }
       }
+      // Stage 2: a named alias of a class-template specialization mints the
+      // X<B> instance entity (own composes/aggregates/associates via T->B).
+      mint_named_instance(lib, db_, cursor);
     }
 
     // -- CXX_BASE_SPECIFIER: inherits ----------------------------------

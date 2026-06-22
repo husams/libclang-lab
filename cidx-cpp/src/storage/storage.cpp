@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS symbol (
     is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
                                               -- instantiation node (own USR,
                                               -- definition via `instantiates` edge)
+    is_named_instance INTEGER NOT NULL DEFAULT 0, -- v20: instance minted from a
+                                              -- NAMED using/typedef alias (X<B>);
+                                              -- carries its own composes/
+                                              -- aggregates/associates (T->B)
+                                              -- instead of collapsing onto the
+                                              -- primary
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
@@ -261,7 +267,7 @@ CREATE TABLE IF NOT EXISTS entity_edge (
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '19');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '20');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -690,6 +696,19 @@ void Storage::migrate() {
     }
     if (kind_type != "INTEGER") {
       migrate_symbol_kind_to_int();
+      changed = true;
+    }
+  }
+  // v19 -> v20: named-instance marker. A template instance minted from a NAMED
+  // using/typedef alias (X<B>) carries its own composes/aggregates/associates
+  // instead of collapsing onto the primary. No backfill -- reindex repopulates;
+  // old rows read as 0. Re-read columns: the v15->v16 rebuild above recreates
+  // `symbol` (without this column), so the snapshot from the top is stale.
+  {
+    const auto cols2 = table_columns("symbol");
+    if (!has_col(cols2, "is_named_instance")) {
+      db_.exec("ALTER TABLE symbol ADD COLUMN is_named_instance INTEGER NOT NULL "
+               "DEFAULT 0");
       changed = true;
     }
   }
@@ -1838,7 +1857,7 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
                                 const std::optional<int64_t> &decl_line,
                                 const std::optional<int64_t> &decl_col,
                                 const std::optional<std::string> &decl_path,
-                                bool is_instantiation) {
+                                bool is_instantiation, bool is_named_instance) {
   // The follow-up SELECT returns the stable id whether the row was minted or
   // already present. 'function' is the fallback kind when the cursor kind is
   // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
@@ -1852,8 +1871,8 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   auto ins = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "                    decl_file_id, decl_line, decl_col, decl_path, "
-      "                    is_instantiation, resolved) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+      "                    is_instantiation, is_named_instance, resolved) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  kind             = CASE WHEN symbol.spelling = '' "
       "                          THEN excluded.kind ELSE symbol.kind END, "
@@ -1865,7 +1884,8 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
       "  decl_line        = COALESCE(symbol.decl_line, excluded.decl_line), "
       "  decl_col         = COALESCE(symbol.decl_col, excluded.decl_col), "
       "  decl_path        = COALESCE(symbol.decl_path, excluded.decl_path), "
-      "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation)");
+      "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation), "
+      "  is_named_instance = MAX(symbol.is_named_instance, excluded.is_named_instance)");
   ins.bind(1, std::string_view(usr));
   ins.bind(2, std::string_view(spelling));
   if (qual_name.empty()) {
@@ -1884,6 +1904,7 @@ int64_t Storage::mint_symbol_id(const std::string &usr,
   bind_opt(ins, 8, decl_col);
   bind_opt(ins, 9, decl_path);
   ins.bind(10, static_cast<int64_t>(is_instantiation ? 1 : 0));
+  ins.bind(11, static_cast<int64_t>(is_named_instance ? 1 : 0));
   ins.step_done();
   auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
   sel.bind(1, std::string_view(usr));
@@ -2472,6 +2493,157 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
   }
 }
 
+// Strip wrappers/qualifiers/ptr-ref-array off a field type, returning the bare
+// innermost token (e.g. 'std::vector<T>' -> 'T', 'const T *' -> 'T'). Mirrors
+// entity_rollup._strip_to_param_core. Used to discover which template parameter
+// a primary-template member binds.
+static std::string cpp_strip_to_param_core(const std::string &type_spelling) {
+  auto strip_quals = [](std::string s) {
+    for (const auto *q : {"const ", "volatile "}) {
+      std::string::size_type p;
+      while ((p = s.find(q)) != std::string::npos) s.erase(p, strlen(q));
+    }
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+  };
+  std::string s = strip_quals(type_spelling);
+  while (!s.empty() && (s.back() == '&' || s.back() == '*' || s.back() == ']')) {
+    if (s.back() == ']') {
+      auto p = s.rfind('[');
+      s = (p == std::string::npos) ? std::string() : s.substr(0, p);
+    } else {
+      s.pop_back();
+    }
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+  }
+  s = strip_quals(s);
+  static const char *wrappers[] = {
+    "std::unique_ptr<", "unique_ptr<", "std::shared_ptr<", "shared_ptr<",
+    "std::weak_ptr<",   "weak_ptr<",   "std::optional<",   "optional<",
+    "std::vector<", "vector<", "std::list<", "list<",
+    "std::deque<", "deque<", "std::set<", "set<",
+    "std::unordered_set<", "unordered_set<",
+    "std::map<", "std::unordered_map<", nullptr
+  };
+  for (const char **w = wrappers; *w; ++w) {
+    if (s.substr(0, strlen(*w)) == *w) {
+      return cpp_strip_to_param_core(cpp_wrapper_value_type(s, *w));
+    }
+  }
+  return s;
+}
+
+// Phase 3b: composes/aggregates/associates for NAMED template instances.
+// A `using Y = X<B>;` mints the X<B> instance (is_named_instance=1) but libclang
+// materialises NO members for it, so Phase 3 cannot classify them. Instead read
+// the PRIMARY's members and SUBSTITUTE the instance's bound type: for a member
+// binding template param i (bare T, vector<T>, unique_ptr<T>, T*, ...), look up
+// the instance's template_arg at position i (-> B) and emit X<B> <ownership> B.
+// The instance is NOT collapsed onto the primary. Mirrors
+// entity_rollup._materialise_instance_composition.
+static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
+  struct InstRow { int64_t inst_id, prim_id; };
+  std::vector<InstRow> instances;
+  {
+    auto st = db.prepare(
+        "SELECT e.src_id, e.dst_id "
+        "FROM edge e "
+        "JOIN symbol inst ON inst.id = e.src_id "
+        "JOIN symbol prim ON prim.id = e.dst_id "
+        "WHERE e.kind = 5 AND inst.is_named_instance = 1 AND prim.kind = 31 "
+        "ORDER BY e.src_id, e.dst_id");
+    while (st.step()) instances.push_back({st.col_int64(0), st.col_int64(1)});
+  }
+
+  static const std::map<std::string,int64_t> acc_map = {
+    {"public",0}, {"protected",1}, {"private",2}
+  };
+
+  for (const auto &inst : instances) {
+    // primary template parameter NAME -> position (type params only)
+    std::map<std::string,int64_t> param_pos;
+    {
+      auto st = db.prepare(
+          "SELECT position, name FROM template_param WHERE owner_id = ? "
+          "AND param_kind = 1 ORDER BY position");
+      st.bind(1, inst.prim_id);
+      while (st.step()) {
+        const std::string nm = st.col_text(1);
+        if (!nm.empty()) param_pos.emplace(nm, st.col_int64(0));
+      }
+    }
+
+    // instance bound TYPE args: position -> ref_id (the entity B). NULL ref_id
+    // (builtin arg) recorded as nullopt so it is skipped below.
+    std::map<int64_t, std::optional<int64_t>> bound;
+    {
+      auto st = db.prepare(
+          "SELECT position, ref_id FROM template_arg WHERE owner_id = ? "
+          "AND arg_kind = 1 ORDER BY position");
+      st.bind(1, inst.inst_id);
+      while (st.step()) {
+        std::optional<int64_t> ref;
+        if (!st.col_is_null(1)) ref = st.col_int64(1);
+        bound[st.col_int64(0)] = ref;
+      }
+    }
+
+    // primary template's data members
+    struct FieldRow { int64_t field_id; std::string type_info, access; };
+    std::vector<FieldRow> fields;
+    {
+      auto st = db.prepare(
+          "SELECT e.src_id, s.type_info, s.access "
+          "FROM edge e "
+          "JOIN symbol s ON s.id = e.src_id "
+          "WHERE e.kind = 8 AND e.dst_id = ? AND s.kind = 6 "
+          "ORDER BY e.src_id");
+      st.bind(1, inst.prim_id);
+      while (st.step())
+        fields.push_back({st.col_int64(0), st.col_text(1), st.col_text(2)});
+    }
+
+    for (const auto &f : fields) {
+      if (f.type_info.empty()) continue;
+      const std::string core = cpp_strip_to_param_core(f.type_info);
+      auto pit = param_pos.find(core);
+      if (pit == param_pos.end()) continue;  // type does not bind a param
+      auto bit = bound.find(pit->second);
+      if (bit == bound.end() || !bit->second) continue;  // builtin / unindexed
+      const int64_t ref_entity_id = *bit->second;
+
+      auto ck = db.prepare("SELECT kind FROM symbol WHERE id = ?");
+      ck.bind(1, ref_entity_id);
+      if (!ck.step()) continue;
+      const int64_t ref_kind = ck.col_int64(0);
+      if (ref_kind != 2 && ref_kind != 3 && ref_kind != 4 && ref_kind != 5)
+        continue;
+      if (inst.inst_id == ref_entity_id) continue;
+
+      auto [ek, mult] = cpp_classify_field_type(f.type_info);
+      int64_t access_int = 0;
+      if (acc_map.count(f.access)) access_int = acc_map.at(f.access);
+
+      auto ins = db.prepare(
+          "INSERT INTO entity_edge "
+          "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+          " access, is_virtual, create_form, partial) "
+          "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
+          "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+          "  count = entity_edge.count + 1");
+      ins.bind(1, inst.inst_id);
+      ins.bind(2, ref_entity_id);
+      ins.bind(3, ek);
+      ins.bind(4, f.field_id);
+      ins.bind(5, mult);
+      ins.bind(6, access_int);
+      ins.step_done();
+    }
+  }
+}
+
 // Phase 4: creates(7) / destroys(9) from PR1 construction/destruction edges.
 static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
   // Layer-0 construct/destroy edge.kind -> create_form
@@ -2700,6 +2872,7 @@ void Storage::materialise_entity_edges() {
     cpp_materialise_specializes(db_);
     cpp_materialise_instantiates(db_);
     cpp_materialise_field_relations(db_);
+    cpp_materialise_instance_composition(db_);
     cpp_materialise_creates_destroys(db_);
     cpp_materialise_uses(db_);
     cpp_materialise_befriends(db_);

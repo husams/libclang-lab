@@ -435,6 +435,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                               "line", "col", "decl_file_id", "decl_line",
                               "decl_col", "decl_path", "is_definition",
                               "is_pure", "is_static", "is_instantiation",
+                              "is_named_instance",
                               "linkage", "access", "parent_usr", "resolved"});
 
   // the indexes (5 symbol + 2 edge + 1 call_arg + 1 diagnostic)
@@ -461,7 +462,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "19");
+    CHECK(st.col_text(0) == "20");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");

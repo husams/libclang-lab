@@ -12,7 +12,7 @@ because PR2 has not been implemented in this worktree.  Do NOT xfail or skip the
 flag failures as blockers so the developer can act on each one.
 
 Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
-  schema-1      SCHEMA_VERSION == 19
+  schema-1      SCHEMA_VERSION == 20
   schema-2      entity_edge table present in _SCHEMA
   schema-3      entity_edge_kind seed has exactly 11 rows (ids 1-11)
   schema-4      entity_edge columns: id,src_id,dst_id,kind,count,via_member_id,
@@ -21,9 +21,9 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.23.0"  (instantiates entity_edge kind)
-  version-2     C++ kVersion == "0.23.0"
-  version-3     C++ kSchemaVersion == 19
+  version-1     Python VERSION == "0.24.0"  (instantiates entity_edge kind)
+  version-2     C++ kVersion == "0.24.0"
+  version-3     C++ kSchemaVersion == 20
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
   parity-1      parity_check.sh includes at least one entity_edge CLI command
@@ -87,12 +87,12 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_19():
-    """SCHEMA_VERSION must be 19 after the v18→v19 instantiates-kind bump."""
+def test_schema_version_is_20():
+    """SCHEMA_VERSION must be 20 after the v19→v20 named-instance bump."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 19, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 19. "
-        "storage.py:35 SCHEMA_VERSION must be bumped to 19 (instantiates kind)."
+    assert storage.SCHEMA_VERSION == 20, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 20. "
+        "storage.py:35 SCHEMA_VERSION must be bumped to 20 (named-instance column)."
     )
 
 
@@ -295,39 +295,39 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_023():
-    """Python VERSION must be 0.23.0 after the instantiates entity_edge kind."""
+def test_python_version_is_024():
+    """Python VERSION must be 0.24.0 after the named-instance composes feature."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.23.0", (
-        f"Python VERSION is '{version}'; expected '0.23.0'. "
-        "Bump VERSION to 0.23.0 in cli.py (instantiates entity_edge kind)."
+    assert version == "0.24.0", (
+        f"Python VERSION is '{version}'; expected '0.24.0'. "
+        "Bump VERSION to 0.24.0 in cli.py (named-instance composes feature)."
     )
 
 
-def test_cpp_version_is_023():
-    """C++ kVersion must be 0.23.0 after the instantiates entity_edge kind."""
+def test_cpp_version_is_024():
+    """C++ kVersion must be 0.24.0 after the named-instance composes feature."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.23.0", (
-        f"C++ kVersion is '{version}'; expected '0.23.0'. "
-        "Bump kVersion to 0.23.0 in args.hpp (instantiates entity_edge kind)."
+    assert version == "0.24.0", (
+        f"C++ kVersion is '{version}'; expected '0.24.0'. "
+        "Bump kVersion to 0.24.0 in args.hpp (named-instance composes feature)."
     )
 
 
-def test_cpp_schema_version_is_19():
-    """C++ kSchemaVersion must be 19 after the v18->v19 instantiates-kind bump."""
+def test_cpp_schema_version_is_20():
+    """C++ kSchemaVersion must be 20 after the v19->v20 named-instance bump."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 19, (
-        f"C++ kSchemaVersion is {version}; expected 19. "
-        "Bump kSchemaVersion 18 -> 19 in storage.hpp (instantiates kind)."
+    assert version == 20, (
+        f"C++ kSchemaVersion is {version}; expected 20. "
+        "Bump kSchemaVersion 19 -> 20 in storage.hpp (named-instance column)."
     )
 
 

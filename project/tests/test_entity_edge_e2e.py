@@ -256,3 +256,133 @@ def test_specializes_fires_for_explicit_specialization(tmpl_edges):
     assert not any(r["src"] == "Box<bool>" for r in tmpl_edges["instantiates"]), (
         "Box<bool> must NOT appear as an instantiates(11) source"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: a NAMED instance `X<B>` composes/aggregates the bound type B
+# ---------------------------------------------------------------------------
+
+# `using Y = X<B>;` mints no `X<B>` symbol on a plain parse, so Stage 2 mints
+# the instance from the alias and SUBSTITUTES the bound type into the primary's
+# members: a by-value member `T value` -> composes B (mult 1); a `vector<T>`
+# member -> composes B (mult 0..*); a `T* ptr` member -> associates B.
+_NAMED_INST_SOURCE = """
+#include <memory>
+#include <vector>
+
+namespace ni {
+
+struct Widget { int v; };
+
+template <typename T>
+struct Box {
+    T value;          // bare T   -> composes B, multiplicity 1
+    T *ptr;           // T*       -> associates B, multiplicity 0..1
+};
+
+template <typename T>
+struct Bag {
+    std::vector<T> items;         // vector<T>     -> composes B, 0..*
+    std::shared_ptr<T> shared;    // shared_ptr<T> -> aggregates B, 0..1
+};
+
+// NAMED instances via `using` / typedef: each must carry its OWN relations.
+using BoxW = Box<Widget>;
+typedef Bag<Widget> BagW;
+
+}  // namespace ni
+"""
+
+
+@pytest.fixture
+def named_inst_edges() -> dict:
+    """Index the named-instance TU for real, materialize, return rows by kind."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "named.cpp")
+        with open(path, "w") as fh:
+            fh.write(_NAMED_INST_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst, "
+                "       ee.multiplicity "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src",
+                (kind,),
+            ).fetchall()
+
+        return {
+            "composes": by_kind(4),
+            "aggregates": by_kind(5),
+            "associates": by_kind(6),
+        }
+
+
+def test_named_instance_composes_value_member(named_inst_edges):
+    """`using BoxW = Box<Widget>` -> Box<Widget> composes Widget (value, mult 1)."""
+    rows = named_inst_edges["composes"]
+    match = [
+        r for r in rows
+        if r["src"] == "Box<Widget>" and r["dst"] == "Widget"
+        and r["multiplicity"] == 1
+    ]
+    assert match, (
+        "composes(4) Box<Widget> -> Widget (mult 1) missing; got "
+        f"{[(r['src'], r['dst'], r['multiplicity']) for r in rows]}"
+    )
+
+
+def test_named_instance_composes_container_multiplicity(named_inst_edges):
+    """`typedef Bag<Widget>` with `vector<T>` -> composes Widget, mult 0..* (3)."""
+    rows = named_inst_edges["composes"]
+    match = [
+        r for r in rows
+        if r["src"] == "Bag<Widget>" and r["dst"] == "Widget"
+        and r["multiplicity"] == 3
+    ]
+    assert match, (
+        "composes(4) Bag<Widget> -> Widget (mult 0..* = 3) missing; got "
+        f"{[(r['src'], r['dst'], r['multiplicity']) for r in rows]}"
+    )
+
+
+def test_named_instance_aggregates_shared_ptr(named_inst_edges):
+    """`shared_ptr<T>` member of Bag<Widget> -> aggregates Widget (mult 0..1)."""
+    rows = named_inst_edges["aggregates"]
+    assert any(
+        r["src"] == "Bag<Widget>" and r["dst"] == "Widget" for r in rows
+    ), (
+        "aggregates(5) Bag<Widget> -> Widget missing; got "
+        f"{[(r['src'], r['dst']) for r in rows]}"
+    )
+
+
+def test_named_instance_associates_raw_ptr(named_inst_edges):
+    """`T* ptr` member of Box<Widget> -> associates Widget (borrowed ptr)."""
+    rows = named_inst_edges["associates"]
+    assert any(
+        r["src"] == "Box<Widget>" and r["dst"] == "Widget" for r in rows
+    ), (
+        "associates(6) Box<Widget> -> Widget missing; got "
+        f"{[(r['src'], r['dst']) for r in rows]}"
+    )
