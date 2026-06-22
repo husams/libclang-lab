@@ -712,6 +712,25 @@ bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
 // Gated to a NON-system primary (a `std::vector<F>` member/alias/local is left
 // to collapse onto the primary). Mirrors ast.py:_mint_instance_from_type.
 void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
+  // Stage 4: peel pointer / reference / array wrappers so an `X<B>* m_;` /
+  // `X<B>& m_;` member mints the SAME instance as a by-value `X<B> m_;`. Mirrors
+  // named_type_decl's stripping so emit_type_use (which peels the same way) and
+  // minting agree on the spec decl USR. A `std::vector<X<B>>` is NOT a wrapper
+  // kind here (it is a specialization whose primary is a system template) -- it
+  // is left to collapse onto std::vector, never peeled to the inner X<B>, so no
+  // std:: explosion and no inner mint (deferred, see plan).
+  for (int i = 0; i < 32; ++i) {
+    const CXTypeKind tk = type_obj.kind;
+    if (tk == CXType_Pointer || tk == CXType_LValueReference ||
+        tk == CXType_RValueReference) {
+      type_obj = lib.clang_getPointeeType(type_obj);
+    } else if (tk == CXType_ConstantArray || tk == CXType_IncompleteArray ||
+               tk == CXType_VariableArray || tk == CXType_DependentSizedArray) {
+      type_obj = lib.clang_getArrayElementType(type_obj);
+    } else {
+      break;
+    }
+  }
   const CXCursor decl = lib.clang_getTypeDeclaration(type_obj);
   if (lib.clang_Cursor_isNull(decl) ||
       is_invalid_kind(lib.clang_getCursorKind(decl))) {
@@ -1838,7 +1857,9 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // Stage 3: a LOCAL `X<B> v;` mints the X<B> instance entity (its own
       // composes/aggregates/associates via T->B). The file-cursor walk in
       // index_edges does not descend bodies, so locals are minted here;
-      // file-scope vars + members are minted there.
+      // file-scope vars + members are minted there. (Order matches the Python
+      // body-descent arm: emit_type_use THEN mint -- locals have no owning
+      // record, so the FIELD_DECL/VAR_DECL ordering fix is not needed here.)
       mint_instance_from_type(lib, *ctx->db, lib.clang_getCursorType(cursor));
       // B3 class-template instantiates (kind=5): when a variable's type is a
       // class-template instantiation, emit instantiates (src=enclosing fn,
@@ -2040,6 +2061,15 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     } else if (ck == CXCursor_FieldDecl || ck == CXCursor_VarDecl) {
       // FIELD_DECL: field type. VAR_DECL: file-scope variable type (locals are
       // reached via body_descent). src = the field/variable symbol itself.
+      //
+      // Stage 3/4: a member/file-scope `X<B>` mints the X<B> instance entity
+      // (its own composes/aggregates/associates via T->B), exactly like an
+      // alias. Minted FIRST -- before the uses-emit below -- so the member
+      // reliably gets a structural uses(7) edge -> the X<B> instance (keyed on
+      // the spec USR), order-independent within the TU. Stage 4's
+      // cpp_materialise_field_relations reads that edge to give the owning
+      // record `A composes/associates X<B>` (the un-collapsed instance).
+      mint_instance_from_type(lib, db_, lib.clang_getCursorType(cursor));
       const std::string sym_usr =
           CxString(lib, lib.clang_getCursorUSR(cursor)).str();
       if (!sym_usr.empty()) {
@@ -2049,9 +2079,6 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                         file_id, cursor, 0);
         }
       }
-      // Stage 3: a member/file-scope `X<B>` mints the X<B> instance entity (its
-      // own composes/aggregates/associates via T->B), exactly like an alias.
-      mint_instance_from_type(lib, db_, lib.clang_getCursorType(cursor));
     } else if (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl) {
       const std::string td_usr =
           CxString(lib, lib.clang_getCursorUSR(cursor)).str();

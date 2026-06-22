@@ -534,3 +534,138 @@ def test_nontype_arg_instance_minted_without_type_relation(plain_inst):
         r["src"] == "Reg<7>" and r["dst"] == "Reg<N>"
         for r in plain_inst["instantiates"]
     ), f"instantiates Reg<7> -> Reg<N> missing; got {plain_inst['instantiates']}"
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: connect the OWNING RECORD to the named instance.
+# A record holding `X<B>` by value / ptr / ref surfaces `A composes/associates
+# X<B>` (the UN-collapsed instance), completing the chain A -> X<B> -> B. A
+# `std::vector<X<B>>` member is the documented DEFERRED case (no owner edge).
+# ---------------------------------------------------------------------------
+
+_OWNER_INST_SOURCE = """
+#include <vector>
+namespace s4 {
+
+struct B { int y; };
+
+template <typename T>
+struct Box { T value; };          // -> Box<B> composes B (mult 1)
+
+struct Holder {
+    Box<B> by_value;              // Stage 4: Holder composes Box<B> (mult 1)
+    Box<B>* by_ptr;               // Stage 4: Holder associates Box<B> (ptr peel)
+    Box<B>& by_ref;               // Stage 4: Holder associates Box<B> (ref peel)
+};
+
+struct VecHolder {
+    std::vector<Box<B>> boxes;    // DEFERRED: no VecHolder -> Box<B> edge
+};
+
+}  // namespace s4
+"""
+
+
+@pytest.fixture
+def owner_inst():
+    """Index the owning-record TU for real; return composes/associates/etc."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "owner.cpp")
+        with open(path, "w") as fh:
+            fh.write(_OWNER_INST_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst, "
+                "       ee.multiplicity, ee.via_member_id "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src, dst, ee.via_member_id",
+                (kind,),
+            ).fetchall()
+
+        return {
+            "composes": by_kind(4),
+            "aggregates": by_kind(5),
+            "associates": by_kind(6),
+            "instantiates": by_kind(11),
+        }
+
+
+def test_owner_composes_named_instance_by_value(owner_inst):
+    """Stage 4: `Box<B> by_value;` -> Holder composes Box<B> (the instance, mult 1)."""
+    assert any(
+        r["src"] == "Holder" and r["dst"] == "Box<B>" and r["multiplicity"] == 1
+        for r in owner_inst["composes"]
+    ), (
+        "Holder composes Box<B> (mult 1) missing; got "
+        f"{[(r['src'], r['dst'], r['multiplicity']) for r in owner_inst['composes']]}"
+    )
+
+
+def test_owner_associates_named_instance_by_pointer_and_reference(owner_inst):
+    """Stage 4: `Box<B>*`/`Box<B>&` members -> Holder associates Box<B> (peel)."""
+    matches = [
+        r for r in owner_inst["associates"]
+        if r["src"] == "Holder" and r["dst"] == "Box<B>"
+    ]
+    # One associates row per indirect member (ptr + ref), distinct via_member_id.
+    assert len(matches) == 2, (
+        "expected 2 associates Holder -> Box<B> rows (ptr + ref); got "
+        f"{[(r['src'], r['dst'], r['via_member_id']) for r in owner_inst['associates']]}"
+    )
+    assert len({r["via_member_id"] for r in matches}) == 2
+
+
+def test_owner_edge_points_at_uncollapsed_instance(owner_inst):
+    """The Stage-4 edge targets the INSTANCE Box<B>, never the primary Box<T>."""
+    assert not any(
+        r["src"] == "Holder" and r["dst"] == "Box<T>"
+        for r in owner_inst["composes"] + owner_inst["associates"]
+    ), "owner edge collapsed onto the primary Box<T> -- must stay on Box<B>"
+
+
+def test_owner_chain_to_bound_type_preserved(owner_inst):
+    """The chain stays two edges: Box<B> instantiates Box<T> AND composes B."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "Box<T>"
+        for r in owner_inst["instantiates"]
+    ), f"Box<B> instantiates Box<T> missing; got {owner_inst['instantiates']}"
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "B" and r["multiplicity"] == 1
+        for r in owner_inst["composes"]
+    ), f"Box<B> composes B (mult 1) missing; got {owner_inst['composes']}"
+
+
+def test_vector_member_owner_edge_deferred(owner_inst):
+    """DEFERRED: a `std::vector<Box<B>>` member yields NO VecHolder -> Box<B>
+    edge (the vector instance is system / never minted; the inner Box<B> is not
+    peeled out of the container). Documents the current Stage-4 boundary."""
+    assert not any(
+        r["src"] == "VecHolder"
+        for r in owner_inst["composes"] + owner_inst["associates"]
+        + owner_inst["aggregates"]
+    ), (
+        "VecHolder must not get an entity_edge for its vector<Box<B>> member; got "
+        f"composes={[(r['src'], r['dst']) for r in owner_inst['composes']]} "
+        f"associates={[(r['src'], r['dst']) for r in owner_inst['associates']]}"
+    )

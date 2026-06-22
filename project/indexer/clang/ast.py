@@ -1570,6 +1570,27 @@ def _mint_instance_from_type(db: Storage, type_obj: Optional[cx.Type]) -> None:
     """
     if type_obj is None:
         return
+    # Stage 4: peel pointer / reference / array wrappers so an `X<B>* m_;` /
+    # `X<B>& m_;` member mints the SAME instance as a by-value `X<B> m_;`.
+    # Mirrors _named_type_decl's stripping, so emit_type_use (which peels the
+    # same way) and minting agree on the spec decl USR. A `std::vector<X<B>>` is
+    # NOT a wrapper kind here (it is a specialization whose primary is a system
+    # template) -- it is left to collapse onto std::vector, never peeled to the
+    # inner X<B>, so no std:: explosion and no inner mint (deferred, see plan).
+    for _ in range(32):
+        if type_obj.kind in _TYPE_WRAPPERS:
+            type_obj = (
+                type_obj.get_pointee()
+                if type_obj.kind
+                in (
+                    cx.TypeKind.POINTER,
+                    cx.TypeKind.LVALUEREFERENCE,
+                    cx.TypeKind.RVALUEREFERENCE,
+                )
+                else type_obj.get_array_element_type()
+            )
+        else:
+            break
     decl = type_obj.get_declaration()
     if _invalid_cursor(decl):
         return
@@ -1715,23 +1736,28 @@ def _index_edges_notxn(
                             db, _fn_sym.id, _arg.type, file_id, _arg.location
                         )
         elif ck == cx.CursorKind.FIELD_DECL:
+            # Stage 3/4: a member `X<B> field;` mints the X<B> instance entity
+            # (its own composes/aggregates/associates via T->B), exactly like an
+            # alias.  Minted FIRST -- before the uses-emit below -- so the member
+            # reliably gets a structural uses(7) edge -> the X<B> instance (keyed
+            # on the spec USR), order-independent within the TU.  Stage 4's
+            # _materialise_field_relations reads that edge to give the owning
+            # record `A composes/associates X<B>` (the un-collapsed instance).
+            _mint_instance_from_type(db, cursor.type)
             _m_usr = cursor.get_usr()
             if _m_usr:
                 _m_sym = db.lookup_symbol(_m_usr)
                 if _m_sym is not None:
                     _emit_type_use(db, _m_sym.id, cursor.type, file_id, cursor.location)
-            # Stage 3: a member `X<B> field;` mints the X<B> instance entity (its
-            # own composes/aggregates/associates via T->B), exactly like an alias.
-            _mint_instance_from_type(db, cursor.type)
         elif ck == cx.CursorKind.VAR_DECL:
             # File-scope variable (locals are reached via _body_descent).
+            # Mint the instance FIRST (order-independent uses edge), as above.
+            _mint_instance_from_type(db, cursor.type)
             _v_usr = cursor.get_usr()
             if _v_usr:
                 _v_sym = db.lookup_symbol(_v_usr)
                 if _v_sym is not None:
                     _emit_type_use(db, _v_sym.id, cursor.type, file_id, cursor.location)
-            # Stage 3: a file-scope `X<B> v;` mints the X<B> instance entity.
-            _mint_instance_from_type(db, cursor.type)
         elif ck in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):
             _t_usr = cursor.get_usr()
             if _t_usr:
