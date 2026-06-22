@@ -157,3 +157,102 @@ def test_befriends_friend_decl(edges):
     assert any(r["src"] == "Vault" and r["dst"] == "Pool" for r in rows), (
         "befriends(10) Vault->Pool missing -- FRIEND_DECL extraction not wired?"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: instantiates(11) vs specializes(3) on a REAL parse
+# ---------------------------------------------------------------------------
+
+# An explicit instantiation (`template class X<int>;`) is an INSTANCE that
+# `instantiates` its primary; an explicit specialization (`template<> class
+# X<bool>{...}`) is a separate body that `specializes` its primary. The two are
+# mutually exclusive and BOTH keep the instance/spec as its own design entity
+# (the source is never collapsed onto the primary).
+_TMPL_SOURCE = """
+namespace tg {
+
+template <typename T>
+class Box {
+    T value_;
+public:
+    explicit Box(T v) : value_(v) {}
+    const T& get() const { return value_; }
+};
+
+// EXPLICIT SPECIALIZATION: a separate body -> specializes(3) Box<bool> -> Box.
+template <>
+class Box<bool> {
+    bool flag_;
+public:
+    explicit Box(bool v) : flag_(v) {}
+    bool get() const { return flag_; }
+};
+
+// EXPLICIT INSTANTIATION: a concrete instance -> instantiates(11) Box<int> -> Box.
+template class Box<int>;
+
+}  // namespace tg
+"""
+
+
+@pytest.fixture
+def tmpl_edges() -> dict:
+    """Index the template TU for real, materialize, and return rows by kind."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "tmpl.cpp")
+        with open(path, "w") as fh:
+            fh.write(_TMPL_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src",
+                (kind,),
+            ).fetchall()
+
+        return {"specializes": by_kind(3), "instantiates": by_kind(11)}
+
+
+def test_instantiates_fires_for_explicit_instantiation(tmpl_edges):
+    """`template class Box<int>;` -> instantiates(11) Box<int> -> Box<T>."""
+    rows = tmpl_edges["instantiates"]
+    assert any(r["src"] == "Box<int>" and r["dst"] == "Box<T>" for r in rows), (
+        f"instantiates(11) Box<int> -> Box<T> missing; got {[(r['src'], r['dst']) for r in rows]}"
+    )
+    # An instantiation is NEVER recorded as a specialization.
+    assert not any(r["src"] == "Box<int>" for r in tmpl_edges["specializes"]), (
+        "Box<int> must NOT appear as a specializes(3) source"
+    )
+
+
+def test_specializes_fires_for_explicit_specialization(tmpl_edges):
+    """`template<> class Box<bool>{...}` -> specializes(3) Box<bool> -> Box<T>."""
+    rows = tmpl_edges["specializes"]
+    assert any(r["src"] == "Box<bool>" and r["dst"] == "Box<T>" for r in rows), (
+        f"specializes(3) Box<bool> -> Box<T> missing; got {[(r['src'], r['dst']) for r in rows]}"
+    )
+    # A specialization is NEVER recorded as an instantiation.
+    assert not any(r["src"] == "Box<bool>" for r in tmpl_edges["instantiates"]), (
+        "Box<bool> must NOT appear as an instantiates(11) source"
+    )

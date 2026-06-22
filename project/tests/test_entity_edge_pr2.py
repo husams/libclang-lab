@@ -1,12 +1,12 @@
 """PR2: v17 entity_edge materialisation tests.
 
 Covers:
-  * schema/version invariants (SCHEMA_VERSION=18, VERSION='0.21.0')
+  * schema/version invariants (SCHEMA_VERSION=19, VERSION='0.23.0')
   * entity_rollup module importable
   * entity_edge + entity_edge_kind tables present in schema
   * PR1 edge_kind seed rows 10-16 present
   * BDD acceptance scenarios (ADR-008 S1..S4)
-  * all 10 entity_edge kinds
+  * all 11 entity_edge kinds
   * roll-up idempotency + re-materialise
 
 All fixture graphs are hermetic (no libclang parse, no disk files).
@@ -37,6 +37,7 @@ _ENTITY_KIND_NAMES = {
     8: "uses",
     9: "destroys",
     10: "befriends",
+    11: "instantiates",
 }
 
 # Layer-0 edge kinds introduced by PR1
@@ -93,13 +94,13 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_18():
-    assert SCHEMA_VERSION == 18, f"Expected 18, got {SCHEMA_VERSION}"
+def test_schema_version_is_19():
+    assert SCHEMA_VERSION == 19, f"Expected 19, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0210():
+def test_product_version_is_0230():
     from indexer import cli
-    assert cli.VERSION == "0.21.0", f"Expected '0.21.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.23.0", f"Expected '0.23.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -330,27 +331,59 @@ def test_kind_implements(tmp_path):
     assert rows, "implements(2) missing"
 
 
-def test_kind_specializes_collapses_to_primary(tmp_path):
-    """A specialization's specializes(4) edge points instance -> primary; after
-    template-instance collapse (ADR-008 decision 6 / OQ-3) BOTH endpoints are the
-    primary, so the self-edge is SUPPRESSED -- no bogus Vec<int>->Vec (which would
-    display as the spurious Wrapper->Wrapper self-edge BUG 1 fixes)."""
+def test_kind_specializes_fires_for_explicit_specialization(tmp_path):
+    """An EXPLICIT specialization (`template<> class Vec<bool>{...}`) is a distinct
+    design entity that specializes its primary.  Its Layer-0 specializes(4) edge
+    points instance -> primary; the SOURCE is kept un-collapsed (only the dst is
+    collapsed, which is already the primary), so specializes(3) Vec<bool> -> Vec
+    FIRES -- it is NOT suppressed."""
     if not _HAS_ROLLUP:
         pytest.skip()
     db, dir_id = _fresh(tmp_path)
     root = db.add_file(dir_id, "h.hpp")
 
     primary_id = _sym(db, root, "Vec", "c:@ST@Vec", "Vec", "class-template", 1)
-    spec_id = _sym(db, root, "Vec<int>", "c:@S@Vec#I", "Vec<int>", "class", 10)
+    spec_id = _sym(db, root, "Vec<bool>", "c:@S@Vec#b", "Vec<bool>", "class", 10)
     db.add_edge(spec_id, primary_id, EDGE_KINDS["specializes"])
 
     materialize_entity_edges(db)
-    # spec_id collapses to primary_id; src == dst -> suppressed.
-    assert not db.entity_edges(src_id=spec_id, kind=3), (
-        "specializes self-edge from the instance must be suppressed"
-    )
+    rows = db.entity_edges(src_id=spec_id, dst_id=primary_id, kind=3)
+    assert rows, "specializes(3) Vec<bool> -> Vec must fire for an explicit spec"
+    # No spurious self-edge on the primary.
     assert not db.entity_edges(src_id=primary_id, kind=3), (
-        "no Vec->Vec self-edge after collapse"
+        "no Vec->Vec self-edge"
+    )
+    # A specialization is NEVER an instantiation: specializes(4) must not leak
+    # into instantiates(11).
+    assert not db.entity_edges(src_id=spec_id, kind=11), (
+        "specializes(4) must NOT materialise as instantiates(11)"
+    )
+
+
+def test_kind_instantiates_fires_for_plain_instantiation(tmp_path):
+    """A plain instantiation (`X<B>` via a `using`/use) is a distinct design
+    entity that instantiates its primary.  Its Layer-0 instantiates(5) edge points
+    instance -> primary; the SOURCE is kept un-collapsed, so instantiates(11)
+    X<B> -> X FIRES.  It is NOT a specialization -- specializes(3) must NOT fire."""
+    if not _HAS_ROLLUP:
+        pytest.skip()
+    db, dir_id = _fresh(tmp_path)
+    root = db.add_file(dir_id, "h.hpp")
+
+    primary_id = _sym(db, root, "X", "c:@ST@X", "X", "class-template", 1)
+    inst_id = _sym(db, root, "X<B>", "c:@S@X>#$@S@B", "X<B>", "class", 10)
+    db.add_edge(inst_id, primary_id, EDGE_KINDS["instantiates"])
+
+    materialize_entity_edges(db)
+    rows = db.entity_edges(src_id=inst_id, dst_id=primary_id, kind=11)
+    assert rows, "instantiates(11) X<B> -> X must fire for a plain instantiation"
+    # An instantiation is NEVER a specialization.
+    assert not db.entity_edges(src_id=inst_id, kind=3), (
+        "instantiates(5) must NOT materialise as specializes(3)"
+    )
+    # No spurious self-edge on the primary.
+    assert not db.entity_edges(src_id=primary_id, kind=11), (
+        "no X->X self-edge"
     )
 
 
@@ -432,6 +465,53 @@ def test_kind_associates(tmp_path):
     materialize_entity_edges(db)
     rows = db.entity_edges(src_id=holder_id, dst_id=target_id, kind=6)
     assert rows, "associates(6) missing"
+
+
+def test_map_resolves_to_value_type(tmp_path):
+    """std::map<K,V> -> relation to the VALUE type V (0..*), not the key K.
+
+    Regression: the value type was previously never extracted (the unwrapper
+    only looked at the first template arg / key), so Transaction->Order was lost.
+    """
+    if not _HAS_ROLLUP:
+        pytest.skip()
+    db, dir_id = _fresh(tmp_path)
+    root = db.add_file(dir_id, "h.hpp")
+    C = EDGE_KINDS
+
+    order_id = _sym(db, root, "Order", "c:@S@Order", "Order", "struct", 1)
+    txn_id = _sym(db, root, "Transaction", "c:@S@Transaction", "Transaction",
+                  "struct", 10)
+    field_id = _sym(db, root, "Transaction::m", "c:@S@Transaction@FI@m", "m",
+                    "member", 11, parent="c:@S@Transaction",
+                    type_info="std::map<std::string, Order>", access="private")
+    db.add_edge(field_id, txn_id, C["field_of"])
+
+    materialize_entity_edges(db)
+    rows = db.entity_edges(src_id=txn_id, dst_id=order_id, kind=4)  # composes
+    assert rows, "map<K,V> by value must compose its value type Order"
+    assert rows[0]["multiplicity"] == 3, "map is 0..*"
+
+
+def test_map_of_pointer_value_associates(tmp_path):
+    """std::map<K, V*> -> associates V (0..*): the value is a borrowed pointer."""
+    if not _HAS_ROLLUP:
+        pytest.skip()
+    db, dir_id = _fresh(tmp_path)
+    root = db.add_file(dir_id, "h.hpp")
+    C = EDGE_KINDS
+
+    node_id = _sym(db, root, "Node", "c:@S@Node", "Node", "struct", 1)
+    graph_id = _sym(db, root, "Graph", "c:@S@Graph", "Graph", "struct", 10)
+    field_id = _sym(db, root, "Graph::byId", "c:@S@Graph@FI@byId", "byId",
+                    "member", 11, parent="c:@S@Graph",
+                    type_info="std::map<int, Node*>", access="private")
+    db.add_edge(field_id, graph_id, C["field_of"])
+
+    materialize_entity_edges(db)
+    rows = db.entity_edges(src_id=graph_id, dst_id=node_id, kind=6)  # associates
+    assert rows, "map<K, V*> must associate the (borrowed) value type Node"
+    assert rows[0]["multiplicity"] == 3, "map is 0..*"
 
 
 def test_kind_creates(tmp_path):
@@ -678,22 +758,25 @@ def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version
     finally:
         conn.close()
 
-    assert ver == "18", f"schema_version not at 18: {ver}"
+    assert ver == "19", f"schema_version not at 19: {ver}"
     # the nests row is gone; only befriends survives, renumbered 11 -> 10
     assert edges == [(10,)], f"expected only befriends(10); got {edges}"
-    assert len(kinds) == 10, f"entity_edge_kind should have 10 rows; got {kinds}"
+    # 11 rows: 1-10 plus the reseeded instantiates(11). The old (11,'befriends')
+    # was renumbered to 10, freeing id 11 for the schema script's INSERT OR IGNORE.
+    assert len(kinds) == 11, f"entity_edge_kind should have 11 rows; got {kinds}"
     names = [n for _, n in kinds]
     assert "nests" not in names, "stale 'nests' seed row still present"
     assert "realizes" not in names, "stale 'realizes' seed row was not renamed"
     assert dict(kinds)[10] == "befriends", "id 10 should be befriends after migrate"
+    assert dict(kinds)[11] == "instantiates", "id 11 should be instantiates after migrate"
     assert dict(kinds)[2] == "implements", "id 2 should be implements after migrate"
 
 
 def test_migration_nests_cleanup_is_idempotent(tmp_path):
-    """A clean v18 DB (no stale marker) is left untouched on re-open."""
+    """A clean v19 DB (no stale marker) is left untouched on re-open."""
     db_path = str(tmp_path / "index.db")
     Storage(db_path).close()
-    # second open must not raise and must keep the 10-row seed intact
+    # second open must not raise and must keep the 11-row seed intact
     Storage(db_path).close()
     import sqlite3
     conn = sqlite3.connect(db_path)
@@ -702,9 +785,10 @@ def test_migration_nests_cleanup_is_idempotent(tmp_path):
     finally:
         conn.close()
     names = [n for _, n in kinds]
-    assert len(kinds) == 10
+    assert len(kinds) == 11
     assert "nests" not in names and "realizes" not in names
     assert dict(kinds)[2] == "implements"
+    assert dict(kinds)[11] == "instantiates"
 
 
 def test_migration_entity_edge_populated_after_resolve(tmp_path):

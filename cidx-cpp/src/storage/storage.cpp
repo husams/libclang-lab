@@ -225,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 
 -- ---- v17: Layer-1 entity-edge graph (UML/ER relations over record/enum symbols) --
 -- Entity = a symbol whose kind is in {class,struct,union,enum}; no separate table.
--- All columns are INTEGER (zero text in the table itself). The 10 relation names
+-- All columns are INTEGER (zero text in the table itself). The 11 relation names
 -- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
 -- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
 -- (Lexical nesting is a declaration-scope property of the symbol, not a relation,
@@ -239,7 +239,7 @@ INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
   (1,'generalizes'), (2,'implements'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
-  (10,'befriends');
+  (10,'befriends'), (11,'instantiates');
 
 CREATE TABLE IF NOT EXISTS entity_edge (
     src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -261,7 +261,7 @@ CREATE TABLE IF NOT EXISTS entity_edge (
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '18');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '19');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -2083,7 +2083,7 @@ void Storage::clear_entity_edges() {
 }
 
 // ---------------------------------------------------------------------------
-// materialise_entity_edges: pure-DB roll-up of all 10 entity relation kinds.
+// materialise_entity_edges: pure-DB roll-up of all 11 entity relation kinds.
 // Mirrors indexer/entity_rollup.py:materialize_entity_edges() byte-identically.
 // ---------------------------------------------------------------------------
 
@@ -2177,7 +2177,11 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
   }
 }
 
-// Phase 2: specializes(3) from specializes(4) edges between entity symbols.
+// Phase 2: specializes(3) from Layer-0 specializes(4) edges between entity
+// symbols. These come ONLY from EXPLICIT / PARTIAL specializations (the
+// extractor emits kind 4 for those and kind 5 (instantiates) for plain
+// instantiations, so the two are disjoint at Layer-0). Mirrors
+// entity_rollup._materialise_specializes.
 static void cpp_materialise_specializes(cidx::SqliteDb &db) {
   auto st = db.prepare(
       "SELECT e.src_id, e.dst_id "
@@ -2190,9 +2194,11 @@ static void cpp_materialise_specializes(cidx::SqliteDb &db) {
   std::vector<std::pair<int64_t,int64_t>> rows;
   while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
   for (const auto &[src0, dst0] : rows) {
-    // Collapse onto primary; an instance->primary specializes edge becomes a
-    // self-edge and is suppressed (no bogus Wrapper->Wrapper row).
-    int64_t src = cpp_collapse_to_primary(db, src0);
+    // The specialization is its OWN design entity -- do NOT collapse the SOURCE
+    // onto the primary (that would self-suppress the edge). Collapse only the
+    // destination (already the primary; this is a no-op there but keeps the
+    // phase robust to chains).
+    int64_t src = src0;
     int64_t dst = cpp_collapse_to_primary(db, dst0);
     if (src == dst) continue;
     auto ins = db.prepare(
@@ -2208,7 +2214,77 @@ static void cpp_materialise_specializes(cidx::SqliteDb &db) {
   }
 }
 
+// Phase 2b: instantiates(11) from Layer-0 instantiates(5) edges between entity
+// symbols. src = the concrete instance `X<B>`, dst = the primary template `X`.
+// An implicit instantiation is a distinct design entity (UML <<bind>>), so --
+// exactly like specializes -- the SOURCE is kept un-collapsed (collapsing it
+// would follow its own kind-5 edge to the primary and self-suppress the row).
+// Mirrors entity_rollup._materialise_instantiates.
+static void cpp_materialise_instantiates(cidx::SqliteDb &db) {
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN symbol dst ON dst.id = e.dst_id "
+      "WHERE e.kind = 5 "
+      "  AND src.kind IN (2,3,4,5,31) "
+      "  AND dst.kind IN (2,3,4,5,31)");
+  std::vector<std::pair<int64_t,int64_t>> rows;
+  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  for (const auto &[src0, dst0] : rows) {
+    int64_t src = src0;
+    int64_t dst = cpp_collapse_to_primary(db, dst0);
+    if (src == dst) continue;
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 11, 1, NULL, 1, 0, 0, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+        "  count = entity_edge.count + 1");
+    ins.bind(1, src);
+    ins.bind(2, dst);
+    ins.step_done();
+  }
+}
+
 // Classify field type spelling → (entity_edge kind, multiplicity).
+// Split the inside of a <...> on TOP-LEVEL commas (depth-aware). Mirrors
+// entity_rollup._split_template_args.
+static std::vector<std::string> cpp_split_template_args(const std::string &inner) {
+  std::vector<std::string> args;
+  int depth = 0;
+  std::string cur;
+  auto flush = [&] {
+    size_t a = cur.find_first_not_of(' ');
+    if (a != std::string::npos) {
+      size_t b = cur.find_last_not_of(' ');
+      args.push_back(cur.substr(a, b - a + 1));
+    }
+    cur.clear();
+  };
+  for (char ch : inner) {
+    if (ch == '<') { ++depth; cur.push_back(ch); }
+    else if (ch == '>') { --depth; cur.push_back(ch); }
+    else if (ch == ',' && depth == 0) { flush(); }
+    else cur.push_back(ch);
+  }
+  flush();
+  return args;
+}
+
+// For `s` starting with a `...<` wrapper `prefix`, return the VALUE type: the
+// LAST top-level template arg (map<K,V> -> V). Mirrors _wrapper_value_type.
+static std::string cpp_wrapper_value_type(const std::string &s,
+                                          const char *prefix) {
+  std::string inner = s.substr(strlen(prefix));
+  while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+  if (!inner.empty() && inner.back() == '>') inner.pop_back();
+  while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+  auto args = cpp_split_template_args(inner);
+  return args.empty() ? inner : args.back();
+}
+
 static std::pair<int64_t,int64_t> cpp_classify_field_type(
     const std::string &type_info) {
   const std::string s = [&] {
@@ -2233,11 +2309,8 @@ static std::pair<int64_t,int64_t> cpp_classify_field_type(
   };
   for (const char **c = containers; *c; ++c) {
     if (s.substr(0, strlen(*c)) == *c) {
-      std::string inner = s.substr(strlen(*c));
-      // strip trailing >
-      while (!inner.empty() && (inner.back() == '>' || inner.back() == ' '))
-        inner.pop_back();
-      auto [ik, _] = cpp_classify_field_type(inner);
+      // Classify the VALUE type (last template arg, so map<K,V> uses V).
+      auto [ik, _] = cpp_classify_field_type(cpp_wrapper_value_type(s, *c));
       return {ik, 3};
     }
   }
@@ -2300,10 +2373,9 @@ static std::optional<int64_t> cpp_resolve_entity_from_type(
   };
   for (const char **w = wrappers; *w; ++w) {
     if (type_info.substr(0, strlen(*w)) == *w) {
-      std::string inner = type_info.substr(strlen(*w));
-      while (!inner.empty() && (inner.back() == '>' || inner.back() == ' '))
-        inner.pop_back();
-      return cpp_resolve_entity_from_type(db, inner);
+      // Recurse on the VALUE type (last template arg) so map<K,V> -> V and
+      // nested generics peel one level at a time.
+      return cpp_resolve_entity_from_type(db, cpp_wrapper_value_type(type_info, *w));
     }
   }
   // Lookup by qual_name
@@ -2355,9 +2427,11 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
 
     // Try template_arg.ref_id first
     std::optional<int64_t> ref_entity_id;
+    // Use the LAST type arg (highest position) so map<K,V> picks the VALUE V,
+    // not the key K; single-arg containers/smart-ptrs are unaffected.
     auto tst = db.prepare(
-        "SELECT ref_id FROM template_arg WHERE owner_id = ? AND position = 0 "
-        "AND arg_kind = 1 AND ref_id IS NOT NULL LIMIT 1");
+        "SELECT ref_id FROM template_arg WHERE owner_id = ? "
+        "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1");
     tst.bind(1, r.field_id);
     if (tst.step()) ref_entity_id = tst.col_int64(0);
 
@@ -2624,6 +2698,7 @@ void Storage::materialise_entity_edges() {
     auto txn = transaction();
     cpp_materialise_inheritance(db_);
     cpp_materialise_specializes(db_);
+    cpp_materialise_instantiates(db_);
     cpp_materialise_field_relations(db_);
     cpp_materialise_creates_destroys(db_);
     cpp_materialise_uses(db_);

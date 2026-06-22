@@ -386,7 +386,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v18 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -461,7 +461,7 @@ TEST_CASE("fresh Storage produces schema v18 (file-backed and :memory:)") {
     auto st =
         raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
     REQUIRE(st.step());
-    CHECK(st.col_text(0) == "18");
+    CHECK(st.col_text(0) == "19");
   }
   {
     auto st = raw.prepare("PRAGMA foreign_keys");
