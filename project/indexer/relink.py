@@ -17,10 +17,10 @@ followed by a version segment, anywhere inside the `-I` value:
     .../dcs/cml/coredata/flight / 18-91-0-15 / src/bom/generate/cat
         └────────── fragment ──────┘ └ version ┘ └──── remainder ────┘
 
-and the matched `<prefix>/fragment/<version>` is replaced with the component, so
-the value becomes `<dcs::cml::coredata::flight>/src/bom/generate/cat` (portable
-alias; decodes to the cloned repo) -- or, with --absolute, the literal cloned
-path `/workspace/DCS/.../ngfcr/src/bom/generate/cat`.
+and the matched `<prefix>/fragment/<version>` is replaced with the cloned repo,
+so the value becomes the full cloned path by DEFAULT, e.g.
+`/workspace/DCS/.../ngfcr/src/bom/generate/cat` -- or, with --alias, the portable
+`<dcs::cml::coredata::flight>/src/bom/generate/cat` token instead.
 
 This is a Python-only maintenance utility (not part of the cidx CLI surface);
 run it with:
@@ -67,7 +67,7 @@ def relink_value(
     value: str,
     frag_map: list[tuple[list[str], str, str]],
     *,
-    alias: bool = True,
+    alias: bool = False,
     require_version: bool = True,
 ) -> str:
     """Rewrite one include VALUE from its published form to the cloned component.
@@ -102,7 +102,7 @@ def relink_options(
     options: list[str],
     frag_map: list[tuple[list[str], str, str]],
     *,
-    alias: bool = True,
+    alias: bool = False,
     require_version: bool = True,
 ) -> list[str]:
     """Apply relink_value to every -I/-isystem/-iquote value (space + glued
@@ -154,7 +154,7 @@ def run(args) -> int:
             new = relink_options(
                 cur,
                 frag_map,
-                alias=not args.absolute,
+                alias=args.alias,
                 require_version=not args.no_require_version,
             )
             if new == cur:
@@ -204,10 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         help="write the changes (default: dry-run, only print the diff)",
     )
     ap.add_argument(
-        "--absolute",
+        "--alias",
         action="store_true",
-        help="rewrite to the literal cloned absolute path instead of the "
-        "portable <component> alias",
+        help="rewrite to the portable <component> token instead of the full "
+        "cloned absolute path (default: full cloned path)",
     )
     ap.add_argument(
         "--no-require-version",

@@ -833,7 +833,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.28.0");
+  CHECK(std::string(cli::kVersion) == "0.28.1");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1952,7 +1952,7 @@ TEST_SUITE("clang") {
     const std::optional<cidx::File> a = db.get_file(t + "/proj/a.c");
     REQUIRE(a);
     // The lazily-created "proj" component is now in the alias registry, so its
-    // own -I paths encode to <proj> (v0.28.0: rebuild the registry after the
+    // own -I paths encode to <proj> (v0.28.1: rebuild the registry after the
     // lazy creation so a fresh component's includes are portable, not absolute).
     CHECK(*a->compile_options == std::vector<std::string>{"-I<proj>"});
     CHECK(*a->driver == "cc");
@@ -2020,7 +2020,7 @@ TEST_SUITE("clang") {
     REQUIRE(mathlib);
     // The lazily-created component (named after the manifests' git root) is in
     // the alias registry, so its project-dir -I encodes to <name>/manifests/
-    // project (v0.28.0). Derive the name from the DB for parity-robustness.
+    // project (v0.28.1). Derive the name from the DB for parity-robustness.
     const std::optional<cidx::Component> comp =
         db.component_for_path(project + "/mathlib.c");
     REQUIRE(comp);
