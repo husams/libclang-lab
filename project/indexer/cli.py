@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.26.0"
+VERSION = "0.27.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -290,9 +290,18 @@ def cmd_add_source(args) -> int:
 def _bump_component_versions(db: Storage, commands, label_map) -> None:
     """Advance a component's stored version when a ported compile command's -I
     sits under its version-stripped base and carries a numerically HIGHER
-    version segment than the one registered. Only 'bumpable' components (single
-    row, version-as-property) are updated — destructive cases (version embedded
-    in the path, or duplicate rows) are left untouched. Mirrors the C++ port."""
+    version segment than the one registered.
+
+    Version selection (per the import contract): for each matched component take
+    the highest include version that (a) is strictly higher than the registered
+    version AND (b) names a directory that actually EXISTS on disk — "check the
+    path exists before you replace, even when it is newer". An include whose
+    version is missing on disk (or not higher) leaves the component version as
+    registered, so its `<name>` token decodes to the registered version.
+
+    The write goes through set_component_effective_version, which handles BOTH
+    the version-as-property and version-embedded-in-path representations and is
+    a no-op for ambiguous multi-row names. Mirrors the C++ port."""
     idx = db.component_alias_index()
     seen: dict[str, str] = {}
     for cmd in commands:
@@ -312,11 +321,16 @@ def _bump_component_versions(db: Storage, commands, label_map) -> None:
         entry = idx.get(name)
         if entry is None:
             continue
-        _base, maxver, bumpable = entry
-        if not bumpable:
+        base, maxver, _bumpable = entry
+        # Only a strictly-higher version is a candidate for replacement.
+        if maxver is not None and pathx.version_key(vseg) <= pathx.version_key(maxver):
             continue
-        if maxver is None or pathx.version_key(vseg) > pathx.version_key(maxver):
-            db.set_component_version(name, vseg)
+        # Existence guard: never repoint a component at a version dir that is
+        # not present on disk, even when it is numerically newer. `base` is the
+        # already-resolved, absolute, version-stripped component base.
+        if not os.path.isdir(os.path.join(base, vseg)):
+            continue
+        db.set_component_effective_version(name, vseg)
 
 
 def cmd_import(args) -> int:
@@ -385,6 +399,16 @@ def cmd_import(args) -> int:
                     if root_cid is None:
                         root_cid = db.add_component(name, base, version=version)
                         print(f"component #{root_cid}: {name} at {base}")
+                        # The label_map was built BEFORE this lazily-created
+                        # component existed, so its own -I paths would store as
+                        # absolute. Rebuild the registry (now including it) and
+                        # re-run the version bump so its includes encode to
+                        # <name> and resolve under the right (existing) version.
+                        if not getattr(args, "no_alias", False):
+                            label_map = compiledb.build_label_map(
+                                db.list_alias_pairs(), lookup=db.get_alias
+                            )
+                            _bump_component_versions(db, commands, label_map)
                     if db.component_for_path(src) is None:
                         print(
                             f"  skip (outside any component): {src}",

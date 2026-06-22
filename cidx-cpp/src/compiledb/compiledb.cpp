@@ -16,17 +16,29 @@
 namespace cidx {
 namespace {
 
-// Frozen drop sets (compiledb.py:33-45, G10). Rationale baked into the
-// Python comments: -M* writes build artifacts into dirs that don't exist
-// outside a real build (fatal "error opening '...'"); -Werror promotes
-// warnings gcc never emitted into clang error diagnostics.
+// Frozen drop sets (compiledb.py, G10). Rationale baked into the Python
+// comments: -M* writes build artifacts into dirs that don't exist outside a
+// real build (fatal "error opening '...'"); -Werror promotes warnings gcc
+// never emitted into clang error diagnostics. We also drop everything that
+// only affects LINKING, CODEGEN-output, or the MODULE/diagnostic CACHE — none
+// of it influences the AST a libclang *parse* produces. Header-search flags
+// (-nostdinc / -nostdinc++) and preprocessor-affecting flags (-pthread, -fPIC)
+// are NOT linker flags and are deliberately KEPT.
 const std::set<std::string> kDrop = {
-    "-c",   "--",  "-M",  "-MM",     "-MD",
-    "-MMD", "-MG", "-MP", "-MV",     "-Werror",
-    "-pedantic-errors",
+    "-c",       "--",
+    // dependency generation
+    "-M",       "-MM",      "-MD",      "-MMD", "-MG", "-MP", "-MV",
+    // warnings-as-errors
+    "-Werror",  "-pedantic-errors",
+    // link-stage modes (no effect on parsing)
+    "-shared",  "-static",  "-rdynamic", "-pie", "-no-pie", "-s", "-pipe",
+    "-nostdlib", "-nodefaultlibs", "-nostartfiles",
+    "-static-libgcc", "-shared-libgcc", "-static-libstdc++",
 };
 const std::set<std::string> kDropWithArg = {
     "-o", "-MF", "-MT", "-MQ", "-dependency-file", "--serialize-diagnostics",
+    // linker options that take a separate argument
+    "-Xlinker", "-T", "-L", "-l",
 };
 const char *const kDropPrefix[] = {
     "-Werror=", // -Werror=return-type: keep it a plain warning
@@ -34,6 +46,13 @@ const char *const kDropPrefix[] = {
     "-MF",      // glued forms: -MF<file> etc.
     "-MT",
     "-MQ",
+    // linker / library / cache (glued forms)
+    "-l",     // -lfoo  (no frontend flag starts with -l)
+    "-L",     // -L/usr/lib (no frontend flag starts with -L)
+    "-Wl,",   // linker passthrough
+    "-Wa,",   // assembler passthrough
+    "-fuse-ld=",            // linker selection
+    "-fmodules-cache-path=", // module/diagnostic cache dir
 };
 
 bool has_drop_prefix(const std::string &tok) {

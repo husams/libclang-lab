@@ -204,6 +204,24 @@ TEST_CASE("sanitize: clean vector passes through") {
   CHECK(CompileDb::sanitize(stored) == stored);
 }
 
+TEST_CASE("sanitize: drops linker/library/cache flags, keeps parse flags "
+          "(v0.27.0)") {
+  // Header-search (-nostdinc) and preprocessor (-pthread) flags are KEPT;
+  // everything link/cache-only is dropped. Mirrors the Python test.
+  const std::vector<std::string> stored = {
+      "-I/inc",   "-std=c++17",   "-DFOO=1",      "-nostdinc",
+      "-pthread", "-lfoo",        "-l",           "bar",
+      "-L/usr/lib", "-L",         "/extra/lib",   "-Wl,-rpath,/x",
+      "-Wa,--noexecstack",        "-shared",      "-static",
+      "-rdynamic", "-pie",        "-no-pie",      "-s",
+      "-pipe",    "-static-libstdc++",            "-fuse-ld=lld",
+      "-fmodules-cache-path=/tmp/cc",             "-Xlinker",
+      "-znow",    "-T",           "link.ld"};
+  CHECK(CompileDb::sanitize(stored) ==
+        std::vector<std::string>{"-I/inc", "-std=c++17", "-DFOO=1", "-nostdinc",
+                                 "-pthread"});
+}
+
 TEST_CASE("driver: bare name kept bare for PATH resolution") {
   CHECK(CompileDb::driver({"cc", "-c", "a.c"}, "/b") == "cc");
   CHECK(CompileDb::driver({"g++"}, "/b") == "g++");

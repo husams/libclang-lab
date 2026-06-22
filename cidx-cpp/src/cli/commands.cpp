@@ -505,8 +505,12 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
 
 // Advance a component's stored version when a ported compile command's -I sits
 // under its version-stripped base and carries a numerically HIGHER version than
-// the one registered. Only 'bumpable' components (single row, version-as-
-// property) are updated. Mirrors Python cli._bump_component_versions.
+// the one registered AND that version directory EXISTS on disk ("check the path
+// exists before you replace, even when it is newer"). An include whose version
+// is missing on disk (or not higher) leaves the version as registered. The
+// write goes through set_component_effective_version, which handles both the
+// version-as-property and version-embedded-in-path representations and is a
+// no-op for ambiguous multi-row names. Mirrors Python cli._bump_component_versions.
 void bump_component_versions(Storage &db,
                              const std::vector<CompileCommand> &commands,
                              const std::vector<AliasEntry> &label_map) {
@@ -540,14 +544,20 @@ void bump_component_versions(Storage &db,
       continue;
     }
     const auto &[base, maxver, bumpable] = it->second;
-    (void)base;
-    if (!bumpable) {
+    (void)bumpable;
+    // Only a strictly-higher version is a candidate for replacement.
+    if (!maxver.empty() &&
+        CompileDb::version_key(vseg) <= CompileDb::version_key(maxver)) {
       continue;
     }
-    if (maxver.empty() ||
-        CompileDb::version_key(vseg) > CompileDb::version_key(maxver)) {
-      db.set_component_version(name, vseg);
+    // Existence guard: never repoint a component at a version dir absent from
+    // disk, even when newer. `base` is the resolved, absolute, version-stripped
+    // component base.
+    std::error_code ec;
+    if (!std::filesystem::is_directory(pathutil::join(base, vseg), ec)) {
+      continue;
     }
+    db.set_component_effective_version(name, vseg);
   }
 }
 
@@ -647,6 +657,23 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
           root_cid = db.add_component(name, stored_root, "repo", version_to_store);
           *ctx.out << "component #" << *root_cid << ": " << name << " at "
                    << stored_root << "\n";
+          // The label_map was built BEFORE this lazily-created component
+          // existed, so its own -I paths would store as absolute. Rebuild the
+          // registry (now including it) and re-run the version bump so its
+          // includes encode to <name>. Mirrors Python cmd_import.
+          if (!args.no_alias) {
+            const auto pairs = db.list_alias_pairs();
+            label_map =
+                pairs.empty()
+                    ? std::vector<AliasEntry>{}
+                    : CompileDb::build_label_map(
+                          pairs, [&db](const std::string &n) {
+                            return db.get_alias(n);
+                          });
+            if (!label_map.empty()) {
+              bump_component_versions(db, commands, label_map);
+            }
+          }
         }
         if (!db.component_for_path(src)) {
           *ctx.err << "  skip (outside any component): " << src << "\n";

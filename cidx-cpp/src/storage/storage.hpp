@@ -92,6 +92,13 @@ public:
   // Returns false when no component with that name exists.
   bool set_component_version(const std::string &name,
                              const std::optional<std::string> &version);
+  // Set a component's EFFECTIVE version regardless of representation,
+  // non-destructively: version-as-property -> UPDATE the column; version
+  // embedded in the path -> rewrite the trailing path segment, version NULL.
+  // No-op (returns false) unless the name resolves to exactly one row.
+  // Mirrors Python Storage.set_component_effective_version.
+  bool set_component_effective_version(const std::string &name,
+                                       const std::string &version);
   // Stored effective root: version ? normpath(join(path, version)) : path.
   // NOT resolved (may contain $VAR). Static so callers can use it anywhere.
   static std::string effective_root(const Component &comp);
