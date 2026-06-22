@@ -66,6 +66,9 @@ int cmd_label_rm(const ParsedArgs &args, Context &ctx);
 int cmd_label_list(const ParsedArgs &args, Context &ctx);
 int cmd_label_resolve(const ParsedArgs &args, Context &ctx);
 
+// verify: check that component roots (incl. version) and files exist on disk.
+int cmd_verify(const ParsedArgs &args, Context &ctx);
+
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
 //                            hierarchy|dispatch)
 int cmd_graph_callers(const ParsedArgs &args, Context &ctx);

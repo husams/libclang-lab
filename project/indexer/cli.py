@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.28.2"
+VERSION = "0.29.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -1722,6 +1722,62 @@ def cmd_label_resolve(args) -> int:
     return 0
 
 
+def cmd_verify(args) -> int:
+    """cidx verify -- check that component roots and files exist on disk.
+
+    For each component the effective root (base path joined with its version) is
+    resolved through the portable-path chain and confirmed to be a directory. A
+    *versioned* component whose base path exists but whose versioned sub-directory
+    is absent is reported as VER-MISS (the version no longer matches what is on
+    disk). For each file the reconstructed absolute path is confirmed to be a
+    regular file. Only failing files are listed unless --all is given; every
+    component is always listed. Exit status is non-zero if anything is missing.
+    """
+    with Storage(args.index) as db:
+        try:
+            comp = _lookup_component(db, args.component)
+        except LookupError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        components = [comp] if comp else db.list_components()
+
+        c_ok = c_missing = c_vermiss = 0
+        for c in components:
+            eff = Storage.effective_root(c)
+            resolved = os.path.abspath(pathx.resolve_fs_path(eff))
+            if os.path.isdir(resolved):
+                status = "ok"
+                c_ok += 1
+            elif c.version and os.path.isdir(
+                os.path.abspath(pathx.resolve_fs_path(c.path))
+            ):
+                status = "VER-MISS"
+                c_vermiss += 1
+            else:
+                status = "MISSING"
+                c_missing += 1
+            print(f"component  {status:<8}  {c.name}  {resolved}")
+
+        f_ok = f_missing = 0
+        rows = db.list_files(component_id=comp.id if comp else None)
+        for rec, path in rows:
+            if os.path.isfile(path):
+                f_ok += 1
+                if args.all:
+                    print(f"file  ok        {path}")
+            else:
+                f_missing += 1
+                print(f"file  MISSING   {path}")
+
+        print()
+        print(
+            f"components: {c_ok} ok, {c_missing} missing, "
+            f"{c_vermiss} version-mismatch"
+        )
+        print(f"files: {f_ok} ok, {f_missing} missing")
+    return 0 if (c_missing == 0 and c_vermiss == 0 and f_missing == 0) else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx", description="cidx command-line skeleton")
     ap.add_argument("--version", action="version", version=f"cidx {VERSION}")
@@ -1950,6 +2006,24 @@ def main(argv=None) -> int:
     )
     _db_arg(q)
     q.set_defaults(fn=cmd_label_resolve)
+
+    # -- verify: check component roots and files exist on disk -----------------
+    p = sub.add_parser(
+        "verify", help="check that component roots and files exist on disk"
+    )
+    p.add_argument(
+        "--component",
+        "-c",
+        metavar="NAME",
+        help="restrict to one component (default: all)",
+    )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="also list files that exist (default: only failures)",
+    )
+    _db_arg(p)
+    p.set_defaults(fn=cmd_verify)
 
     p = sub.add_parser("set", help="set a mutable file attribute (e.g. pending status)")
     p.add_argument(

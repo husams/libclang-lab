@@ -23,21 +23,21 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,verify,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,verify,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,migrate,add-source,import,realias,index,resolve,pch,component,label,set,"
+    "  {init,migrate,add-source,import,realias,index,resolve,pch,component,label,verify,set,"
     "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
@@ -54,6 +54,8 @@ const char kTopHelp[] =
     "                        indexing\n"
     "    component           inspect or modify a component\n"
     "    label               manage include/arg label registry\n"
+    "    verify              check that component roots and files exist on "
+    "disk\n"
     "    set                 set a mutable file attribute (e.g. pending "
     "status)\n"
     "    file                inspect or edit one file's stored compile flags\n"
@@ -1160,6 +1162,20 @@ const char kLabelResolveHelp[] =
     "  --no-autoderive-labels  disable autoderive fallback (registry-only "
     "lookup)\n";
 
+const char kVerifyUsage[] =
+    "usage: cidx verify [-h] [--component NAME] [--all] [--db PATH]\n";
+
+const char kVerifyHelp[] =
+    "usage: cidx verify [-h] [--component NAME] [--all] [--db PATH]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component, -c NAME  restrict to one component (default: all)\n"
+    "  --all                 also list files that exist (default: only "
+    "failures)\n"
+    "  --db PATH             index database (default: the standard cache "
+    "index)\n";
+
 // ---------------------------------------------------------------------------
 // Choice sets
 // ---------------------------------------------------------------------------
@@ -1174,10 +1190,10 @@ const std::vector<std::string> kSymbolKinds = {
 const std::vector<std::string> kCommands = {
     "init",      "migrate",    "add-source",            "import",
     "realias",   "index",      "resolve",               "pch",
-    "component", "label",      "set",                   "file",
-    "dump-compile-commands",   "search",                "show",
-    "list",      "ls",         "delete",                "graph",
-    "ast"};
+    "component", "label",      "verify",                "set",
+    "file",      "dump-compile-commands",               "search",
+    "show",      "list",       "ls",                    "delete",
+    "graph",     "ast"};
 const std::vector<std::string> kGraphWhats = {
     "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
     "dispatch"};
@@ -2244,6 +2260,20 @@ const Spec kLabelResolveSpec = {
     {"PATH"},
 };
 
+const Spec kVerifySpec = {
+    "cidx verify",
+    kVerifyUsage,
+    kVerifyHelp,
+    {
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--all", '\0', ValueKind::kNone, "--all", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {}, // no positionals
+    false,
+    {}, // nothing required
+};
+
 } // namespace
 
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
@@ -2319,6 +2349,15 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     if (!st.rest.empty()) {
       pa.component = st.rest[0];
     }
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.command == "verify") {
+    ParseState st = parse_leaf(kVerifySpec, argv, i, extras);
+    if (st.help) {
+      pa.help_text = kVerifyHelp;
+      return pa;
+    }
+    pa.component = opt_value(st, "--component");
+    pa.all = st.flags.count("--all") != 0;
     pa.index_db = opt_value(st, "--db");
   } else if (pa.command == "index") {
     ParseState st = parse_leaf(kIndexSpec, argv, i, extras);

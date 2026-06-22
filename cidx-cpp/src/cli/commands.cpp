@@ -2954,6 +2954,75 @@ int cmd_component_set_version(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+int cmd_verify(const ParsedArgs &args, Context &ctx) {
+  // Byte-identical with Python cmd_verify (cli.py):
+  //   component  {status:<8}  {name}  {resolved}
+  //   file  MISSING   {path}    (only failures unless --all; OK = "ok" pad 8)
+  // followed by the two summary lines. Exit 1 if anything is missing.
+  Storage db(ctx.index_path);
+
+  std::vector<Component> components;
+  std::optional<int64_t> scope;
+  if (args.component) {
+    std::optional<Component> comp = db.get_component_by_name(*args.component);
+    if (!comp) {
+      // Parity: Python LookupError str is "no component named 'NAME'".
+      *ctx.err << "error: no component named '" << *args.component << "'\n";
+      return 1;
+    }
+    components.push_back(*comp);
+    scope = comp->id;
+  } else {
+    components = db.list_components();
+  }
+
+  auto is_reg_file = [](const std::string &p) {
+    struct stat st{};
+    return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+  };
+
+  int c_ok = 0, c_missing = 0, c_vermiss = 0;
+  for (const Component &c : components) {
+    const std::string eff = Storage::effective_root(c);
+    const std::string resolved =
+        pathutil::abspath(pathutil::resolve_fs_path(eff));
+    std::string status;
+    if (is_directory(resolved)) {
+      status = "ok";
+      ++c_ok;
+    } else if (c.version &&
+               is_directory(
+                   pathutil::abspath(pathutil::resolve_fs_path(c.path)))) {
+      status = "VER-MISS";
+      ++c_vermiss;
+    } else {
+      status = "MISSING";
+      ++c_missing;
+    }
+    *ctx.out << "component  " << fmt::ljust(status, 8) << "  " << c.name << "  "
+             << resolved << "\n";
+  }
+
+  int f_ok = 0, f_missing = 0;
+  for (const auto &[rec, path] : db.list_files(scope)) {
+    if (is_reg_file(path)) {
+      ++f_ok;
+      if (args.all) {
+        *ctx.out << "file  ok        " << path << "\n";
+      }
+    } else {
+      ++f_missing;
+      *ctx.out << "file  MISSING   " << path << "\n";
+    }
+  }
+
+  *ctx.out << "\n";
+  *ctx.out << "components: " << c_ok << " ok, " << c_missing << " missing, "
+           << c_vermiss << " version-mismatch\n";
+  *ctx.out << "files: " << f_ok << " ok, " << f_missing << " missing\n";
+  return (c_missing == 0 && c_vermiss == 0 && f_missing == 0) ? 0 : 1;
+}
+
 int cmd_label_add(const ParsedArgs &args, Context &ctx) {
   const std::string lname = args.label_token ? *args.label_token : std::string();
   const std::string lpath = args.label_path ? *args.label_path : std::string();
@@ -3161,6 +3230,9 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "component") {
     if (args.what == "show") return cmd_component_show(args, ctx);
     return cmd_component_set_version(args, ctx);
+  }
+  if (args.command == "verify") {
+    return cmd_verify(args, ctx);
   }
   if (args.command == "label") {
     if (args.what == "add") return cmd_label_add(args, ctx);

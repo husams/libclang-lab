@@ -21,8 +21,8 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.28.2"  (NULL-safe entity_edge identity)
-  version-2     C++ kVersion == "0.28.2"
+  version-1     Python VERSION == "0.29.0"  (cidx verify subcommand)
+  version-2     C++ kVersion == "0.29.0"
   version-3     C++ kSchemaVersion == 21
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
@@ -295,27 +295,27 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0282():
-    """Python VERSION must be 0.28.2 after the NULL-safe entity_edge identity fix."""
+def test_python_version_is_0290():
+    """Python VERSION must be 0.29.0 (cidx verify subcommand added)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.28.2", (
-        f"Python VERSION is '{version}'; expected '0.28.2'. "
-        "Bump VERSION to 0.28.2 in cli.py (NULL-safe entity_edge identity)."
+    assert version == "0.29.0", (
+        f"Python VERSION is '{version}'; expected '0.29.0'. "
+        "Bump VERSION to 0.29.0 in cli.py (cidx verify subcommand)."
     )
 
 
-def test_cpp_version_is_0282():
-    """C++ kVersion must be 0.28.2 after the NULL-safe entity_edge identity fix."""
+def test_cpp_version_is_0290():
+    """C++ kVersion must be 0.29.0 (cidx verify subcommand added)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.28.2", (
-        f"C++ kVersion is '{version}'; expected '0.28.2'. "
-        "Bump kVersion to 0.28.2 in args.hpp (NULL-safe entity_edge identity)."
+    assert version == "0.29.0", (
+        f"C++ kVersion is '{version}'; expected '0.29.0'. "
+        "Bump kVersion to 0.29.0 in args.hpp (cidx verify subcommand)."
     )
 
 
