@@ -949,6 +949,43 @@ bool Storage::set_component_version(const std::string &name,
   return db_.changes() > 0;
 }
 
+bool Storage::set_component_effective_version(const std::string &name,
+                                              const std::string &version) {
+  // Mirrors Python Storage.set_component_effective_version: only act when the
+  // name resolves to exactly one row; pick property-vs-embedded by splitting
+  // the STORED path (so portable <label>/$VAR prefixes survive the rewrite).
+  std::vector<Component> rows;
+  for (const auto &c : list_components()) {
+    if (c.name == name) {
+      rows.push_back(c);
+    }
+  }
+  if (rows.size() != 1) {
+    return false;
+  }
+  const Component &comp = rows.front();
+  const auto [base, seg] = CompileDb::split_base_version(comp.path);
+  if (!seg.empty()) {
+    // version embedded in the path: swap the trailing segment.
+    std::string new_path = pathutil::normpath(pathutil::join(base, version));
+    if (new_path.find('$') == std::string::npos &&
+        new_path.find('<') == std::string::npos) {
+      new_path = pathutil::abspath(new_path);
+    }
+    auto st = db_.prepare(
+        "UPDATE component SET path = ?, version = NULL WHERE id = ?");
+    st.bind(1, std::string_view(new_path));
+    st.bind(2, comp.id);
+    st.step_done();
+  } else {
+    auto st = db_.prepare("UPDATE component SET version = ? WHERE id = ?");
+    st.bind(1, std::string_view(version));
+    st.bind(2, comp.id);
+    st.step_done();
+  }
+  return true;
+}
+
 // static
 std::string Storage::effective_root(const Component &comp) {
   // Stored effective root (NOT resolved; may contain $VAR).

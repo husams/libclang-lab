@@ -60,10 +60,20 @@ def _abs(p: str, base: str) -> str:
 #: "error opening '...'" diagnostic. -Werror (and friends) promote benign
 #: warnings to errors, and the indexer treats error diagnostics as a failed
 #: parse -- a warning gcc never emitted must not abort indexing under clang.
+#:
+#: We also drop everything that only affects LINKING, CODEGEN-output, or the
+#: MODULE/diagnostic CACHE: a compile_commands.json entry carries the full
+#: driver invocation (link libraries, linker scripts, the module cache dir,
+#: assembler passthrough ...), none of which influence the AST a libclang
+#: *parse* produces -- and several of them (a missing -L dir, a -Wl, group,
+#: a stale module cache) only add noise or fatal diagnostics. Header-search
+#: flags (-nostdinc / -nostdinc++) and preprocessor-affecting flags
+#: (-pthread, -fPIC) are NOT linker flags and are deliberately KEPT.
 _DROP = frozenset(
     {
         "-c",
         "--",
+        # -- dependency generation --
         "-M",
         "-MM",
         "-MD",
@@ -71,8 +81,23 @@ _DROP = frozenset(
         "-MG",
         "-MP",
         "-MV",
+        # -- warnings-as-errors --
         "-Werror",
         "-pedantic-errors",
+        # -- link-stage modes (no effect on parsing) --
+        "-shared",
+        "-static",
+        "-rdynamic",
+        "-pie",
+        "-no-pie",
+        "-s",  # strip symbols at link
+        "-pipe",  # use pipes instead of temp files (codegen plumbing)
+        "-nostdlib",
+        "-nodefaultlibs",
+        "-nostartfiles",
+        "-static-libgcc",
+        "-shared-libgcc",
+        "-static-libstdc++",
     }
 )
 _DROP_WITH_ARG = frozenset(
@@ -83,6 +108,11 @@ _DROP_WITH_ARG = frozenset(
         "-MQ",
         "-dependency-file",
         "--serialize-diagnostics",
+        # -- linker options that take a separate argument --
+        "-Xlinker",
+        "-T",  # linker script
+        "-L",  # space form: -L /usr/lib
+        "-l",  # space form: -l foo
     }
 )
 _DROP_PREFIX = (
@@ -91,6 +121,13 @@ _DROP_PREFIX = (
     "-MF",
     "-MT",
     "-MQ",  # glued forms: -MF<file> etc.
+    # -- linker / library / cache (glued forms) --
+    "-l",  # -lfoo  (no frontend flag starts with -l)
+    "-L",  # -L/usr/lib (no frontend flag starts with -L)
+    "-Wl,",  # linker passthrough
+    "-Wa,",  # assembler passthrough
+    "-fuse-ld=",  # linker selection
+    "-fmodules-cache-path=",  # module/diagnostic cache dir
 )
 
 

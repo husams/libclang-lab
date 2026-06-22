@@ -204,3 +204,198 @@ def test_import_bumps_component_version_when_higher(tmp_path, capsys, monkeypatc
         # stored include is the portable, version-stripped token
         opts = [o for f, _d in db.list_files() for o in (f.compile_options or [])]
         assert "-I<OTF>/include" in opts
+
+
+# -- v0.27.0: drop unrelated (linker / cache) flags ----------------------------
+
+
+def test_strip_drops_linker_library_and_cache_flags():
+    """sanitize() removes every flag that only affects linking, the module
+    cache, or assembler passthrough, while keeping parse-affecting flags."""
+    args = [
+        "-I/inc",
+        "-std=c++17",
+        "-DFOO=1",
+        "-nostdinc",  # header search -> KEEP
+        "-pthread",  # preprocessor define -> KEEP
+        # -- everything below must be dropped --
+        "-lfoo",
+        "-l",
+        "bar",  # space form lib
+        "-L/usr/lib",
+        "-L",
+        "/extra/lib",  # space form -L
+        "-Wl,-rpath,/x",
+        "-Wa,--noexecstack",
+        "-shared",
+        "-static",
+        "-rdynamic",
+        "-pie",
+        "-no-pie",
+        "-s",
+        "-pipe",
+        "-static-libstdc++",
+        "-fuse-ld=lld",
+        "-fmodules-cache-path=/tmp/cc",
+        "-Xlinker",
+        "-znow",
+        "-T",
+        "link.ld",
+    ]
+    assert compiledb.sanitize(args) == [
+        "-I/inc",
+        "-std=c++17",
+        "-DFOO=1",
+        "-nostdinc",
+        "-pthread",
+    ]
+
+
+def test_import_no_bump_when_higher_version_dir_missing(tmp_path, monkeypatch):
+    """A -I carrying a HIGHER version whose directory is absent on disk must NOT
+    bump the component — the include decodes to the registered version."""
+    import json
+
+    from indexer import cli
+    from indexer.storage import Storage
+
+    # Only the registered version dir exists; the higher one does not.
+    root = tmp_path / "proj" / "OTF" / "18-0-0-100"
+    (root / "include").mkdir(parents=True)
+    src = root / "a.c"
+    src.write_text("int x;")
+    base = str(tmp_path / "proj" / "OTF")
+
+    db_path = str(tmp_path / "idx.db")
+    monkeypatch.setattr(cli, "index_path", lambda: db_path)
+    with Storage(db_path) as db:
+        db.add_component("OTF", base, kind="external", version="18-0-0-100")
+
+    # Compile command references a NEWER version dir that is NOT on disk.
+    cc_path = root / "compile_commands.json"
+    cc_path.write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(root),
+                    "file": str(src),
+                    "arguments": [
+                        "cc",
+                        f"-I{base}/18-0-0-275/include",  # missing on disk
+                        "-c",
+                        str(src),
+                    ],
+                }
+            ]
+        )
+    )
+    assert cli.main(["import", "--db", str(cc_path)]) == 0
+    with Storage(db_path) as db:
+        comp = db.get_component_by_name("OTF")
+        assert comp is not None and comp.version == "18-0-0-100"  # NOT bumped
+        # encoded version-agnostically; decodes back to the registered version
+        opts = [o for f, _d in db.list_files() for o in (f.compile_options or [])]
+        assert "-I<OTF>/include" in opts
+
+
+def test_import_bumps_embedded_version_path(tmp_path, monkeypatch):
+    """A component whose version is embedded in its PATH (no version property)
+    is bumped by rewriting the trailing path segment when a higher include
+    version exists on disk."""
+    import json
+
+    from indexer import cli
+    from indexer.storage import Storage
+
+    newer = tmp_path / "m" / "OTF" / "18-0-0-275"
+    (newer / "include").mkdir(parents=True)
+    src = newer / "a.c"
+    src.write_text("int x;")
+
+    db_path = str(tmp_path / "idx.db")
+    monkeypatch.setattr(cli, "index_path", lambda: db_path)
+    with Storage(db_path) as db:
+        # version-in-path registration: path carries the version, column is NULL
+        db.add_component("OTF", str(tmp_path / "m" / "OTF" / "18-0-0-100"))
+
+    cc_path = newer / "compile_commands.json"
+    cc_path.write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(newer),
+                    "file": str(src),
+                    "arguments": ["cc", f"-I{newer}/include", "-c", str(src)],
+                }
+            ]
+        )
+    )
+    assert cli.main(["import", "--db", str(cc_path)]) == 0
+    with Storage(db_path) as db:
+        comp = db.get_component_by_name("OTF")
+        assert comp is not None
+        # path's trailing version segment rewritten to the bumped version
+        assert comp.path.endswith("18-0-0-275")
+        assert comp.version is None
+        assert db.get_alias("OTF") == str(newer)
+
+
+def test_set_component_effective_version_property_and_embedded(tmp_path):
+    """Direct unit test of the property-vs-embedded version write + the
+    ambiguous multi-row no-op (parity with the C++ unit tests)."""
+    from indexer.storage import Storage
+
+    with Storage(os.path.join(tmp_path, "i.db")) as db:
+        # version-as-property: column updated, path unchanged
+        db.add_component("A", "/m/A", version="1-0-0")
+        assert db.set_component_effective_version("A", "1-0-1") is True
+        a = db.get_component_by_name("A")
+        assert a is not None and a.path == "/m/A" and a.version == "1-0-1"
+        assert db.get_alias("A") == "/m/A/1-0-1"
+
+        # version-in-path: trailing segment rewritten, column stays NULL
+        db.add_component("B", "/m/B/1-0-0")
+        assert db.set_component_effective_version("B", "1-0-1") is True
+        b = db.get_component_by_name("B")
+        assert b is not None and b.path == "/m/B/1-0-1" and b.version is None
+
+        # ambiguous multi-row: no-op
+        db.add_component("C", "/m/C/1-0-0")
+        db.add_component("C", "/m/C/1-0-1")
+        assert db.set_component_effective_version("C", "2-0-0") is False
+
+
+def test_import_aliases_lazily_created_component_includes(tmp_path, monkeypatch):
+    """A component created lazily DURING import has its own -I paths aliased to
+    <name> (the registry is rebuilt after the lazy creation)."""
+    import json
+
+    from indexer import cli
+    from indexer.storage import Storage
+
+    root = tmp_path / "fresh"
+    (root / "include").mkdir(parents=True)
+    src = root / "a.c"
+    src.write_text("int x;")
+
+    db_path = str(tmp_path / "idx.db")
+    monkeypatch.setattr(cli, "index_path", lambda: db_path)
+
+    cc_path = root / "compile_commands.json"
+    cc_path.write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(root),
+                    "file": str(src),
+                    "arguments": ["cc", f"-I{root}/include", "-c", str(src)],
+                }
+            ]
+        )
+    )
+    assert cli.main(["import", "--name", "fresh", "--db", str(cc_path)]) == 0
+    with Storage(db_path) as db:
+        opts = [o for f, _d in db.list_files() for o in (f.compile_options or [])]
+        # encoded against the just-created component, not stored absolute
+        assert "-I<fresh>/include" in opts
+        assert not any(o.startswith("-I" + str(root)) for o in opts)

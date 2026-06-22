@@ -285,3 +285,35 @@ TEST_CASE("version_key numeric per-segment ordering") {
         CompileDb::version_key("18-0-0-11"));
   CHECK(CompileDb::version_key("v2.0") > CompileDb::version_key("1.9"));
 }
+
+// -- v0.27.0: set_component_effective_version (property vs embedded) ----------
+
+TEST_CASE("set_component_effective_version: version-as-property updates column") {
+  Storage db(":memory:");
+  db.add_component("OTF", "/m/OTF", "external", std::optional<std::string>{"1-0-0"});
+  CHECK(db.set_component_effective_version("OTF", "1-0-1"));
+  const auto comp = db.get_component_by_name("OTF");
+  REQUIRE(comp);
+  CHECK(comp->path == "/m/OTF");
+  CHECK(comp->version == std::optional<std::string>{"1-0-1"});
+  CHECK(db.get_alias("OTF") == std::optional<std::string>{"/m/OTF/1-0-1"});
+}
+
+TEST_CASE("set_component_effective_version: embedded version rewrites path") {
+  Storage db(":memory:");
+  // version-in-path registration (no version column)
+  db.add_component("OTF", "/m/OTF/1-0-0");
+  CHECK(db.set_component_effective_version("OTF", "1-0-1"));
+  const auto comp = db.get_component_by_name("OTF");
+  REQUIRE(comp);
+  CHECK(comp->path == "/m/OTF/1-0-1"); // trailing segment swapped
+  CHECK(comp->version == std::nullopt);
+  CHECK(db.get_alias("OTF") == std::optional<std::string>{"/m/OTF/1-0-1"});
+}
+
+TEST_CASE("set_component_effective_version: ambiguous multi-row is a no-op") {
+  Storage db(":memory:");
+  db.add_component("OTF", "/m/OTF/1-0-0");
+  db.add_component("OTF", "/m/OTF/1-0-1");
+  CHECK_FALSE(db.set_component_effective_version("OTF", "2-0-0"));
+}

@@ -833,7 +833,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.26.0");
+  CHECK(std::string(cli::kVersion) == "0.27.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1951,7 +1951,10 @@ TEST_SUITE("clang") {
     Storage db(t + "/index.db");
     const std::optional<cidx::File> a = db.get_file(t + "/proj/a.c");
     REQUIRE(a);
-    CHECK(*a->compile_options == std::vector<std::string>{"-I" + t + "/proj"});
+    // The lazily-created "proj" component is now in the alias registry, so its
+    // own -I paths encode to <proj> (v0.27.0: rebuild the registry after the
+    // lazy creation so a fresh component's includes are portable, not absolute).
+    CHECK(*a->compile_options == std::vector<std::string>{"-I<proj>"});
     CHECK(*a->driver == "cc");
     CHECK(a->md5);
     CHECK(a->mtime);
@@ -1959,7 +1962,7 @@ TEST_SUITE("clang") {
     const std::optional<cidx::File> b = db.get_file(t + "/proj/sub/b.c");
     REQUIRE(b);
     CHECK(*b->compile_options ==
-          std::vector<std::string>{"-I" + t + "/proj/include", "-DFOO"});
+          std::vector<std::string>{"-I<proj>/include", "-DFOO"});
     CHECK(*b->driver == "gcc");
     CHECK(!db.get_file(t + "/other/c.c"));
   }
@@ -2015,8 +2018,14 @@ TEST_SUITE("clang") {
     const std::optional<cidx::File> mathlib =
         db.get_file(project + "/mathlib.c");
     REQUIRE(mathlib);
+    // The lazily-created component (named after the manifests' git root) is in
+    // the alias registry, so its project-dir -I encodes to <name>/manifests/
+    // project (v0.27.0). Derive the name from the DB for parity-robustness.
+    const std::optional<cidx::Component> comp =
+        db.component_for_path(project + "/mathlib.c");
+    REQUIRE(comp);
     CHECK(*mathlib->compile_options ==
-          std::vector<std::string>{"-I" + project});
+          std::vector<std::string>{"-I<" + comp->name + ">/manifests/project"});
     CHECK(*mathlib->driver == "cc");
     REQUIRE(db.get_file(project + "/app.c"));
   }

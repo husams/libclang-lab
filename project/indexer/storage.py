@@ -763,6 +763,43 @@ class Storage:
         self._commit()
         return cur.rowcount > 0
 
+    def set_component_effective_version(self, name: str, version: str) -> bool:
+        """Set a component's EFFECTIVE version regardless of how the existing
+        version is represented, non-destructively.
+
+        Two representations exist (see component_alias_index):
+          - version-as-property: the `version` column carries it, `path` has no
+            trailing version segment  -> just UPDATE the column.
+          - version-in-path: the version is the trailing segment of `path`
+            (no `version` column)     -> rewrite that trailing segment in place
+            and leave `version` NULL.
+
+        Only applied when the name resolves to exactly ONE component row;
+        multi-row names (duplicate/ambiguous) are left untouched and False is
+        returned. The stored path is split (not the resolved one) so portable
+        `<label>` / `$VAR` prefixes survive the rewrite.
+        """
+        rows = [c for c in self.list_components() if c.name == name and c.id is not None]
+        if len(rows) != 1:
+            return False
+        comp = rows[0]
+        base, seg = _pathx.split_base_version(comp.path)
+        if seg is not None:
+            # version embedded in the path: swap the trailing segment.
+            new_path = os.path.normpath(os.path.join(base, version))
+            if "$" not in new_path and "<" not in new_path:
+                new_path = os.path.abspath(new_path)
+            self._conn.execute(
+                "UPDATE component SET path = ?, version = NULL WHERE id = ?",
+                (new_path, comp.id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE component SET version = ? WHERE id = ?", (version, comp.id)
+            )
+        self._commit()
+        return True
+
     @staticmethod
     def effective_root(comp: "Component") -> str:
         """Stored effective root (NOT resolved): version joined onto path.
