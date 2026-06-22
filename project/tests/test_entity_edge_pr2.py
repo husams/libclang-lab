@@ -1,12 +1,12 @@
 """PR2: v17 entity_edge materialisation tests.
 
 Covers:
-  * schema/version invariants (SCHEMA_VERSION=17, VERSION='0.18.0')
+  * schema/version invariants (SCHEMA_VERSION=18, VERSION='0.19.0')
   * entity_rollup module importable
   * entity_edge + entity_edge_kind tables present in schema
   * PR1 edge_kind seed rows 10-16 present
   * BDD acceptance scenarios (ADR-008 S1..S4)
-  * all 11 entity_edge kinds
+  * all 10 entity_edge kinds
   * roll-up idempotency + re-materialise
 
 All fixture graphs are hermetic (no libclang parse, no disk files).
@@ -36,8 +36,7 @@ _ENTITY_KIND_NAMES = {
     7: "creates",
     8: "uses",
     9: "destroys",
-    10: "nests",
-    11: "befriends",
+    10: "befriends",
 }
 
 # Layer-0 edge kinds introduced by PR1
@@ -94,13 +93,13 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_17():
-    assert SCHEMA_VERSION == 17, f"Expected 17, got {SCHEMA_VERSION}"
+def test_schema_version_is_18():
+    assert SCHEMA_VERSION == 18, f"Expected 18, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0180():
+def test_product_version_is_0190():
     from indexer import cli
-    assert cli.VERSION == "0.18.1", f"Expected '0.18.1', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.19.0", f"Expected '0.19.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -290,7 +289,7 @@ def test_bdd_ADR008_S4_free_function_no_entity_edge(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# All 11 entity_edge kinds
+# All 10 entity_edge kinds
 # ---------------------------------------------------------------------------
 
 def test_kind_generalizes(tmp_path):
@@ -518,23 +517,6 @@ def test_kind_destroys(tmp_path):
     assert rows, "destroys(9) missing"
 
 
-def test_kind_nests(tmp_path):
-    if not _HAS_ROLLUP:
-        pytest.skip()
-    db, dir_id = _fresh(tmp_path)
-    root = db.add_file(dir_id, "h.hpp")
-    C = EDGE_KINDS
-
-    outer_id = _sym(db, root, "Outer", "c:@S@Outer", "Outer", "class", 1)
-    inner_id = _sym(db, root, "Outer::Inner", "c:@S@Outer@S@Inner",
-                    "Inner", "struct", 2, parent="c:@S@Outer")
-    db.add_edge(outer_id, inner_id, C["contains"])
-
-    materialize_entity_edges(db)
-    rows = db.entity_edges(src_id=outer_id, dst_id=inner_id, kind=10)
-    assert rows, "nests(10) missing"
-
-
 def test_kind_befriends(tmp_path):
     if not _HAS_ROLLUP:
         pytest.skip()
@@ -543,14 +525,14 @@ def test_kind_befriends(tmp_path):
     C = EDGE_KINDS
 
     # `class Vault { friend class Pool; };` -> Layer-0 friend(17) Vault->Pool,
-    # rolled up to befriends(11).
+    # rolled up to befriends(10).
     vault_id = _sym(db, root, "Vault", "c:@S@Vault", "Vault", "class", 1)
     pool_id = _sym(db, root, "Pool", "c:@S@Pool", "Pool", "struct", 5)
     db.add_edge(vault_id, pool_id, C["friend"])  # friend = 17
 
     materialize_entity_edges(db)
-    rows = db.entity_edges(src_id=vault_id, dst_id=pool_id, kind=11)
-    assert rows, "befriends(11) missing"
+    rows = db.entity_edges(src_id=vault_id, dst_id=pool_id, kind=10)
+    assert rows, "befriends(10) missing"
 
 
 # ---------------------------------------------------------------------------
@@ -750,28 +732,6 @@ def test_virtual_base_is_virtual_flag(tmp_path):
     rows = db.entity_edges(src_id=derived_id, dst_id=base_id, kind=1)
     assert rows, "generalizes missing"
     assert rows[0]["is_virtual"] == 1
-
-
-# ---------------------------------------------------------------------------
-# pinned scenario: nests-1 (from design plan PR2 test matrix)
-# ---------------------------------------------------------------------------
-
-def test_nests_pinned_scenario_id_nests1(tmp_path):
-    """id=nests-1: Base::Nested → nests(10) row src=Base dst=Nested."""
-    if not _HAS_ROLLUP:
-        pytest.skip()
-    db, dir_id = _fresh(tmp_path)
-    root = db.add_file(dir_id, "h.hpp")
-    C = EDGE_KINDS
-
-    base_id = _sym(db, root, "Base", "c:@S@Base", "Base", "class", 1)
-    nested_id = _sym(db, root, "Base::Nested", "c:@S@Base@S@Nested",
-                     "Nested", "struct", 2, parent="c:@S@Base")
-    db.add_edge(base_id, nested_id, C["contains"])
-
-    materialize_entity_edges(db)
-    rows = db.entity_edges(src_id=base_id, dst_id=nested_id, kind=10)
-    assert rows, "nests(10) missing for Base::Nested (pinned nests-1)"
 
 
 # ---------------------------------------------------------------------------

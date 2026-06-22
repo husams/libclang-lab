@@ -12,18 +12,18 @@ because PR2 has not been implemented in this worktree.  Do NOT xfail or skip the
 flag failures as blockers so the developer can act on each one.
 
 Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
-  schema-1      SCHEMA_VERSION == 17
+  schema-1      SCHEMA_VERSION == 18
   schema-2      entity_edge table present in _SCHEMA
-  schema-3      entity_edge_kind seed has exactly 11 rows (ids 1-11)
+  schema-3      entity_edge_kind seed has exactly 10 rows (ids 1-10)
   schema-4      entity_edge columns: id,src_id,dst_id,kind,count,via_member_id,
                 multiplicity,access,is_virtual,create_form,partial
   pr1-seed-1    edge_kind seeds include ids 10-16 (Layer-0 PR1 construct/destroy forms)
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.18.0"  (PR2 bumps 0.17.0 -> 0.18.0)
-  version-2     C++ kVersion == "0.18.0"
-  version-3     C++ kSchemaVersion == 17
+  version-1     Python VERSION == "0.19.0"  (nests removal bumps 0.18.1 -> 0.19.0)
+  version-2     C++ kVersion == "0.19.0"
+  version-3     C++ kSchemaVersion == 18
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
   parity-1      parity_check.sh includes at least one entity_edge CLI command
@@ -87,12 +87,12 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_17():
-    """SCHEMA_VERSION must be 17 after the v16→v17 bump (P2-T1)."""
+def test_schema_version_is_18():
+    """SCHEMA_VERSION must be 18 after the v17→v18 nests-removal bump."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 17, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 17. "
-        "P2-T1 has not been implemented: storage.py:35 SCHEMA_VERSION must be bumped to 17."
+    assert storage.SCHEMA_VERSION == 18, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 18. "
+        "storage.py:35 SCHEMA_VERSION must be bumped to 18 (nests removal)."
     )
 
 
@@ -125,14 +125,13 @@ _REQUIRED_ENTITY_EDGE_KINDS = [
     (7, "creates"),
     (8, "uses"),
     (9, "destroys"),
-    (10, "nests"),
-    (11, "befriends"),
+    (10, "befriends"),
 ]
 
 
 @pytest.mark.parametrize("kind_id,kind_name", _REQUIRED_ENTITY_EDGE_KINDS)
 def test_entity_edge_kind_seed_present(kind_id, kind_name):
-    """entity_edge_kind seed must include all 11 rows (P2-T1)."""
+    """entity_edge_kind seed must include all 10 rows (P2-T1)."""
     storage = _import_storage()
     schema = storage._SCHEMA
     assert "entity_edge_kind" in schema, (
@@ -141,7 +140,7 @@ def test_entity_edge_kind_seed_present(kind_id, kind_name):
     # The seed INSERT must mention both the id and the name.
     assert str(kind_id) in schema and kind_name in schema, (
         f"entity_edge_kind seed missing id={kind_id} name={kind_name}. "
-        "P2-T1: seed all 11 rows in entity_edge_kind."
+        "P2-T1: seed all 10 rows in entity_edge_kind."
     )
 
 
@@ -295,39 +294,39 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_018():
-    """Python VERSION must be 0.18.0 after the 0.18.1 bugfix bump."""
+def test_python_version_is_019():
+    """Python VERSION must be 0.19.0 after the nests-removal bump."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.18.1", (
-        f"Python VERSION is '{version}'; expected '0.18.1'. "
-        "Bump VERSION to 0.18.1 in cli.py (entity_edge collapse + factory bugfix)."
+    assert version == "0.19.0", (
+        f"Python VERSION is '{version}'; expected '0.19.0'. "
+        "Bump VERSION to 0.19.0 in cli.py (nests entity_edge kind removed)."
     )
 
 
-def test_cpp_version_is_018():
-    """C++ kVersion must be 0.18.0 after the 0.18.1 bugfix bump."""
+def test_cpp_version_is_019():
+    """C++ kVersion must be 0.19.0 after the nests-removal bump."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.18.1", (
-        f"C++ kVersion is '{version}'; expected '0.18.1'. "
-        "Bump kVersion to 0.18.1 in args.hpp (entity_edge collapse + factory bugfix)."
+    assert version == "0.19.0", (
+        f"C++ kVersion is '{version}'; expected '0.19.0'. "
+        "Bump kVersion to 0.19.0 in args.hpp (nests entity_edge kind removed)."
     )
 
 
-def test_cpp_schema_version_is_17():
-    """C++ kSchemaVersion must be 17 (P2-T7)."""
+def test_cpp_schema_version_is_18():
+    """C++ kSchemaVersion must be 18 after the v17->v18 nests-removal bump."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 17, (
-        f"C++ kSchemaVersion is {version}; expected 17. "
-        "P2-T7: bump kSchemaVersion 16 -> 17 in storage.hpp."
+    assert version == 18, (
+        f"C++ kSchemaVersion is {version}; expected 18. "
+        "Bump kSchemaVersion 17 -> 18 in storage.hpp (nests removal)."
     )
 
 
@@ -448,8 +447,8 @@ def test_fresh_db_entity_edge_is_empty(tmp_path):
     )
 
 
-def test_fresh_db_entity_edge_kind_has_11_rows(tmp_path):
-    """A freshly opened Storage must seed entity_edge_kind with exactly 11 rows."""
+def test_fresh_db_entity_edge_kind_has_10_rows(tmp_path):
+    """A freshly opened Storage must seed entity_edge_kind with exactly 10 rows."""
     try:
         from indexer.storage import Storage
     except ImportError:
@@ -468,13 +467,13 @@ def test_fresh_db_entity_edge_kind_has_11_rows(tmp_path):
         rows = []
     conn.close()
     s.close()
-    assert count == 11, (
-        f"entity_edge_kind has {count} rows; expected 11 (P2-T1 seed). "
+    assert count == 10, (
+        f"entity_edge_kind has {count} rows; expected 10 (P2-T1 seed). "
         f"Rows found: {rows}"
     )
     expected_names = [
         "generalizes", "realizes", "specializes", "composes", "aggregates",
-        "associates", "creates", "uses", "destroys", "nests", "befriends",
+        "associates", "creates", "uses", "destroys", "befriends",
     ]
     actual_names = [r[1] for r in rows]
     assert actual_names == expected_names, (

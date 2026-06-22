@@ -19,8 +19,12 @@ Relation ids (entity_edge_kind):
   7  creates       method allocates an entity (new / ctor / factory)
   8  uses          method uses an entity (calls virtual method on it)
   9  destroys      method deallocates an entity (delete)
-  10 nests         record contains a nested record type
-  11 befriends     friend class declaration
+  10 befriends     friend class declaration
+
+Note: lexical nesting (Outer::Inner) is NOT a relation -- it is a
+declaration-scope property already recoverable from the symbol itself
+(decl_path / Layer-0 contains edge), so it is deliberately not materialised
+as an entity_edge.
 
 Layer-0 edge.kind ids for construction/destruction (PR1 seeds):
   10  construct-value    (maps to create_form 3)
@@ -58,8 +62,7 @@ _EK_ASSOCIATES = 6
 _EK_CREATES = 7
 _EK_USES = 8
 _EK_DESTROYS = 9
-_EK_NESTS = 10
-_EK_BEFRIENDS = 11
+_EK_BEFRIENDS = 10
 
 # Layer-0 edge.kind ids
 _L0_CALLS = 1
@@ -314,7 +317,6 @@ def materialize_entity_edges(db: "Storage") -> None:
         _materialise_field_relations(db)
         _materialise_creates_destroys(db)
         _materialise_uses(db)
-        _materialise_nests(db)
         _materialise_befriends(db)
 
 
@@ -704,40 +706,7 @@ def _materialise_uses(db: "Storage") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6: nests  (contains edges between entity symbols)
-# ---------------------------------------------------------------------------
-
-def _materialise_nests(db: "Storage") -> None:
-    conn = db._conn
-    rows = conn.execute(
-        "SELECT e.src_id, e.dst_id "
-        "FROM edge e "
-        "JOIN symbol src ON src.id = e.src_id "
-        "JOIN symbol dst ON dst.id = e.dst_id "
-        "WHERE e.kind = 3 "    # contains=3
-        "  AND src.kind IN (2,3,4,5) "
-        "  AND dst.kind IN (2,3,4,5)"
-    ).fetchall()
-
-    for r in rows:
-        src_id, dst_id = r[0], r[1]
-        src_id = _collapse_to_primary(conn, src_id)
-        dst_id = _collapse_to_primary(conn, dst_id)
-        if src_id == dst_id:
-            continue
-        conn.execute(
-            "INSERT INTO entity_edge "
-            "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
-            " access, is_virtual, create_form, partial) "
-            "VALUES (?, ?, 10, 1, NULL, 1, 0, 0, NULL, 0) "
-            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
-            "  count = entity_edge.count + 1",
-            (src_id, dst_id),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Phase 7: befriends  (friend edges between entity symbols)
+# Phase 6: befriends  (friend edges between entity symbols)
 # ---------------------------------------------------------------------------
 
 def _materialise_befriends(db: "Storage") -> None:
@@ -764,7 +733,7 @@ def _materialise_befriends(db: "Storage") -> None:
             "INSERT INTO entity_edge "
             "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
             " access, is_virtual, create_form, partial) "
-            "VALUES (?, ?, 11, 1, NULL, 1, 0, 0, NULL, 0) "
+            "VALUES (?, ?, 10, 1, NULL, 1, 0, 0, NULL, 0) "
             "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (src_id, dst_id),

@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 17;
+constexpr int kSchemaVersion = 18;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -263,7 +263,7 @@ public:
                        int64_t partial = 0);
   // Delete all entity_edge rows (pre-step for idempotent re-materialise).
   void clear_entity_edges();
-  // Materialise all 11 entity relation kinds from the Layer-0 graph.
+  // Materialise all 10 entity relation kinds from the Layer-0 graph.
   // Called by resolve_pass() after rollup_edge_counts(). Pure DB pass.
   void materialise_entity_edges();
 
