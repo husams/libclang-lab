@@ -323,6 +323,7 @@ const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
     "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,"
+    "verify,"
     "set,"
     "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
@@ -394,7 +395,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, migrate, add-source, import, realias, index, resolve, "
-            "pch, component, label, set, file, dump-compile-commands, search, "
+            "pch, component, label, verify, set, file, dump-compile-commands, "
+            "search, "
             "show, "
             "list, ls, delete, graph, ast)\n");
 }
@@ -833,7 +835,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.28.2");
+  CHECK(std::string(cli::kVersion) == "0.29.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -858,7 +860,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "positional arguments:\n"
           "  "
           "{init,migrate,add-source,import,realias,index,resolve,pch,component,"
-          "label,"
+          "label,verify,"
           "set,file,"
           "dump-compile-commands,search,show,list,ls,delete,graph,ast}"
           "\n"
@@ -878,6 +880,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "                        indexing\n"
           "    component           inspect or modify a component\n"
           "    label               manage include/arg label registry\n"
+          "    verify              check that component roots and files exist on "
+          "disk\n"
           "    set                 set a mutable file attribute (e.g. pending "
           "status)\n"
           "    file                inspect or edit one file's stored compile "
@@ -970,6 +974,51 @@ TEST_CASE("args: set -h is byte-identical to Python argparse") {
   cli::ParsedArgs pa = cli::parse_args({"set", "-h"});
   REQUIRE(pa.help_text);
   CHECK(*pa.help_text == std::string(kSetHelp));
+}
+
+TEST_CASE("args: verify grammar — --component/-c, --all, --db") {
+  // $ cidx verify --component demo --all --db /tmp/i.db
+  cli::ParsedArgs pa =
+      cli::parse_args({"verify", "--component", "demo", "--all", "--db",
+                       "/tmp/i.db"});
+  CHECK(pa.command == "verify");
+  REQUIRE(pa.component);
+  CHECK(*pa.component == "demo");
+  CHECK(pa.all);
+  REQUIRE(pa.index_db);
+  CHECK(*pa.index_db == "/tmp/i.db");
+
+  // bare verify: no component, --all off
+  pa = cli::parse_args({"verify"});
+  CHECK_FALSE(pa.component);
+  CHECK_FALSE(pa.all);
+
+  // glued short option -cNAME
+  pa = cli::parse_args({"verify", "-cgraphlab"});
+  REQUIRE(pa.component);
+  CHECK(*pa.component == "graphlab");
+
+  // unknown flag -> exit 2
+  const ParseFail f = parse_fail({"verify", "--bogus"});
+  CHECK(f.code == 2);
+}
+
+TEST_CASE("args: verify -h is byte-identical to Python argparse") {
+  // Independent golden transcription of `cidx verify -h`
+  // (Python 3.14 argparse, COLUMNS=80).
+  const char kVerifyHelpGolden[] =
+      "usage: cidx verify [-h] [--component NAME] [--all] [--db PATH]\n"
+      "\n"
+      "options:\n"
+      "  -h, --help            show this help message and exit\n"
+      "  --component, -c NAME  restrict to one component (default: all)\n"
+      "  --all                 also list files that exist (default: only "
+      "failures)\n"
+      "  --db PATH             index database (default: the standard cache "
+      "index)\n";
+  cli::ParsedArgs pa = cli::parse_args({"verify", "-h"});
+  REQUIRE(pa.help_text);
+  CHECK(*pa.help_text == std::string(kVerifyHelpGolden));
 }
 
 // ---------------------------------------------------------------------------

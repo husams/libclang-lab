@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.28.2";
+inline constexpr const char *kVersion = "0.29.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -51,6 +51,7 @@ struct ParsedArgs {
   std::optional<std::string> file_filter; // list symbols --file/-f
   bool indexed = false;                   // list files --indexed
   bool pending = false;                   // list files --pending
+  bool all = false;                       // verify --all (list OK files too)
   bool force = false;                     // init --force
   bool no_git = false;                    // add-source --no-git
   std::optional<int64_t> del_id;          // delete --id
