@@ -429,14 +429,15 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
   auto vstr = [](const std::optional<int> &v) {
     return v ? std::to_string(*v) : std::string("None"); // Python f"v{None}"
   };
-  // A leftover 'nests' entity_edge_kind row marks a DB that still carries the
-  // removed relation -- it must be cleaned even when schema_version is already
-  // current (an earlier build bumped the version without cleaning).
-  auto has_stale_nests = [&]() -> bool {
+  // A leftover 'nests' row (removed relation) or 'realizes' row (renamed to
+  // 'implements') marks a DB whose entity_edge_kind seed must be refreshed, even
+  // when schema_version is already current (an earlier build bumped the version
+  // without reconciling the seed).
+  auto entity_kinds_stale = [&]() -> bool {
     SqliteDb db(ctx.index_path);
     try {
-      SqliteStmt st = db.prepare(
-          "SELECT 1 FROM entity_edge_kind WHERE name = 'nests' LIMIT 1");
+      SqliteStmt st = db.prepare("SELECT 1 FROM entity_edge_kind "
+                                 "WHERE name IN ('nests', 'realizes') LIMIT 1");
       return st.step();
     } catch (const std::exception &) {
       return false; // no entity_edge_kind table (pre-v17 DB)
@@ -449,7 +450,7 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
              << "); refusing to touch it\n";
     return 1;
   }
-  const bool stale = has_stale_nests();
+  const bool stale = entity_kinds_stale();
   { Storage db(ctx.index_path); } // constructing Storage applies the migration
   const std::optional<int> after = schema_version();
   if (before != after) {
@@ -457,7 +458,7 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
              << " -> v" << vstr(after) << "\n";
   } else if (stale) {
     *ctx.out << "migrated " << ctx.index_path
-             << ": removed defunct nests edges (schema v" << vstr(after)
+             << ": refreshed entity relation kinds (schema v" << vstr(after)
              << ")\n";
   } else {
     *ctx.out << ctx.index_path << " already at schema v" << vstr(after)

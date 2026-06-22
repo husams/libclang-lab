@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.19.0"
+VERSION = "0.21.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -217,14 +217,16 @@ def cmd_migrate(args) -> int:
         finally:
             con.close()
 
-    def _has_stale_nests() -> bool:
-        # A leftover 'nests' entity_edge_kind row marks a DB that still carries
-        # the removed relation -- it must be cleaned even when schema_version is
-        # already current (an earlier build bumped the version without cleaning).
+    def _entity_kinds_stale() -> bool:
+        # A leftover 'nests' row (removed relation) or 'realizes' row (renamed to
+        # 'implements') marks a DB whose entity_edge_kind seed must be refreshed,
+        # even when schema_version is already current (an earlier build bumped the
+        # version without reconciling the seed).
         con = sqlite3.connect(path)
         try:
             row = con.execute(
-                "SELECT 1 FROM entity_edge_kind WHERE name = 'nests' LIMIT 1"
+                "SELECT 1 FROM entity_edge_kind "
+                "WHERE name IN ('nests', 'realizes') LIMIT 1"
             ).fetchone()
             return row is not None
         except sqlite3.OperationalError:
@@ -240,14 +242,14 @@ def cmd_migrate(args) -> int:
             file=sys.stderr,
         )
         return 1
-    stale = _has_stale_nests()
+    stale = _entity_kinds_stale()
     with Storage(path):  # constructing Storage applies the in-place migration
         pass
     after = _schema_version()
     if before != after:
         print(f"migrated {path}: schema v{before} -> v{after}")
     elif stale:
-        print(f"migrated {path}: removed defunct nests edges (schema v{after})")
+        print(f"migrated {path}: refreshed entity relation kinds (schema v{after})")
     else:
         print(f"{path} already at schema v{after}; nothing to migrate")
     return 0

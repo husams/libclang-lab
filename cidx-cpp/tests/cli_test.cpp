@@ -833,7 +833,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.19.0");
+  CHECK(std::string(cli::kVersion) == "0.21.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1785,6 +1785,12 @@ TEST_CASE("migrate: v17 -> v18 drops nests edges and renumbers befriends") {
       REQUIRE(st.step());
       CHECK(st.col_int64(0) == 0);
     }
+    // realizes(2) renamed to implements(2).
+    {
+      auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=2");
+      REQUIRE(st.step());
+      CHECK(st.col_text(0) == "implements");
+    }
   }
 
   // Idempotent: a second migrate is a no-op.
@@ -1824,7 +1830,8 @@ TEST_CASE("migrate: cleans a DB already stamped v18 but still carrying nests") {
   CmdResult r = run_cli({"migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.err.empty());
-  CHECK(r.out == "migrated " + db + ": removed defunct nests edges (schema v" +
+  CHECK(r.out == "migrated " + db +
+                     ": refreshed entity relation kinds (schema v" +
                      std::to_string(cidx::kSchemaVersion) + ")\n");
 
   {
@@ -1836,6 +1843,10 @@ TEST_CASE("migrate: cleans a DB already stamped v18 but still carrying nests") {
     auto k = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
     REQUIRE(k.step());
     CHECK(k.col_int64(0) == 0);
+    // realizes(2) renamed to implements(2).
+    auto im = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=2");
+    REQUIRE(im.step());
+    CHECK(im.col_text(0) == "implements");
   }
 
   // Now clean -> second migrate is a true no-op.

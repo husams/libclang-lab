@@ -236,7 +236,7 @@ CREATE TABLE IF NOT EXISTS entity_edge_kind (
     name TEXT NOT NULL UNIQUE
 );
 INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
-  (1,'generalizes'), (2,'realizes'), (3,'specializes'),
+  (1,'generalizes'), (2,'implements'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
   (10,'befriends');
@@ -809,6 +809,20 @@ void Storage::migrate() {
       db_.exec("DELETE FROM entity_edge WHERE kind = 10");
       db_.exec("UPDATE entity_edge SET kind = 10 WHERE kind = 11");
       db_.exec("DELETE FROM entity_edge_kind WHERE id IN (10, 11)");
+      changed = true;
+    }
+    // Rename kind 2 'realizes' -> 'implements' (display name only; the stored
+    // entity_edge.kind int is unchanged). Data-gated on the old name so it fires
+    // regardless of schema_version; the schema script's INSERT OR IGNORE would
+    // otherwise leave the stale (2,'realizes') row in place. Mirrors storage.py.
+    bool renamed = false;
+    {
+      auto st = db_.prepare(
+          "SELECT 1 FROM entity_edge_kind WHERE id = 2 AND name = 'realizes'");
+      renamed = st.step();
+    }
+    if (renamed) {
+      db_.exec("UPDATE entity_edge_kind SET name = 'implements' WHERE id = 2");
       changed = true;
     }
   }
@@ -2093,7 +2107,7 @@ static int64_t cpp_collapse_to_primary(cidx::SqliteDb &db, int64_t sym_id) {
   return cur;
 }
 
-// Phase 1: generalizes(1) / realizes(2) from inherits(2) edges.
+// Phase 1: generalizes(1) / implements(2) from inherits(2) edges.
 static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
   // Is sym_id a pure Interface (all methods pure-virtual, no data fields)?
   const auto is_interface = [&](int64_t sym_id) -> bool {
@@ -2145,7 +2159,7 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
     int64_t src = cpp_collapse_to_primary(db, r.src);
     int64_t dst = cpp_collapse_to_primary(db, r.dst);
     if (src == dst) continue;  // no self-edge
-    int64_t ek = is_interface(dst) ? 2 : 1;  // realizes=2 or generalizes=1
+    int64_t ek = is_interface(dst) ? 2 : 1;  // implements=2 or generalizes=1
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -2227,10 +2241,17 @@ static std::pair<int64_t,int64_t> cpp_classify_field_type(
       return {ik, 3};
     }
   }
-  // Smart pointers
-  static const char *uniq[] = {"std::unique_ptr<", "unique_ptr<",
-                                "std::shared_ptr<", "shared_ptr<", nullptr};
-  for (const char **u = uniq; *u; ++u) {
+  // unique_ptr / optional -> composes (EXCLUSIVE ownership: destroyed with the
+  // owner, cannot outlive it -- same lifetime as a value member), 0..1.
+  static const char *excl[] = {"std::unique_ptr<", "unique_ptr<",
+                                "std::optional<", "optional<", nullptr};
+  for (const char **u = excl; *u; ++u) {
+    if (s.substr(0, strlen(*u)) == *u) return {4, 2};  // composes=4
+  }
+  // shared_ptr -> aggregates (SHARED ownership: the pointee can outlive the
+  // owner while other shared_ptrs keep it alive).
+  static const char *shared[] = {"std::shared_ptr<", "shared_ptr<", nullptr};
+  for (const char **u = shared; *u; ++u) {
     if (s.substr(0, strlen(*u)) == *u) return {5, 2};  // aggregates=5
   }
   static const char *weak_raw[] = {"std::weak_ptr<", "weak_ptr<", nullptr};
@@ -2271,7 +2292,7 @@ static std::optional<int64_t> cpp_resolve_entity_from_type(
   // Strip smart-ptr / container wrappers
   static const char *wrappers[] = {
     "std::unique_ptr<", "unique_ptr<", "std::shared_ptr<", "shared_ptr<",
-    "std::weak_ptr<",   "weak_ptr<",
+    "std::weak_ptr<",   "weak_ptr<",   "std::optional<",   "optional<",
     "std::vector<", "vector<", "std::list<", "list<",
     "std::deque<", "deque<", "std::set<", "set<",
     "std::unordered_set<", "unordered_set<",

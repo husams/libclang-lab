@@ -11,11 +11,13 @@ separate entity table exists.
 
 Relation ids (entity_edge_kind):
   1  generalizes   inheritance where base carries state/impl
-  2  realizes      inheritance where base is a pure Interface
+  2  implements    inheritance where base is a pure Interface
   3  specializes   explicit template specialization
-  4  composes      field: value member (owns lifetime)
-  5  aggregates    field: unique_ptr / shared_ptr (optional ownership)
-  6  associates    field: raw ptr / ref / weak_ptr (borrowed / weak)
+  4  composes      field: value / unique_ptr / optional (exclusive ownership --
+                    part is destroyed with the owner, cannot outlive it)
+  5  aggregates    field: shared_ptr (shared ownership -- part can outlive the
+                    owner while other owners keep it alive)
+  6  associates    field: raw ptr / ref / weak_ptr (borrowed / weak -- no ownership)
   7  creates       method allocates an entity (new / ctor / factory)
   8  uses          method uses an entity (calls virtual method on it)
   9  destroys      method deallocates an entity (delete)
@@ -54,7 +56,7 @@ _ENTITY_KINDS = frozenset({2, 3, 4, 5})  # struct=2, union=3, class=4, enum=5
 
 # entity_edge_kind ids
 _EK_GENERALIZES = 1
-_EK_REALIZES = 2
+_EK_IMPLEMENTS = 2
 _EK_SPECIALIZES = 3
 _EK_COMPOSES = 4
 _EK_AGGREGATES = 5
@@ -178,6 +180,7 @@ def _is_interface(db: "Storage", sym_id: int) -> bool:
 _UNIQUE_PTR_PREFIX = ("std::unique_ptr<", "unique_ptr<")
 _SHARED_PTR_PREFIX = ("std::shared_ptr<", "shared_ptr<")
 _WEAK_PTR_PREFIX   = ("std::weak_ptr<",   "weak_ptr<")
+_OPTIONAL_PREFIX   = ("std::optional<",   "optional<")
 _PTR_SUFFIX = ("*",)
 _REF_SUFFIX = ("&",)
 _CONTAINER_PREFIXES = (
@@ -208,9 +211,12 @@ def _classify_field_type(
 
     This function decides ownership semantics from the type:
     - value type (neither ptr/ref/smart-ptr): composes, multiplicity=1
-    - unique_ptr: aggregates, multiplicity=2 (0..1 -- owns one)
-    - shared_ptr: aggregates, multiplicity=2 (shared ownership)
-    - raw ptr / ref / weak_ptr: associates, multiplicity=2
+    - unique_ptr / optional: composes, multiplicity=2 (0..1) -- EXCLUSIVE
+      ownership; the pointee/value is destroyed with the owner and cannot
+      outlive it, exactly like a value member (just heap/nullable).
+    - shared_ptr: aggregates, multiplicity=2 -- SHARED ownership; the pointee
+      can outlive the owner while other shared_ptrs keep it alive.
+    - raw ptr / ref / weak_ptr: associates, multiplicity=2 (no ownership)
     - container of the above: lift the inner kind + multiplicity=3 (0..*)
     - arrays (T[N]): composes, multiplicity=4 (we simplify; N not recoverable here)
     """
@@ -227,8 +233,15 @@ def _classify_field_type(
             inner_kind, _ = _classify_field_type(inner)
             return inner_kind, 3
 
-    # unique_ptr / shared_ptr → aggregates (optional ownership), multiplicity=2
-    for prefix in _UNIQUE_PTR_PREFIX + _SHARED_PTR_PREFIX:
+    # unique_ptr / optional → composes (EXCLUSIVE ownership: destroyed with the
+    # owner, cannot outlive it -- same lifetime as a value member), 0..1.
+    for prefix in _UNIQUE_PTR_PREFIX + _OPTIONAL_PREFIX:
+        if s.startswith(prefix):
+            return _EK_COMPOSES, 2
+
+    # shared_ptr → aggregates (SHARED ownership: the pointee can outlive the
+    # owner while other shared_ptrs keep it alive), multiplicity=2
+    for prefix in _SHARED_PTR_PREFIX:
         if s.startswith(prefix):
             return _EK_AGGREGATES, 2
 
@@ -286,7 +299,7 @@ def _resolve_entity_from_type(conn, type_spelling: str) -> Optional[int]:
     # Strip smart-ptr / container wrappers to get the inner type
     for prefix in (
         _UNIQUE_PTR_PREFIX + _SHARED_PTR_PREFIX + _WEAK_PTR_PREFIX
-        + _CONTAINER_PREFIXES
+        + _OPTIONAL_PREFIX + _CONTAINER_PREFIXES
     ):
         if s.startswith(prefix):
             inner = s[len(prefix):].rstrip(">").strip()
@@ -321,7 +334,7 @@ def materialize_entity_edges(db: "Storage") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: generalizes / realizes  (inherits edges between entity symbols)
+# Phase 1: generalizes / implements  (inherits edges between entity symbols)
 # ---------------------------------------------------------------------------
 
 def _materialise_inheritance(db: "Storage") -> None:
@@ -350,7 +363,7 @@ def _materialise_inheritance(db: "Storage") -> None:
             continue  # no self-edge
 
         if _is_interface(db, dst_id):
-            ek = _EK_REALIZES
+            ek = _EK_IMPLEMENTS
         else:
             ek = _EK_GENERALIZES
 

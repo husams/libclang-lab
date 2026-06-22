@@ -1,7 +1,7 @@
 """PR2: v17 entity_edge materialisation tests.
 
 Covers:
-  * schema/version invariants (SCHEMA_VERSION=18, VERSION='0.19.0')
+  * schema/version invariants (SCHEMA_VERSION=18, VERSION='0.21.0')
   * entity_rollup module importable
   * entity_edge + entity_edge_kind tables present in schema
   * PR1 edge_kind seed rows 10-16 present
@@ -28,7 +28,7 @@ from indexer.query import EDGE_KINDS
 
 _ENTITY_KIND_NAMES = {
     1: "generalizes",
-    2: "realizes",
+    2: "implements",
     3: "specializes",
     4: "composes",
     5: "aggregates",
@@ -97,9 +97,9 @@ def test_schema_version_is_18():
     assert SCHEMA_VERSION == 18, f"Expected 18, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0190():
+def test_product_version_is_0210():
     from indexer import cli
-    assert cli.VERSION == "0.19.0", f"Expected '0.19.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.21.0", f"Expected '0.21.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -142,9 +142,9 @@ def test_pr1_edge_kind_seeds(tmp_path, kid, name):
 # BDD acceptance scenarios (ADR-008)
 # ---------------------------------------------------------------------------
 
-# ADR-008 S1: realizes XOR generalizes
-def test_bdd_ADR008_S1_realizes_xor_generalizes_interface(tmp_path):
-    """Interface base (all-pure, no data) → realizes(2), NOT generalizes(1)."""
+# ADR-008 S1: implements XOR generalizes
+def test_bdd_ADR008_S1_implements_xor_generalizes_interface(tmp_path):
+    """Interface base (all-pure, no data) → implements(2), NOT generalizes(1)."""
     if not _HAS_ROLLUP:
         pytest.skip("required modules not available (_HAS_ROLLUP=False)")
 
@@ -167,12 +167,12 @@ def test_bdd_ADR008_S1_realizes_xor_generalizes_interface(tmp_path):
 
     rows = db.entity_edges(src_id=conc_id, dst_id=iface_id)
     kinds = {r["kind"] for r in rows}
-    assert 2 in kinds, "realizes(2) missing for Interface base"
+    assert 2 in kinds, "implements(2) missing for Interface base"
     assert 1 not in kinds, "generalizes(1) must NOT fire for Interface base"
 
 
 def test_bdd_ADR008_S1_state_base_generalizes(tmp_path):
-    """State-bearing base (has data field) → generalizes(1), NOT realizes(2)."""
+    """State-bearing base (has data field) → generalizes(1), NOT implements(2)."""
     if not _HAS_ROLLUP:
         pytest.skip("required modules not available (_HAS_ROLLUP=False)")
 
@@ -193,7 +193,7 @@ def test_bdd_ADR008_S1_state_base_generalizes(tmp_path):
     rows = db.entity_edges(src_id=derived_id, dst_id=base_id)
     kinds = {r["kind"] for r in rows}
     assert 1 in kinds, "generalizes(1) missing for state-bearing base"
-    assert 2 not in kinds, "realizes(2) must NOT fire for state-bearing base"
+    assert 2 not in kinds, "implements(2) must NOT fire for state-bearing base"
 
 
 # ADR-008 S2: creates (heap) from method-scoped new
@@ -311,7 +311,7 @@ def test_kind_generalizes(tmp_path):
     assert rows, "generalizes(1) missing"
 
 
-def test_kind_realizes(tmp_path):
+def test_kind_implements(tmp_path):
     if not _HAS_ROLLUP:
         pytest.skip()
     db, dir_id = _fresh(tmp_path)
@@ -327,7 +327,7 @@ def test_kind_realizes(tmp_path):
 
     materialize_entity_edges(db)
     rows = db.entity_edges(src_id=conc_id, kind=2)
-    assert rows, "realizes(2) missing"
+    assert rows, "implements(2) missing"
 
 
 def test_kind_specializes_collapses_to_primary(tmp_path):
@@ -373,6 +373,7 @@ def test_kind_composes(tmp_path):
 
 
 def test_kind_aggregates(tmp_path):
+    """shared_ptr field -> aggregates(5): SHARED ownership, part can outlive owner."""
     if not _HAS_ROLLUP:
         pytest.skip()
     db, dir_id = _fresh(tmp_path)
@@ -382,13 +383,37 @@ def test_kind_aggregates(tmp_path):
     part_id = _sym(db, root, "Part", "c:@S@Part", "Part", "class", 1)
     owner_id = _sym(db, root, "Owner", "c:@S@Owner", "Owner", "class", 10)
     field_id = _sym(db, root, "Owner::p", "c:@S@Owner@FI@p", "p", "member", 11,
-                    parent="c:@S@Owner", type_info="std::unique_ptr<Part>",
+                    parent="c:@S@Owner", type_info="std::shared_ptr<Part>",
                     access="private")
     db.add_edge(field_id, owner_id, C["field_of"])
 
     materialize_entity_edges(db)
     rows = db.entity_edges(src_id=owner_id, dst_id=part_id, kind=5)
-    assert rows, "aggregates(5) missing"
+    assert rows, "aggregates(5) missing for shared_ptr"
+
+
+@pytest.mark.parametrize("type_info", ["std::unique_ptr<Part>", "std::optional<Part>"])
+def test_unique_ptr_and_optional_compose(tmp_path, type_info):
+    """unique_ptr / optional -> composes(4): EXCLUSIVE ownership (dies with owner),
+    NOT aggregates. Multiplicity 2 (0..1)."""
+    if not _HAS_ROLLUP:
+        pytest.skip()
+    db, dir_id = _fresh(tmp_path)
+    root = db.add_file(dir_id, "h.hpp")
+    C = EDGE_KINDS
+
+    part_id = _sym(db, root, "Part", "c:@S@Part", "Part", "class", 1)
+    owner_id = _sym(db, root, "Owner", "c:@S@Owner", "Owner", "class", 10)
+    field_id = _sym(db, root, "Owner::p", "c:@S@Owner@FI@p", "p", "member", 11,
+                    parent="c:@S@Owner", type_info=type_info, access="private")
+    db.add_edge(field_id, owner_id, C["field_of"])
+
+    materialize_entity_edges(db)
+    composes = db.entity_edges(src_id=owner_id, dst_id=part_id, kind=4)
+    aggregates = db.entity_edges(src_id=owner_id, dst_id=part_id, kind=5)
+    assert composes, f"{type_info} must be composes(4) (exclusive ownership)"
+    assert not aggregates, f"{type_info} must NOT be aggregates(5)"
+    assert composes[0]["multiplicity"] == 2, "unique_ptr/optional is 0..1"
 
 
 def test_kind_associates(tmp_path):
@@ -602,11 +627,12 @@ def test_migration_entity_edge_empty_post_migrate(tmp_path):
 
 @pytest.mark.parametrize("stamped_version", ["17", "18"])
 def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version):
-    """The nests-removal migration cleans the DB in place: drop the defunct
-    nests(10) rows, renumber befriends 11 -> 10, reseed entity_edge_kind.
+    """The entity-kind migration cleans the DB in place: drop the defunct
+    nests(10) rows, renumber befriends 11 -> 10, rename realizes(2) ->
+    implements(2), and reseed entity_edge_kind.
 
-    Gated on the stale 'nests' seed row, NOT the version -- so it fires even on a
-    DB an earlier build already stamped v18 WITHOUT cleaning (stamped_version=18).
+    Gated on the stale seed rows, NOT the version -- so it fires even on a DB an
+    earlier build already stamped v18 WITHOUT cleaning (stamped_version=18).
     """
     import sqlite3
 
@@ -658,11 +684,13 @@ def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version
     assert len(kinds) == 10, f"entity_edge_kind should have 10 rows; got {kinds}"
     names = [n for _, n in kinds]
     assert "nests" not in names, "stale 'nests' seed row still present"
+    assert "realizes" not in names, "stale 'realizes' seed row was not renamed"
     assert dict(kinds)[10] == "befriends", "id 10 should be befriends after migrate"
+    assert dict(kinds)[2] == "implements", "id 2 should be implements after migrate"
 
 
 def test_migration_nests_cleanup_is_idempotent(tmp_path):
-    """A clean v18 DB (no 'nests' marker) is left untouched on re-open."""
+    """A clean v18 DB (no stale marker) is left untouched on re-open."""
     db_path = str(tmp_path / "index.db")
     Storage(db_path).close()
     # second open must not raise and must keep the 10-row seed intact
@@ -673,7 +701,10 @@ def test_migration_nests_cleanup_is_idempotent(tmp_path):
         kinds = conn.execute("SELECT id,name FROM entity_edge_kind ORDER BY id").fetchall()
     finally:
         conn.close()
-    assert len(kinds) == 10 and "nests" not in [n for _, n in kinds]
+    names = [n for _, n in kinds]
+    assert len(kinds) == 10
+    assert "nests" not in names and "realizes" not in names
+    assert dict(kinds)[2] == "implements"
 
 
 def test_migration_entity_edge_populated_after_resolve(tmp_path):
