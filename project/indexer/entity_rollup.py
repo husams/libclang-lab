@@ -577,19 +577,42 @@ def _materialise_field_relations(db: "Storage") -> None:
         if not type_info:
             continue
 
-        # Try template_arg.ref_id for the referent first (most reliable).
-        # Use the LAST type arg (highest position) so map<K,V> picks the VALUE V,
-        # not the key K; single-arg containers/smart-ptrs are unaffected.
-        ref_row = conn.execute(
-            "SELECT ref_id FROM template_arg WHERE owner_id = ? "
-            "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1",
+        # Stage 4: prefer a structural member -> NAMED-INSTANCE uses(7) edge.
+        # A `X<B> m_;` member mints the `X<B>` instance (is_named_instance=1) and
+        # the extractor records a uses(7) edge member -> instance keyed on the
+        # spec USR (unambiguous across namespaces -- unlike display_name match).
+        # The named instance is its OWN design entity, so it is NOT collapsed
+        # onto the primary -> we emit `A composes/associates X<B>`, completing
+        # the chain A -> X<B> -> B.  This path is reached ONLY for minted named
+        # instances (non-system specializations); `std::vector<Foo>` is never
+        # minted, so its peel-to-Foo resolution below is unchanged.
+        inst_row = conn.execute(
+            "SELECT e.dst_id FROM edge e "
+            "JOIN symbol s ON s.id = e.dst_id "
+            "WHERE e.src_id = ? AND e.kind = 7 AND s.is_named_instance = 1 "
+            "ORDER BY e.dst_id LIMIT 1",
             (field_id,),
         ).fetchone()
-        ref_entity_id = ref_row["ref_id"] if ref_row else None
+        named_inst_id = inst_row["dst_id"] if inst_row else None
 
-        # Fall back to type-spelling resolution
-        if ref_entity_id is None:
-            ref_entity_id = _resolve_entity_from_type(conn, type_info)
+        if named_inst_id is not None:
+            ref_entity_id: Optional[int] = named_inst_id
+            skip_ref_collapse = True
+        else:
+            skip_ref_collapse = False
+            # Try template_arg.ref_id for the referent first (most reliable).
+            # Use the LAST type arg (highest position) so map<K,V> picks the
+            # VALUE V, not the key K; single-arg containers/smart-ptrs unaffected.
+            ref_row = conn.execute(
+                "SELECT ref_id FROM template_arg WHERE owner_id = ? "
+                "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1",
+                (field_id,),
+            ).fetchone()
+            ref_entity_id = ref_row["ref_id"] if ref_row else None
+
+            # Fall back to type-spelling resolution
+            if ref_entity_id is None:
+                ref_entity_id = _resolve_entity_from_type(conn, type_info)
 
         if ref_entity_id is None:
             # Referent entity not in index — can't produce entity_edge.
@@ -605,9 +628,14 @@ def _materialise_field_relations(db: "Storage") -> None:
         ek, mult = _classify_field_type(type_info)
         access_int = _ACCESS_INT.get(raw_access or "public", 0)
 
-        # Collapse both endpoints onto their primary template.
+        # Collapse the owner onto its primary template.  The referent is
+        # collapsed too UNLESS it is a named instance (kept un-collapsed so the
+        # edge points at `X<B>`, not the primary `X`).
         owner_pid = _collapse_to_primary(conn, owner_id)
-        ref_pid = _collapse_to_primary(conn, ref_entity_id)
+        ref_pid = (
+            ref_entity_id if skip_ref_collapse
+            else _collapse_to_primary(conn, ref_entity_id)
+        )
         if owner_pid == ref_pid:
             continue
 

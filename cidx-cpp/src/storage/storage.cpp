@@ -2446,18 +2446,40 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
     if (r.field_kind_int != 6) continue;  // only data members
     if (r.type_info.empty()) continue;
 
-    // Try template_arg.ref_id first
+    // Stage 4: prefer a structural member -> NAMED-INSTANCE uses(7) edge. A
+    // `X<B> m_;` member mints the `X<B>` instance (is_named_instance=1) and the
+    // extractor records a uses(7) edge member -> instance keyed on the spec USR
+    // (unambiguous across namespaces -- unlike a display_name match). The named
+    // instance is its OWN design entity, so it is NOT collapsed onto the primary
+    // -> we emit `A composes/associates X<B>`, completing A -> X<B> -> B. Reached
+    // ONLY for minted named instances (non-system specializations); `std::vector
+    // <Foo>` is never minted, so its peel-to-Foo resolution below is unchanged.
     std::optional<int64_t> ref_entity_id;
-    // Use the LAST type arg (highest position) so map<K,V> picks the VALUE V,
-    // not the key K; single-arg containers/smart-ptrs are unaffected.
-    auto tst = db.prepare(
-        "SELECT ref_id FROM template_arg WHERE owner_id = ? "
-        "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1");
-    tst.bind(1, r.field_id);
-    if (tst.step()) ref_entity_id = tst.col_int64(0);
+    bool skip_ref_collapse = false;
+    auto nist = db.prepare(
+        "SELECT e.dst_id FROM edge e "
+        "JOIN symbol s ON s.id = e.dst_id "
+        "WHERE e.src_id = ? AND e.kind = 7 AND s.is_named_instance = 1 "
+        "ORDER BY e.dst_id LIMIT 1");
+    nist.bind(1, r.field_id);
+    if (nist.step()) {
+      ref_entity_id = nist.col_int64(0);
+      skip_ref_collapse = true;
+    }
 
-    if (!ref_entity_id)
-      ref_entity_id = cpp_resolve_entity_from_type(db, r.type_info);
+    if (!ref_entity_id) {
+      // Try template_arg.ref_id first.  Use the LAST type arg (highest position)
+      // so map<K,V> picks the VALUE V, not the key K; single-arg containers /
+      // smart-ptrs are unaffected.
+      auto tst = db.prepare(
+          "SELECT ref_id FROM template_arg WHERE owner_id = ? "
+          "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1");
+      tst.bind(1, r.field_id);
+      if (tst.step()) ref_entity_id = tst.col_int64(0);
+
+      if (!ref_entity_id)
+        ref_entity_id = cpp_resolve_entity_from_type(db, r.type_info);
+    }
     if (!ref_entity_id) continue;
 
     // Confirm referent is entity
@@ -2471,9 +2493,13 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
     int64_t access_int = 0;
     if (acc_map.count(r.field_access)) access_int = acc_map.at(r.field_access);
 
-    // Collapse both endpoints onto their primary template.
+    // Collapse the owner onto its primary template.  The referent is collapsed
+    // too UNLESS it is a named instance (kept un-collapsed so the edge points at
+    // `X<B>`, not the primary `X`).
     int64_t owner_pid = cpp_collapse_to_primary(db, r.owner_id);
-    int64_t ref_pid = cpp_collapse_to_primary(db, *ref_entity_id);
+    int64_t ref_pid = skip_ref_collapse
+                          ? *ref_entity_id
+                          : cpp_collapse_to_primary(db, *ref_entity_id);
     if (owner_pid == ref_pid) continue;
 
     auto ins = db.prepare(
