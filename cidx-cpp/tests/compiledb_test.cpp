@@ -204,6 +204,39 @@ TEST_CASE("sanitize: clean vector passes through") {
   CHECK(CompileDb::sanitize(stored) == stored);
 }
 
+TEST_CASE("command prefix: env assignments + ccache launcher stripped "
+          "(v0.27.1)") {
+  // A real ccache invocation: CCACHE_*=... env assignments, then `ccache g++`,
+  // then the actual flags. The driver is g++ (not the env prefix) and the
+  // stored options carry none of the cache/launcher junk.
+  const std::vector<std::string> raw = {
+      "CCACHE_DIR=/workspace/.ccache", "CCACHE_COMPRESS=1",
+      "CCACHE_AOPS-52378DIR=",         "ccache",
+      "g++",                           "-g",
+      "-std=gnu++17",                  "-I/foo/include",
+      "-lbar",                         "-c",
+      "x.cpp",                         "-o",
+      "x.o"};
+  CHECK(CompileDb::command_start(raw) == 4); // index of g++
+  CHECK(CompileDb::driver(raw, "/work") == "g++");
+  CHECK(CompileDb::strip_for_libclang(raw, "x.cpp", "/work") ==
+        std::vector<std::string>{"-g", "-std=gnu++17", "-I/foo/include"});
+  // A plain `cc ...` is unaffected: command_start 0, driver cc.
+  const std::vector<std::string> plain = {"cc", "-I.", "-c", "a.c"};
+  CHECK(CompileDb::command_start(plain) == 0);
+  CHECK(CompileDb::driver(plain, "/work") == "cc");
+}
+
+TEST_CASE("sanitize: heals a stored env/launcher/compiler prefix (v0.27.1)") {
+  // An older import dropped only argv[0] (the CCACHE_DIR=... assignment),
+  // leaving the rest of the prefix in the stored options; sanitize drops
+  // through the real compiler.
+  const std::vector<std::string> stored = {
+      "CCACHE_COMPRESS=1", "ccache", "g++", "-g", "-I/abs", "-DX=1"};
+  CHECK(CompileDb::sanitize(stored) ==
+        std::vector<std::string>{"-g", "-I/abs", "-DX=1"});
+}
+
 TEST_CASE("sanitize: drops linker/library/cache flags, keeps parse flags "
           "(v0.27.0)") {
   // Header-search (-nostdinc) and preprocessor (-pthread) flags are KEPT;

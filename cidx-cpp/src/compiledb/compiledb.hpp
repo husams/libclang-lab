@@ -57,9 +57,15 @@ public:
   static std::vector<std::string>
   sanitize(const std::vector<std::string> &stored);
 
-  // argv[0]; absolutized against `directory` iff it contains a path
-  // separator, else kept bare for PATH resolution at parse time
-  // (compiledb.py:106-115).
+  // Index of the real compiler driver in a raw command vector: skips leading
+  // env-var assignments (CCACHE_DIR=...) and launcher wrappers (ccache,
+  // sccache, distcc, icecc, env, time, nice). 0 for a plain `cc ...`; 0 too
+  // if the whole vector is prefix (degenerate). Mirrors compiledb.command_start.
+  static size_t command_start(const std::vector<std::string> &args);
+
+  // The real compiler driver (token at command_start); absolutized against
+  // `directory` iff it contains a path separator, else kept bare for PATH
+  // resolution at parse time (compiledb.driver).
   static std::string driver(const std::vector<std::string> &argv,
                             const std::string &directory);
 

@@ -64,6 +64,22 @@ bool has_drop_prefix(const std::string &tok) {
   return false;
 }
 
+// A leading NAME=value token is an env-var assignment; the name must start with
+// a letter/underscore so a flag like -DFOO=bar (starts '-') is never matched.
+bool is_env_assignment(const std::string &tok) {
+  static const std::regex kEnvAssign(R"(^[A-Za-z_][A-Za-z0-9_-]*=)");
+  return std::regex_search(tok, kEnvAssign);
+}
+
+// Compiler-launcher wrappers that sit before the real compiler (by basename).
+const std::set<std::string> kLaunchers = {
+    "ccache", "sccache", "distcc", "icecc", "icerun", "env", "time", "nice",
+};
+
+bool is_launcher(const std::string &tok) {
+  return kLaunchers.count(pathutil::basename(tok)) != 0;
+}
+
 // compiledb.py:23-24 — absolute paths returned UNCHANGED (not normalized).
 std::string abs_against(const std::string &p, const std::string &base) {
   if (pathutil::isabs(p)) {
@@ -137,7 +153,9 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
                               const std::string &directory) {
   const std::set<std::string> src = {filename, pathutil::basename(filename)};
   std::vector<std::string> out;
-  size_t i = argv.empty() ? 0 : 1; // drop argv[0] (the driver)
+  // Drop the whole command prefix: env-var assignments + launcher wrappers
+  // (ccache ...) AND the real compiler token at command_start.
+  size_t i = argv.empty() ? 0 : command_start(argv) + 1;
   while (i < argv.size()) {
     const std::string &tok = argv[i++];
     if (kDrop.count(tok) != 0) {
@@ -196,7 +214,15 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
 std::vector<std::string>
 CompileDb::sanitize(const std::vector<std::string> &stored) {
   std::vector<std::string> out;
+  // Heal a command prefix an older import stored when argv[0] was an env-var
+  // assignment rather than the compiler (e.g. ["CCACHE_COMPRESS=1", ...,
+  // "ccache", "g++", "-g", ...]). When the first stored token is an env
+  // assignment or launcher, drop through the real compiler at command_start.
   size_t i = 0;
+  if (!stored.empty() &&
+      (is_env_assignment(stored[0]) || is_launcher(stored[0]))) {
+    i = command_start(stored) + 1;
+  }
   while (i < stored.size()) {
     const std::string &tok = stored[i++];
     if (kDrop.count(tok) != 0) {
@@ -216,12 +242,27 @@ CompileDb::sanitize(const std::vector<std::string> &stored) {
   return out;
 }
 
+size_t CompileDb::command_start(const std::vector<std::string> &args) {
+  size_t i = 0;
+  const size_t n = args.size();
+  while (i < n) {
+    const std::string &tok = args[i];
+    if (is_env_assignment(tok) || is_launcher(tok)) {
+      ++i;
+      continue;
+    }
+    break;
+  }
+  return i < n ? i : 0;
+}
+
 std::string CompileDb::driver(const std::vector<std::string> &argv,
                               const std::string &directory) {
   if (argv.empty()) {
     return std::string();
   }
-  const std::string &argv0 = argv[0];
+  // Skip env-assignment + launcher prefix; the real compiler is the driver.
+  const std::string &argv0 = argv[command_start(argv)];
   if (!argv0.contains('/')) {
     return argv0; // bare name: PATH resolution at parse time
   }
