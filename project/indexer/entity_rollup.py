@@ -364,6 +364,32 @@ def _resolve_entity_from_type(conn, type_spelling: str) -> Optional[int]:
     return _spelling_to_symbol_id(conn, s)
 
 
+def _strip_to_param_core(type_spelling: str) -> str:
+    """Strip wrappers/qualifiers/ptr-ref-array off a field type, returning the
+    bare innermost token -- e.g. 'std::vector<T>' -> 'T', 'const T *' -> 'T',
+    'T' -> 'T'.
+
+    Mirrors _resolve_entity_from_type's peeling exactly, but yields the type
+    spelling (for matching against a template parameter NAME) instead of a
+    symbol id.  Used to discover which template-parameter a primary-template
+    member binds, so a named instance can substitute its bound type.
+    """
+    s = _strip_qualifiers(type_spelling)
+    while s.endswith(("&", "*", "]")):
+        if s.endswith("]"):
+            s = s[:s.rfind("[")].strip()
+        else:
+            s = s[:-1].strip()
+    s = _strip_qualifiers(s)
+    for prefix in (
+        _UNIQUE_PTR_PREFIX + _SHARED_PTR_PREFIX + _WEAK_PTR_PREFIX
+        + _OPTIONAL_PREFIX + _CONTAINER_PREFIXES
+    ):
+        if s.startswith(prefix):
+            return _strip_to_param_core(_wrapper_value_type(s, prefix))
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Main materialisation pass
 # ---------------------------------------------------------------------------
@@ -385,6 +411,7 @@ def materialize_entity_edges(db: "Storage") -> None:
         _materialise_specializes(db)
         _materialise_instantiates(db)
         _materialise_field_relations(db)
+        _materialise_instance_composition(db)
         _materialise_creates_destroys(db)
         _materialise_uses(db)
         _materialise_befriends(db)
@@ -593,6 +620,104 @@ def _materialise_field_relations(db: "Storage") -> None:
             "  count = entity_edge.count + 1",
             (owner_pid, ref_pid, ek, field_id, mult, access_int),
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b: composes / aggregates / associates for NAMED template instances
+# ---------------------------------------------------------------------------
+
+def _materialise_instance_composition(db: "Storage") -> None:
+    """Give a NAMED instance `X<B>` its own composes/aggregates/associates.
+
+    A `using Y = X<B>;` mints the `X<B>` instance (is_named_instance=1) but
+    libclang materialises NO members for it, so Phase 3 (which reads field_of
+    edges) cannot classify them.  Instead we read the PRIMARY template's members
+    and SUBSTITUTE the instance's bound type into each: for a member whose type
+    binds template parameter `i` (bare `T`, `vector<T>`, `unique_ptr<T>`, `T*`,
+    ...), look up the instance's template_arg at position `i` (-> B) and emit
+    `X<B> <ownership> B` using _classify_field_type on the primary member's type
+    (the wrapper shape is parameter-agnostic, so classifying the `T`-spelling
+    yields the same kind/multiplicity the substituted `B`-spelling would).
+
+    The instance is NOT collapsed onto the primary -- it is its own entity.
+    """
+    conn = db._conn
+
+    instances = conn.execute(
+        "SELECT e.src_id AS inst_id, e.dst_id AS prim_id "
+        "FROM edge e "
+        "JOIN symbol inst ON inst.id = e.src_id "
+        "JOIN symbol prim ON prim.id = e.dst_id "
+        "WHERE e.kind = 5 AND inst.is_named_instance = 1 AND prim.kind = 31 "
+        "ORDER BY e.src_id, e.dst_id"
+    ).fetchall()
+
+    for inst_row in instances:
+        inst_id = inst_row["inst_id"]
+        prim_id = inst_row["prim_id"]
+
+        # primary template parameter NAME -> position (type params only)
+        param_pos: dict[str, int] = {}
+        for p in conn.execute(
+            "SELECT position, name FROM template_param WHERE owner_id = ? "
+            "AND param_kind = 1 ORDER BY position",
+            (prim_id,),
+        ).fetchall():
+            if p["name"]:
+                param_pos.setdefault(p["name"], p["position"])
+
+        # instance bound TYPE args: position -> ref_id (the entity B)
+        bound: dict[int, Optional[int]] = {}
+        for a in conn.execute(
+            "SELECT position, ref_id FROM template_arg WHERE owner_id = ? "
+            "AND arg_kind = 1 ORDER BY position",
+            (inst_id,),
+        ).fetchall():
+            bound[a["position"]] = a["ref_id"]
+
+        # primary template's data members
+        fields = conn.execute(
+            "SELECT e.src_id AS field_id, s.type_info, s.access AS field_access "
+            "FROM edge e "
+            "JOIN symbol s ON s.id = e.src_id "
+            "WHERE e.kind = 8 AND e.dst_id = ? AND s.kind = 6 "
+            "ORDER BY e.src_id",
+            (prim_id,),
+        ).fetchall()
+
+        for f in fields:
+            type_info = f["type_info"] or ""
+            if not type_info:
+                continue
+            core = _strip_to_param_core(type_info)
+            pos = param_pos.get(core)
+            if pos is None:
+                continue  # member type does not bind a template parameter
+            ref_entity_id = bound.get(pos)
+            if ref_entity_id is None:
+                continue  # bound arg is a builtin / not an indexed entity
+
+            kind_row = conn.execute(
+                "SELECT kind FROM symbol WHERE id = ?", (ref_entity_id,)
+            ).fetchone()
+            if kind_row is None or kind_row[0] not in _ENTITY_KINDS:
+                continue
+
+            if inst_id == ref_entity_id:
+                continue
+
+            ek, mult = _classify_field_type(type_info)
+            access_int = _ACCESS_INT.get(f["field_access"] or "public", 0)
+
+            conn.execute(
+                "INSERT INTO entity_edge "
+                "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+                " access, is_virtual, create_form, partial) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL, 0) "
+                "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+                "  count = entity_edge.count + 1",
+                (inst_id, ref_entity_id, ek, f["field_id"], mult, access_int),
+            )
 
 
 # ---------------------------------------------------------------------------

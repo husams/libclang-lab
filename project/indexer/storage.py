@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -139,6 +139,17 @@ CREATE TABLE IF NOT EXISTS symbol (
     is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
                                               -- instantiation node (own USR,
                                               -- definition via `instantiates` edge)
+    is_named_instance INTEGER NOT NULL DEFAULT 0, -- v20: a template instance
+                                              -- minted from a NAMED `using`/
+                                              -- typedef alias (X<B> from
+                                              -- `using Y = X<B>`). Such instances
+                                              -- carry their OWN composes/aggregates
+                                              -- /associates (T->B substituted into
+                                              -- the primary's members) instead of
+                                              -- collapsing onto the primary. Plain
+                                              -- call-site instantiation nodes
+                                              -- (is_instantiation=1, this=0) stay
+                                              -- collapsed (std::vector<Foo> etc.)
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
@@ -501,6 +512,18 @@ class Storage:
         )
         if (kind_type or "").upper() != "INTEGER":
             self._migrate_symbol_kind_to_int()
+            changed = True
+        # v19 -> v20: named-instance marker. A template instance minted from a
+        # NAMED `using`/typedef alias (X<B>) carries its own composes/aggregates
+        # /associates instead of collapsing onto the primary. No backfill -- a
+        # reindex repopulates it; old rows read as 0. Re-read the column set here
+        # because the v15->v16 rebuild above recreates `symbol` (without this
+        # column), so the snapshot taken at the top of _migrate may be stale.
+        cols2 = {r[1] for r in self._conn.execute("PRAGMA table_info(symbol)")}
+        if "is_named_instance" not in cols2:
+            self._conn.execute(
+                "ALTER TABLE symbol ADD COLUMN is_named_instance INTEGER NOT NULL DEFAULT 0"
+            )
             changed = True
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
@@ -1607,6 +1630,7 @@ class Storage:
         decl_col: Optional[int] = None,
         decl_path: Optional[str] = None,
         is_instantiation: bool = False,
+        is_named_instance: bool = False,
     ) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
@@ -1642,8 +1666,8 @@ class Storage:
         self._conn.execute(
             "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
             "                    decl_file_id, decl_line, decl_col, decl_path, "
-            "                    is_instantiation, resolved) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+            "                    is_instantiation, is_named_instance, resolved) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
             "ON CONFLICT(usr) DO UPDATE SET "
             "  kind             = CASE WHEN symbol.spelling = '' "
             "                          THEN excluded.kind ELSE symbol.kind END, "
@@ -1655,7 +1679,8 @@ class Storage:
             "  decl_line        = COALESCE(symbol.decl_line, excluded.decl_line), "
             "  decl_col         = COALESCE(symbol.decl_col, excluded.decl_col), "
             "  decl_path        = COALESCE(symbol.decl_path, excluded.decl_path), "
-            "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation)",
+            "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation), "
+            "  is_named_instance = MAX(symbol.is_named_instance, excluded.is_named_instance)",
             (
                 usr,
                 spelling,
@@ -1667,6 +1692,7 @@ class Storage:
                 decl_col,
                 decl_path or None,
                 1 if is_instantiation else 0,
+                1 if is_named_instance else 0,
             ),
         )
         row = self._conn.execute(

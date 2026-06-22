@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 19;
+constexpr int kSchemaVersion = 20;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -232,7 +232,8 @@ public:
                          const std::optional<int64_t> &decl_col = std::nullopt,
                          const std::optional<std::string> &decl_path =
                              std::nullopt,
-                         bool is_instantiation = false);
+                         bool is_instantiation = false,
+                         bool is_named_instance = false);
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.

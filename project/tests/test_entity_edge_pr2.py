@@ -1,7 +1,7 @@
 """PR2: v17 entity_edge materialisation tests.
 
 Covers:
-  * schema/version invariants (SCHEMA_VERSION=19, VERSION='0.23.0')
+  * schema/version invariants (SCHEMA_VERSION=20, VERSION='0.24.0')
   * entity_rollup module importable
   * entity_edge + entity_edge_kind tables present in schema
   * PR1 edge_kind seed rows 10-16 present
@@ -94,13 +94,13 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_19():
-    assert SCHEMA_VERSION == 19, f"Expected 19, got {SCHEMA_VERSION}"
+def test_schema_version_is_20():
+    assert SCHEMA_VERSION == 20, f"Expected 20, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0230():
+def test_product_version_is_0240():
     from indexer import cli
-    assert cli.VERSION == "0.23.0", f"Expected '0.23.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.24.0", f"Expected '0.24.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -758,7 +758,7 @@ def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version
     finally:
         conn.close()
 
-    assert ver == "19", f"schema_version not at 19: {ver}"
+    assert ver == "20", f"schema_version not at 20: {ver}"
     # the nests row is gone; only befriends survives, renumbered 11 -> 10
     assert edges == [(10,)], f"expected only befriends(10); got {edges}"
     # 11 rows: 1-10 plus the reseeded instantiates(11). The old (11,'befriends')
