@@ -833,7 +833,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.21.0");
+  CHECK(std::string(cli::kVersion) == "0.23.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1720,7 +1720,7 @@ TEST_CASE("migrate: upgrades a v15 DB in place (kind TEXT->int), no re-index") {
                      "; nothing to migrate\n");
 }
 
-TEST_CASE("migrate: v17 -> v18 drops nests edges and renumbers befriends") {
+TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
   const std::string t = make_temp_dir();
   const std::string db = t + "/index.db";
 
@@ -1759,7 +1759,7 @@ TEST_CASE("migrate: v17 -> v18 drops nests edges and renumbers befriends") {
       auto st =
           raw.prepare("SELECT value FROM meta WHERE key='schema_version'");
       REQUIRE(st.step());
-      CHECK(st.col_text(0) == "18");
+      CHECK(st.col_text(0) == "19");
     }
     // the nests row is gone; only befriends survives, renumbered 11 -> 10.
     {
@@ -1768,16 +1768,22 @@ TEST_CASE("migrate: v17 -> v18 drops nests edges and renumbers befriends") {
       CHECK(st.col_int64(0) == 1);
       CHECK(st.col_int64(1) == 10);
     }
-    // entity_edge_kind reseeded: 10 rows, id 10 = befriends, no 'nests'.
+    // entity_edge_kind reseeded: 11 rows (old (11,'befriends') renumbered to 10,
+    // freeing id 11 for the reseeded instantiates), id 10 = befriends, no 'nests'.
     {
       auto st = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind");
       REQUIRE(st.step());
-      CHECK(st.col_int64(0) == 10);
+      CHECK(st.col_int64(0) == 11);
     }
     {
       auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=10");
       REQUIRE(st.step());
       CHECK(st.col_text(0) == "befriends");
+    }
+    {
+      auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=11");
+      REQUIRE(st.step());
+      CHECK(st.col_text(0) == "instantiates");
     }
     {
       auto st =
@@ -1801,9 +1807,9 @@ TEST_CASE("migrate: v17 -> v18 drops nests edges and renumbers befriends") {
                      "; nothing to migrate\n");
 }
 
-TEST_CASE("migrate: cleans a DB already stamped v18 but still carrying nests") {
-  // Regression: an earlier build bumped schema_version to 18 WITHOUT cleaning,
-  // so the migration must be gated on the stale 'nests' marker, not the version.
+TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests") {
+  // Regression: an earlier build bumped schema_version WITHOUT cleaning, so the
+  // migration must be gated on the stale 'nests' marker, not the version.
   const std::string t = make_temp_dir();
   const std::string db = t + "/index.db";
 
@@ -1823,7 +1829,8 @@ TEST_CASE("migrate: cleans a DB already stamped v18 but still carrying nests") {
              "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
              "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
              "(SELECT id FROM symbol WHERE usr='c:@S@B') b;");
-    // NOTE: schema_version stays at 18 (the fresh stamp) -- the dirty case.
+    // NOTE: schema_version stays at the fresh stamp (== kSchemaVersion) -- the
+    // dirty case where the version is current but the data was never cleaned.
   }
 
   // migrate reports the cleanup even though the version does not change.

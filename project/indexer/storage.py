@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -264,7 +264,7 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_file ON diagnostic(file_id);
 
 -- ---- v17: Layer-1 entity-edge graph (UML/ER relations over record/enum symbols) --
 -- Entity = a symbol whose kind is in {{class,struct,union,enum}}; no separate table.
--- All columns are INTEGER (zero text in the table itself). The 10 relation names
+-- All columns are INTEGER (zero text in the table itself). The 11 relation names
 -- live only in entity_edge_kind (seed-only; no FK from entity_edge -- same pattern
 -- as edge_kind). UNIQUE on (src,dst,kind,via) so re-materialise = DELETE + re-run.
 -- (Lexical nesting is a declaration-scope property of the symbol, not a relation,
@@ -278,7 +278,7 @@ INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
   (1,'generalizes'), (2,'implements'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
-  (10,'befriends');
+  (10,'befriends'), (11,'instantiates');
 
 CREATE TABLE IF NOT EXISTS entity_edge (
     src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,

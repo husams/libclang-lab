@@ -12,7 +12,13 @@ separate entity table exists.
 Relation ids (entity_edge_kind):
   1  generalizes   inheritance where base carries state/impl
   2  implements    inheritance where base is a pure Interface
-  3  specializes   explicit template specialization
+  3  specializes   EXPLICIT / PARTIAL template specialization -- the programmer
+                    wrote a SEPARATE body (`template<> struct X<bool>{...}` or
+                    `template<class T> struct X<T*>{...}`).  The specialization
+                    is its OWN design entity and `specializes` its primary; it
+                    does NOT collapse onto the primary.  Mutually exclusive with
+                    instantiates(11): a plain `X<B>` from a `using`/use is an
+                    instantiation, never a specialization.
   4  composes      field: value / unique_ptr / optional (exclusive ownership --
                     part is destroyed with the owner, cannot outlive it)
   5  aggregates    field: shared_ptr (shared ownership -- part can outlive the
@@ -22,6 +28,11 @@ Relation ids (entity_edge_kind):
   8  uses          method uses an entity (calls virtual method on it)
   9  destroys      method deallocates an entity (delete)
   10 befriends     friend class declaration
+  11 instantiates  IMPLICIT template instantiation -- `X<B>` from a `using`/use
+                    binds T->B (UML <<bind>>).  The instance is kept as its own
+                    entity and `instantiates` its primary (NOT inheritance, NOT
+                    an explicit specialization).  The SOURCE is never collapsed
+                    onto the primary (that would self-suppress the edge).
 
 Note: lexical nesting (Outer::Inner) is NOT a relation -- it is a
 declaration-scope property already recoverable from the symbol itself
@@ -65,6 +76,7 @@ _EK_CREATES = 7
 _EK_USES = 8
 _EK_DESTROYS = 9
 _EK_BEFRIENDS = 10
+_EK_INSTANTIATES = 11
 
 # Layer-0 edge.kind ids
 _L0_CALLS = 1
@@ -200,6 +212,48 @@ def _strip_qualifiers(spelling: str) -> str:
     return spelling.strip()
 
 
+def _split_template_args(inner: str) -> list[str]:
+    """Split the inside of a <...> on TOP-LEVEL commas (depth-aware).
+
+    'std::string, Order' -> ['std::string', 'Order']
+    'string, vector<pair<int,int>>' -> ['string', 'vector<pair<int,int>>']
+    """
+    args: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in inner:
+        if ch == "<":
+            depth += 1
+            cur.append(ch)
+        elif ch == ">":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    tail = "".join(cur).strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _wrapper_value_type(s: str, prefix: str) -> str:
+    """For `s` starting with a `...<` wrapper `prefix`, return the VALUE type:
+    the LAST top-level template argument.
+
+    vector<Item>            -> Item
+    map<std::string, Order> -> Order   (the value, not the key)
+    vector<vector<Item>>    -> vector<Item>
+    """
+    inner = s[len(prefix):].strip()
+    if inner.endswith(">"):
+        inner = inner[:-1].strip()
+    args = _split_template_args(inner)
+    return args[-1] if args else inner
+
+
 def _classify_field_type(
     type_spelling: str,
 ) -> tuple[int, int]:
@@ -226,11 +280,12 @@ def _classify_field_type(
     if s.endswith("]"):
         return _EK_COMPOSES, 4
 
-    # Container: std::vector<X>/std::set<X>/... -> inner classification + 0..*
+    # Container: std::vector<X>/std::map<K,V>/... -> classify the VALUE type
+    # (last template arg, so map<K,V> uses V) + multiplicity 0..*.
     for prefix in _CONTAINER_PREFIXES:
         if s.startswith(prefix):
-            inner = s[len(prefix):].rstrip("> ").strip()
-            inner_kind, _ = _classify_field_type(inner)
+            value = _wrapper_value_type(s, prefix)
+            inner_kind, _ = _classify_field_type(value)
             return inner_kind, 3
 
     # unique_ptr / optional → composes (EXCLUSIVE ownership: destroyed with the
@@ -296,14 +351,15 @@ def _resolve_entity_from_type(conn, type_spelling: str) -> Optional[int]:
             s = s[:-1].strip()
     s = _strip_qualifiers(s)
 
-    # Strip smart-ptr / container wrappers to get the inner type
+    # Strip smart-ptr / container wrappers to get the referent type. Use the
+    # VALUE type (last top-level template arg) so map<K,V> resolves to V and
+    # nested generics (vector<vector<Item>>) peel one level at a time.
     for prefix in (
         _UNIQUE_PTR_PREFIX + _SHARED_PTR_PREFIX + _WEAK_PTR_PREFIX
         + _OPTIONAL_PREFIX + _CONTAINER_PREFIXES
     ):
         if s.startswith(prefix):
-            inner = s[len(prefix):].rstrip(">").strip()
-            return _resolve_entity_from_type(conn, inner)
+            return _resolve_entity_from_type(conn, _wrapper_value_type(s, prefix))
 
     return _spelling_to_symbol_id(conn, s)
 
@@ -327,6 +383,7 @@ def materialize_entity_edges(db: "Storage") -> None:
     with db.transaction():
         _materialise_inheritance(db)
         _materialise_specializes(db)
+        _materialise_instantiates(db)
         _materialise_field_relations(db)
         _materialise_creates_destroys(db)
         _materialise_uses(db)
@@ -385,8 +442,11 @@ def _materialise_inheritance(db: "Storage") -> None:
 
 def _materialise_specializes(db: "Storage") -> None:
     conn = db._conn
-    # specializes(4) edges where BOTH endpoints are entity/class-template symbols.
-    # Template instances (is_instantiation=1) → collapse onto primary (dst_id).
+    # Layer-0 specializes(4) edges between entity/class-template symbols.  These
+    # come ONLY from EXPLICIT / PARTIAL specializations (`template<> struct
+    # X<bool>{...}` / `template<class T> struct X<T*>{...}`): the extractor emits
+    # kind 4 for those and kind 5 (instantiates) for plain instantiations, so the
+    # two are disjoint at Layer-0.
     rows = conn.execute(
         "SELECT e.src_id, e.dst_id "
         "FROM edge e "
@@ -399,9 +459,10 @@ def _materialise_specializes(db: "Storage") -> None:
 
     for r in rows:
         src_id, dst_id = r[0], r[1]
-        # Collapse onto primary; an instance->primary specializes edge becomes a
-        # self-edge and is suppressed (no bogus Wrapper->Wrapper row).
-        src_id = _collapse_to_primary(conn, src_id)
+        # The specialization is its OWN design entity -- do NOT collapse the
+        # SOURCE onto the primary (that would self-suppress the edge).  Collapse
+        # only the destination (the Layer-0 edge already points at the primary,
+        # so this is a no-op there but keeps the phase robust to chains).
         dst_id = _collapse_to_primary(conn, dst_id)
         if src_id == dst_id:
             continue
@@ -413,6 +474,45 @@ def _materialise_specializes(db: "Storage") -> None:
             "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
             "  count = entity_edge.count + 1",
             (src_id, dst_id, _EK_SPECIALIZES),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: instantiates  (Layer-0 instantiates(5) between entity symbols)
+# ---------------------------------------------------------------------------
+
+def _materialise_instantiates(db: "Storage") -> None:
+    conn = db._conn
+    # Layer-0 instantiates(5) edges between entity symbols: src = the concrete
+    # instance `X<B>`, dst = the primary template `X` (the extractor points the
+    # edge instance -> primary).  An implicit instantiation `X<B>` is a distinct
+    # design entity (UML <<bind>> T->B), so -- exactly like specializes -- we keep
+    # the SOURCE un-collapsed (collapsing it would follow its own kind-5 edge to
+    # the primary and self-suppress the row).  The destination is already the
+    # primary; collapse it only for robustness against chains.
+    rows = conn.execute(
+        "SELECT e.src_id, e.dst_id "
+        "FROM edge e "
+        "JOIN symbol src ON src.id = e.src_id "
+        "JOIN symbol dst ON dst.id = e.dst_id "
+        "WHERE e.kind = 5 "
+        "  AND src.kind IN (2,3,4,5,31) "
+        "  AND dst.kind IN (2,3,4,5,31)"
+    ).fetchall()
+
+    for r in rows:
+        src_id, dst_id = r[0], r[1]
+        dst_id = _collapse_to_primary(conn, dst_id)
+        if src_id == dst_id:
+            continue
+        conn.execute(
+            "INSERT INTO entity_edge "
+            "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+            " access, is_virtual, create_form, partial) "
+            "VALUES (?, ?, ?, 1, NULL, 1, 0, 0, NULL, 0) "
+            "ON CONFLICT(src_id, dst_id, kind, via_member_id) DO UPDATE SET "
+            "  count = entity_edge.count + 1",
+            (src_id, dst_id, _EK_INSTANTIATES),
         )
 
 
@@ -450,10 +550,12 @@ def _materialise_field_relations(db: "Storage") -> None:
         if not type_info:
             continue
 
-        # Try template_arg.ref_id for the referent first (most reliable)
+        # Try template_arg.ref_id for the referent first (most reliable).
+        # Use the LAST type arg (highest position) so map<K,V> picks the VALUE V,
+        # not the key K; single-arg containers/smart-ptrs are unaffected.
         ref_row = conn.execute(
-            "SELECT ref_id FROM template_arg WHERE owner_id = ? AND position = 0 "
-            "AND arg_kind = 1 AND ref_id IS NOT NULL LIMIT 1",
+            "SELECT ref_id FROM template_arg WHERE owner_id = ? "
+            "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1",
             (field_id,),
         ).fetchone()
         ref_entity_id = ref_row["ref_id"] if ref_row else None
