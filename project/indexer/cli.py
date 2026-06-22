@@ -217,6 +217,21 @@ def cmd_migrate(args) -> int:
         finally:
             con.close()
 
+    def _has_stale_nests() -> bool:
+        # A leftover 'nests' entity_edge_kind row marks a DB that still carries
+        # the removed relation -- it must be cleaned even when schema_version is
+        # already current (an earlier build bumped the version without cleaning).
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute(
+                "SELECT 1 FROM entity_edge_kind WHERE name = 'nests' LIMIT 1"
+            ).fetchone()
+            return row is not None
+        except sqlite3.OperationalError:
+            return False  # no entity_edge_kind table (pre-v17 DB)
+        finally:
+            con.close()
+
     before = _schema_version()
     if before is not None and before > SCHEMA_VERSION:
         print(
@@ -225,13 +240,16 @@ def cmd_migrate(args) -> int:
             file=sys.stderr,
         )
         return 1
+    stale = _has_stale_nests()
     with Storage(path):  # constructing Storage applies the in-place migration
         pass
     after = _schema_version()
-    if before == after:
-        print(f"{path} already at schema v{after}; nothing to migrate")
-    else:
+    if before != after:
         print(f"migrated {path}: schema v{before} -> v{after}")
+    elif stale:
+        print(f"migrated {path}: removed defunct nests edges (schema v{after})")
+    else:
+        print(f"{path} already at schema v{after}; nothing to migrate")
     return 0
 
 

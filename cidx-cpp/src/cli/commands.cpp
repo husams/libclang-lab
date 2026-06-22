@@ -429,6 +429,19 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
   auto vstr = [](const std::optional<int> &v) {
     return v ? std::to_string(*v) : std::string("None"); // Python f"v{None}"
   };
+  // A leftover 'nests' entity_edge_kind row marks a DB that still carries the
+  // removed relation -- it must be cleaned even when schema_version is already
+  // current (an earlier build bumped the version without cleaning).
+  auto has_stale_nests = [&]() -> bool {
+    SqliteDb db(ctx.index_path);
+    try {
+      SqliteStmt st = db.prepare(
+          "SELECT 1 FROM entity_edge_kind WHERE name = 'nests' LIMIT 1");
+      return st.step();
+    } catch (const std::exception &) {
+      return false; // no entity_edge_kind table (pre-v17 DB)
+    }
+  };
   const std::optional<int> before = schema_version();
   if (before && *before > kSchemaVersion) {
     *ctx.err << "index at " << ctx.index_path << " is schema v" << *before
@@ -436,14 +449,19 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
              << "); refusing to touch it\n";
     return 1;
   }
+  const bool stale = has_stale_nests();
   { Storage db(ctx.index_path); } // constructing Storage applies the migration
   const std::optional<int> after = schema_version();
-  if (before == after) {
-    *ctx.out << ctx.index_path << " already at schema v" << vstr(after)
-             << "; nothing to migrate\n";
-  } else {
+  if (before != after) {
     *ctx.out << "migrated " << ctx.index_path << ": schema v" << vstr(before)
              << " -> v" << vstr(after) << "\n";
+  } else if (stale) {
+    *ctx.out << "migrated " << ctx.index_path
+             << ": removed defunct nests edges (schema v" << vstr(after)
+             << ")\n";
+  } else {
+    *ctx.out << ctx.index_path << " already at schema v" << vstr(after)
+             << "; nothing to migrate\n";
   }
   return 0;
 }
