@@ -400,13 +400,11 @@ def materialize_entity_edges(db: "Storage") -> None:
     Called by Storage.resolve_pass() after rollup_edge_counts().
     Pure DB-only pass: no libclang / AST re-parse.
     """
-    conn = db._conn
-
-    # Idempotent: full re-materialise each resolve.
-    conn.execute("DELETE FROM entity_edge")
-    conn.commit()
-
+    # Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
+    # rebuild transaction so a failure in any phase rolls back to the previous
+    # rows instead of leaving entity_edge empty (atomic resolve).
     with db.transaction():
+        db._conn.execute("DELETE FROM entity_edge")
         _materialise_inheritance(db)
         _materialise_specializes(db)
         _materialise_instantiates(db)

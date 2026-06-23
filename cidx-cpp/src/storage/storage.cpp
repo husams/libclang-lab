@@ -2973,11 +2973,12 @@ static void cpp_materialise_befriends(cidx::SqliteDb &db) {
 }
 
 void Storage::materialise_entity_edges() {
-  // Idempotent: full re-materialise each resolve.
-  db_.exec("DELETE FROM entity_edge");
-
+  // Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
+  // rebuild transaction so a failure in any phase rolls back to the previous
+  // rows instead of leaving entity_edge empty (atomic resolve).
   {
     auto txn = transaction();
+    db_.exec("DELETE FROM entity_edge");
     cpp_materialise_inheritance(db_);
     cpp_materialise_specializes(db_);
     cpp_materialise_instantiates(db_);
