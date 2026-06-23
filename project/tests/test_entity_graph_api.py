@@ -180,7 +180,7 @@ def test_neighbors_direction(eg):
 
 def test_composes_edge_decoded(eg):
     holder = eg.find("app::Holder")[0]
-    parts = holder.parts()
+    parts = list(holder.parts())
     assert parts, "expected a composes edge Holder->Part"
     e = parts[0]
     assert isinstance(e, EntityEdge)
@@ -210,7 +210,7 @@ def test_edge_filtering_and_repr(eg):
     assert all(e.kind is EdgeKind.GENERALIZES for e in gen)
     # filter by src
     leaf = eg.find("app::Leaf")[0]
-    leaf_gen = eg.edges(kind=EdgeKind.GENERALIZES, src=leaf)
+    leaf_gen = list(eg.edges(kind=EdgeKind.GENERALIZES, src=leaf))
     assert len(leaf_gen) == 1
     assert "generalizes" in repr(leaf_gen[0])
     d = leaf_gen[0].to_dict()

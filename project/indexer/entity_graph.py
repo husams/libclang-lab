@@ -38,9 +38,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Iterator, Optional
+from itertools import islice
+from typing import Callable, Iterator, Optional
 
 from .query import GraphQuery, Sym, open_query
+
+#: A re-runnable source of nodes: a zero-arg thunk yielding a *fresh* iterator
+#: each call.  Keeping the query as a thunk (not a consumed generator) is what
+#: makes :class:`EntityQuery` both lazy and reusable.
+_NodeSrc = Callable[[], Iterator["EntityNode"]]
+_EdgeSrc = Callable[[], Iterator["EntityEdge"]]
 
 __all__ = [
     "EdgeKind",
@@ -348,56 +355,68 @@ class EntityNode:
 
     # -- edges -------------------------------------------------------------- #
 
-    def out_edges(self, kind: Optional[EdgeKind] = None) -> list[EntityEdge]:
-        """Edges where this node is the source (``self --kind--> ?``)."""
+    def out_edges(self, kind: Optional[EdgeKind] = None) -> Iterator[EntityEdge]:
+        """Edges where this node is the source (``self --kind--> ?``). Lazy."""
         return self._graph.edges(src=self, kind=kind)
 
-    def in_edges(self, kind: Optional[EdgeKind] = None) -> list[EntityEdge]:
-        """Edges where this node is the target (``? --kind--> self``)."""
+    def in_edges(self, kind: Optional[EdgeKind] = None) -> Iterator[EntityEdge]:
+        """Edges where this node is the target (``? --kind--> self``). Lazy."""
         return self._graph.edges(dst=self, kind=kind)
 
     def neighbors(
         self,
         kind: Optional[EdgeKind] = None,
         direction: str = "out",
-    ) -> list["EntityNode"]:
-        """Distinct adjacent entities. ``direction`` is out / in / both."""
-        seen: dict[int, EntityNode] = {}
+    ) -> Iterator["EntityNode"]:
+        """Distinct adjacent entities, streamed. ``direction`` out / in / both.
+
+        Deduplicates as it yields (a node reached twice is emitted once), so the
+        only state held is a set of ids -- never a materialised node list.
+        """
+        seen: set[int] = set()
         if direction in ("out", "both"):
             for e in self.out_edges(kind):
-                seen.setdefault(e.dst.id, e.dst)
+                if e.dst.id not in seen:
+                    seen.add(e.dst.id)
+                    yield e.dst
         if direction in ("in", "both"):
             for e in self.in_edges(kind):
-                seen.setdefault(e.src.id, e.src)
-        return list(seen.values())
+                if e.src.id not in seen:
+                    seen.add(e.src.id)
+                    yield e.src
 
     # -- structural shortcuts ---------------------------------------------- #
 
-    def bases(self, *, transitive: bool = False) -> list["EntityNode"]:
-        """Entities this one generalizes-to (direct base classes)."""
+    def bases(self, *, transitive: bool = False) -> Iterator["EntityNode"]:
+        """Entities this one generalizes-to (direct base classes). Lazy."""
         if not transitive:
-            return [e.dst for e in self.out_edges(EdgeKind.GENERALIZES)]
-        return self.walk(EdgeKind.GENERALIZES, direction="out")
+            for e in self.out_edges(EdgeKind.GENERALIZES):
+                yield e.dst
+        else:
+            yield from self.walk(EdgeKind.GENERALIZES, direction="out")
 
-    def derived(self, *, transitive: bool = False) -> list["EntityNode"]:
-        """Entities that generalize to this one (direct subclasses)."""
+    def derived(self, *, transitive: bool = False) -> Iterator["EntityNode"]:
+        """Entities that generalize to this one (direct subclasses). Lazy."""
         if not transitive:
-            return [e.src for e in self.in_edges(EdgeKind.GENERALIZES)]
-        return self.walk(EdgeKind.GENERALIZES, direction="in")
+            for e in self.in_edges(EdgeKind.GENERALIZES):
+                yield e.src
+        else:
+            yield from self.walk(EdgeKind.GENERALIZES, direction="in")
 
-    def parts(self) -> list[EntityEdge]:
-        """Composition edges (strong ownership: ``composes``)."""
+    def parts(self) -> Iterator[EntityEdge]:
+        """Composition edges (strong ownership: ``composes``). Lazy."""
         return self.out_edges(EdgeKind.COMPOSES)
 
-    def uses(self) -> list[EntityEdge]:
-        """Behavioural-dependency edges (``uses``)."""
+    def uses(self) -> Iterator[EntityEdge]:
+        """Behavioural-dependency edges (``uses``). Lazy."""
         return self.out_edges(EdgeKind.USES)
 
-    def creates(self) -> list[EntityEdge]:
+    def creates(self) -> Iterator[EntityEdge]:
         return self.out_edges(EdgeKind.CREATES)
 
-    def friends(self) -> list["EntityNode"]:
-        return [e.dst for e in self.out_edges(EdgeKind.BEFRIENDS)]
+    def friends(self) -> Iterator["EntityNode"]:
+        for e in self.out_edges(EdgeKind.BEFRIENDS):
+            yield e.dst
 
     # -- traversal ---------------------------------------------------------- #
 
@@ -407,23 +426,24 @@ class EntityNode:
         direction: str = "out",
         *,
         max_depth: Optional[int] = None,
-    ) -> list["EntityNode"]:
+    ) -> Iterator["EntityNode"]:
         """Transitive closure following ``kind`` edges (BFS, excludes self).
 
-        Cycle-safe. ``direction`` is out (follow src->dst) or in (dst->src).
+        Streams each entity the first time it is reached, so a consumer that
+        stops early stops the traversal. Cycle-safe (a ``seen`` set of ids).
+        ``direction`` is out (follow src->dst) or in (dst->src).
         """
-        seen: dict[int, EntityNode] = {}
-        frontier: list[tuple[EntityNode, int]] = [(self, 0)]
+        seen: set[int] = set()
+        frontier: list[tuple["EntityNode", int]] = [(self, 0)]
         while frontier:
             node, depth = frontier.pop(0)
             if max_depth is not None and depth >= max_depth:
                 continue
-            nxt = node.neighbors(kind, direction)
-            for n in nxt:
+            for n in node.neighbors(kind, direction):
                 if n.id != self.id and n.id not in seen:
-                    seen[n.id] = n
+                    seen.add(n.id)
+                    yield n
                     frontier.append((n, depth + 1))
-        return list(seen.values())
 
     # -- fluent query ------------------------------------------------------- #
 
@@ -432,7 +452,7 @@ class EntityNode:
 
         ``leaf.query().derived(transitive=True).uses().names()`` etc.
         """
-        return EntityQuery(self._graph, [self])
+        return EntityQuery(self._graph, lambda: iter((self,)))
 
     # -- dunder ------------------------------------------------------------- #
 
@@ -511,18 +531,22 @@ class EntityGraph:
         self._node_cache[sym.id] = node
         return node
 
-    def entities(self) -> list[EntityNode]:
-        """All entities that participate in at least one edge (sorted by name)."""
-        rows = self._c.execute(
+    def entities(self) -> Iterator[EntityNode]:
+        """Entities participating in >=1 edge, streamed in id order. Lazy.
+
+        Rows stream off the sqlite cursor -- no full node list is built up
+        front (consume into ``list(...)`` / ``sorted(...)`` if you need one).
+        """
+        cur = self._c.execute(
             "SELECT DISTINCT id FROM ("
             "  SELECT src_id AS id FROM entity_edge "
             "  UNION SELECT dst_id AS id FROM entity_edge"
-            ")"
-        ).fetchall()
-        nodes = [self.entity(r[0]) for r in rows]
-        nodes = [n for n in nodes if n is not None]
-        nodes.sort(key=lambda n: n.name)
-        return nodes
+            ") ORDER BY id"
+        )
+        for r in cur:
+            node = self.entity(r[0])
+            if node is not None:
+                yield node
 
     def find(self, pattern: str, limit: int = 50) -> list[EntityNode]:
         """Fuzzy qualified-name lookup, filtered to entities in the graph."""
@@ -548,9 +572,15 @@ class EntityGraph:
             eg.query("Shape").derived().names()          # who inherits Shape
             eg.query("OrderService").uses().names()       # what it uses
             eg.query("Shape").derived(transitive=True).uses().nodes()
+
+        The query is lazy and reusable: seeds are resolved freshly every time a
+        terminal consumes the query, so nothing is materialised up front.
         """
-        seeds = self._resolve_seeds(start) if start else self.entities()
-        return EntityQuery(self, seeds)
+        if start:
+            nodes_src: "_NodeSrc" = lambda: iter(self._resolve_seeds(start))
+        else:
+            nodes_src = self.entities
+        return EntityQuery(self, nodes_src)
 
     def _resolve_seeds(self, start) -> list[EntityNode]:
         seen: dict[int, EntityNode] = {}
@@ -573,10 +603,13 @@ class EntityGraph:
         kind: Optional[EdgeKind] = None,
         src=None,
         dst=None,
-    ) -> list[EntityEdge]:
-        """Materialised edges, optionally filtered by kind / src / dst.
+    ) -> Iterator[EntityEdge]:
+        """Materialised edges, optionally filtered by kind / src / dst. Lazy.
 
-        Sorted by (src name, kind, dst name) for stable, readable dumps.
+        Rows stream off the cursor in (src_id, kind, dst_id) order -- a stable,
+        deterministic order for dumps -- without building a Python list up
+        front.  (Ordering is by id, not by name as before; sort the result
+        yourself if you need name order.)
         """
         wheres: list[str] = []
         params: list = []
@@ -590,15 +623,17 @@ class EntityGraph:
             wheres.append("kind = ?")
             params.append(int(kind))
         where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
-        rows = self._c.execute(
-            f"SELECT {_EDGE_COLS} FROM entity_edge {where_sql}", params
-        ).fetchall()
-        edges = [self._edge(r) for r in rows]
-        edges = [e for e in edges if e is not None]
-        edges.sort(key=lambda e: (e.src.name, int(e.kind), e.dst.name))
-        return edges
+        cur = self._c.execute(
+            f"SELECT {_EDGE_COLS} FROM entity_edge {where_sql} "
+            "ORDER BY src_id, kind, dst_id",
+            params,
+        )
+        for r in cur:
+            edge = self._edge(r)
+            if edge is not None:
+                yield edge
 
-    def by_kind(self, kind: EdgeKind) -> list[EntityEdge]:
+    def by_kind(self, kind: EdgeKind) -> Iterator[EntityEdge]:
         return self.edges(kind=kind)
 
     def kinds(self) -> list[EdgeKind]:
@@ -618,13 +653,13 @@ class EntityGraph:
         }
         total = self._c.execute("SELECT COUNT(*) FROM entity_edge").fetchone()[0]
         return {
-            "entities": len(self.entities()),
+            "entities": sum(1 for _ in self.entities()),
             "edges": total,
             "by_kind": per_kind,
         }
 
     def __iter__(self) -> Iterator[EntityEdge]:
-        return iter(self.edges())
+        return self.edges()
 
     # -- internals ---------------------------------------------------------- #
 
@@ -669,14 +704,21 @@ _DIRECTIONS = ("out", "in", "both")
 
 
 class EntityQuery:
-    """A lazy, immutable, chainable relational query over the entity graph.
+    """A lazy, reusable, chainable relational query over the entity graph.
 
-    A query carries a *current set of nodes* (insertion-ordered, de-duplicated)
-    plus the edges produced by the most recent relation step.  Every step
-    returns a NEW :class:`EntityQuery`, so queries are reusable and side-effect
-    free.  Begin with :meth:`EntityGraph.query` (or :meth:`EntityNode.query`),
-    chain relation steps, and finish with a terminal (:meth:`nodes`,
-    :meth:`names`, :meth:`edges`, :meth:`to_dict`, ...).
+    A query holds a re-runnable *source* of nodes (a thunk), NOT a materialised
+    list -- so building a chain allocates nothing, intermediate steps never
+    realise a full node list, and a terminal that stops early (``first`` /
+    ``any``) stops the whole upstream pipeline.  Because the source is a thunk
+    rather than a consumed generator, the query is also **reusable**: every
+    terminal re-runs the pipeline from the seeds, so the same query object can
+    be iterated repeatedly and shared as a starting point.
+
+    Begin with :meth:`EntityGraph.query` (or :meth:`EntityNode.query`), chain
+    relation steps, and finish with a terminal.  *Streaming* terminals --
+    :meth:`nodes`, :meth:`edges`, iteration -- yield lazily; *aggregate*
+    terminals -- :meth:`names`, :meth:`to_dict`, :meth:`count`, :meth:`first` --
+    consume the stream and return a concrete value.
 
     A *relation step* moves from the current nodes to their neighbours across
     one :class:`EdgeKind`, in a direction:
@@ -694,17 +736,19 @@ class EntityQuery:
         eg.query("Logger").used_by().names()            # who uses Logger
     """
 
-    __slots__ = ("_g", "_nodes", "_edges")
+    __slots__ = ("_g", "_nodes_src", "_edges_src")
 
     def __init__(
         self,
         graph: "EntityGraph",
-        nodes: list[EntityNode],
-        edges: Optional[list[EntityEdge]] = None,
+        nodes_src: _NodeSrc,
+        edges_src: Optional[_EdgeSrc] = None,
     ) -> None:
         self._g = graph
-        self._nodes = nodes
-        self._edges = edges or []
+        #: re-runnable thunk -> fresh iterator of DISTINCT nodes
+        self._nodes_src = nodes_src
+        #: re-runnable thunk -> fresh iterator of the LAST step's edges
+        self._edges_src: _EdgeSrc = edges_src or (lambda: iter(()))
 
     # -- the one general step ---------------------------------------------- #
 
@@ -716,12 +760,15 @@ class EntityQuery:
         transitive: bool = False,
         max_depth: Optional[int] = None,
     ) -> "EntityQuery":
-        """Follow ``kind`` edges from the current nodes.
+        """Follow ``kind`` edges from the current nodes (lazy).
 
         ``kind`` is an :class:`EdgeKind` or its name (e.g. ``"uses"``).
         ``direction`` is ``out`` / ``in`` / ``both``.  With ``transitive=True``
         the step is the cycle-safe transitive closure (and :meth:`edges` is
         then empty -- a closure has no single connecting edge set).
+
+        Nothing runs until a terminal consumes the result; node de-duplication
+        happens while streaming (only a ``seen`` set of ids is held).
         """
         if isinstance(kind, str):
             kind = EdgeKind.from_name(kind)
@@ -729,26 +776,40 @@ class EntityQuery:
             raise ValueError(
                 f"direction must be one of {_DIRECTIONS}, got {direction!r}"
             )
+        prev = self._nodes_src
 
         if transitive:
-            seen: dict[int, EntityNode] = {}
-            for n in self._nodes:
-                for m in n.walk(kind, direction=direction, max_depth=max_depth):
-                    seen.setdefault(m.id, m)
-            return EntityQuery(self._g, list(seen.values()), [])
+            def nodes_src() -> Iterator[EntityNode]:
+                seen: set[int] = set()
+                for n in prev():
+                    for m in n.walk(kind, direction=direction, max_depth=max_depth):
+                        if m.id not in seen:
+                            seen.add(m.id)
+                            yield m
+            return EntityQuery(self._g, nodes_src)
 
-        nodes: dict[int, EntityNode] = {}
-        edges: list[EntityEdge] = []
-        for n in self._nodes:
-            if direction in ("out", "both"):
-                for e in n.out_edges(kind):
-                    edges.append(e)
-                    nodes.setdefault(e.dst.id, e.dst)
-            if direction in ("in", "both"):
-                for e in n.in_edges(kind):
-                    edges.append(e)
-                    nodes.setdefault(e.src.id, e.src)
-        return EntityQuery(self._g, list(nodes.values()), edges)
+        def nodes_src() -> Iterator[EntityNode]:
+            seen: set[int] = set()
+            for n in prev():
+                if direction in ("out", "both"):
+                    for e in n.out_edges(kind):
+                        if e.dst.id not in seen:
+                            seen.add(e.dst.id)
+                            yield e.dst
+                if direction in ("in", "both"):
+                    for e in n.in_edges(kind):
+                        if e.src.id not in seen:
+                            seen.add(e.src.id)
+                            yield e.src
+
+        def edges_src() -> Iterator[EntityEdge]:
+            for n in prev():
+                if direction in ("out", "both"):
+                    yield from n.out_edges(kind)
+                if direction in ("in", "both"):
+                    yield from n.in_edges(kind)
+
+        return EntityQuery(self._g, nodes_src, edges_src)
 
     #: ``then`` reads better as a continuation: ``...derived().then(USES)``.
     then = relation
@@ -803,9 +864,12 @@ class EntityQuery:
     # -- filters (narrow the current node set) ----------------------------- #
 
     def where(self, predicate) -> "EntityQuery":
-        """Keep only nodes for which ``predicate(node)`` is truthy."""
+        """Keep only nodes for which ``predicate(node)`` is truthy (lazy)."""
+        prev = self._nodes_src
         return EntityQuery(
-            self._g, [n for n in self._nodes if predicate(n)], self._edges
+            self._g,
+            lambda: (n for n in prev() if predicate(n)),
+            self._edges_src,
         )
 
     def of_kind(self, *entity_kinds: EntityKind) -> "EntityQuery":
@@ -819,52 +883,61 @@ class EntityQuery:
         return self.where(lambda n: needle in n.name.lower())
 
     def exclude(self, *others) -> "EntityQuery":
-        """Drop the given entities from the set.
+        """Drop the given entities from the set (lazy).
 
         Each argument is resolved like a query seed (node / id / USR / name or
         pattern), so ``.exclude("Circle")`` works as readily as passing a node.
+        The (small) exclusion set is resolved once, when the step is built.
         """
-        drop = {n.id for n in self._g._resolve_seeds(others)}
+        drop = frozenset(n.id for n in self._g._resolve_seeds(others))
+        prev = self._nodes_src
         return EntityQuery(
-            self._g, [n for n in self._nodes if n.id not in drop], self._edges
+            self._g,
+            lambda: (n for n in prev() if n.id not in drop),
+            self._edges_src,
         )
 
     # -- terminals --------------------------------------------------------- #
+    # Streaming terminals (nodes / edges / iteration) yield lazily; aggregate
+    # terminals (names / to_dict / count / first) consume the stream.
 
-    def nodes(self) -> list[EntityNode]:
-        """The current entities (de-duplicated, insertion-ordered)."""
-        return list(self._nodes)
+    def nodes(self) -> Iterator[EntityNode]:
+        """Stream the current entities (de-duplicated). Lazy generator."""
+        return self._nodes_src()
 
     def names(self) -> list[str]:
-        """Names of the current entities, sorted for stable output."""
-        return sorted(n.name for n in self._nodes)
+        """Names of the current entities, sorted (an explicit aggregate)."""
+        return sorted(n.name for n in self._nodes_src())
 
-    def edges(self) -> list[EntityEdge]:
-        """The edges produced by the most recent (non-transitive) step."""
-        return list(self._edges)
+    def edges(self) -> Iterator[EntityEdge]:
+        """Stream the edges produced by the most recent (non-transitive) step."""
+        return self._edges_src()
 
     def first(self) -> Optional[EntityNode]:
-        return self._nodes[0] if self._nodes else None
+        """First entity, or ``None`` -- short-circuits the pipeline."""
+        return next(self._nodes_src(), None)
 
     def count(self) -> int:
-        return len(self._nodes)
+        """Number of entities (consumes the stream)."""
+        return sum(1 for _ in self._nodes_src())
 
     def to_dict(self) -> list[dict]:
-        """JSON-ready node dicts for the current set."""
-        return [n.to_dict() for n in self._nodes]
+        """JSON-ready node dicts for the current set (an explicit aggregate)."""
+        return [n.to_dict() for n in self._nodes_src()]
 
     def __iter__(self) -> Iterator[EntityNode]:
-        return iter(self._nodes)
+        return self._nodes_src()
 
     def __len__(self) -> int:
-        return len(self._nodes)
+        return self.count()
 
     def __bool__(self) -> bool:
-        return bool(self._nodes)
+        return next(self._nodes_src(), None) is not None
 
     def __repr__(self) -> str:
-        names = ", ".join(n.name for n in self._nodes[:5])
-        more = "" if len(self._nodes) <= 5 else f", +{len(self._nodes) - 5}"
+        head = list(islice(self._nodes_src(), 6))
+        names = ", ".join(n.name for n in head[:5])
+        more = "" if len(head) <= 5 else ", +…"
         return f"<EntityQuery [{names}{more}]>"
 
 
