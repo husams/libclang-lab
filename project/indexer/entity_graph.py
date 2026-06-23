@@ -50,6 +50,7 @@ __all__ = [
     "CreateForm",
     "EntityNode",
     "EntityEdge",
+    "EntityQuery",
     "EntityGraph",
     "open_entity_graph",
 ]
@@ -424,6 +425,15 @@ class EntityNode:
                     frontier.append((n, depth + 1))
         return list(seen.values())
 
+    # -- fluent query ------------------------------------------------------- #
+
+    def query(self) -> "EntityQuery":
+        """Start a fluent relational query seeded with this node.
+
+        ``leaf.query().derived(transitive=True).uses().names()`` etc.
+        """
+        return EntityQuery(self._graph, [self])
+
     # -- dunder ------------------------------------------------------------- #
 
     def to_dict(self) -> dict:
@@ -525,6 +535,37 @@ class EntityGraph:
                     out.append(node)
         return out
 
+    # -- fluent query ------------------------------------------------------- #
+
+    def query(self, *start) -> "EntityQuery":
+        """Start a fluent relational query from one or more seed entities.
+
+        Each ``start`` may be an :class:`EntityNode`, a :class:`Sym`, a symbol
+        id, or a name/pattern string (exact name preferred, else fuzzy
+        :meth:`find`).  Pass several to seed a union; pass none to seed *every*
+        entity in the graph.  Chain relation steps and finish with a terminal::
+
+            eg.query("Shape").derived().names()          # who inherits Shape
+            eg.query("OrderService").uses().names()       # what it uses
+            eg.query("Shape").derived(transitive=True).uses().nodes()
+        """
+        seeds = self._resolve_seeds(start) if start else self.entities()
+        return EntityQuery(self, seeds)
+
+    def _resolve_seeds(self, start) -> list[EntityNode]:
+        seen: dict[int, EntityNode] = {}
+        for item in start:
+            for node in self._seeds_for(item):
+                seen.setdefault(node.id, node)
+        return list(seen.values())
+
+    def _seeds_for(self, item) -> list[EntityNode]:
+        if isinstance(item, str):
+            exact = [n for n in self.entities() if n.name == item]
+            return exact if exact else self.find(item)
+        node = self.entity(item)
+        return [node] if node is not None else []
+
     # -- edge access -------------------------------------------------------- #
 
     def edges(
@@ -617,6 +658,214 @@ class EntityGraph:
             partial=bool(r["partial"]),
             _graph=self,
         )
+
+
+# --------------------------------------------------------------------------- #
+# A fluent relational query
+# --------------------------------------------------------------------------- #
+
+
+_DIRECTIONS = ("out", "in", "both")
+
+
+class EntityQuery:
+    """A lazy, immutable, chainable relational query over the entity graph.
+
+    A query carries a *current set of nodes* (insertion-ordered, de-duplicated)
+    plus the edges produced by the most recent relation step.  Every step
+    returns a NEW :class:`EntityQuery`, so queries are reusable and side-effect
+    free.  Begin with :meth:`EntityGraph.query` (or :meth:`EntityNode.query`),
+    chain relation steps, and finish with a terminal (:meth:`nodes`,
+    :meth:`names`, :meth:`edges`, :meth:`to_dict`, ...).
+
+    A *relation step* moves from the current nodes to their neighbours across
+    one :class:`EdgeKind`, in a direction:
+
+    * ``"out"``  -- follow ``src --kind--> dst`` (this node is the *source*)
+    * ``"in"``   -- follow it backwards (this node is the *target*)
+    * ``"both"`` -- either orientation
+
+    Worked answers to the motivating questions::
+
+        eg.query("Shape").derived().names()            # classes that inherit Shape
+        eg.query("OrderService").uses().names()         # classes used by OrderService
+        eg.query("Shape").derived(transitive=True) \\
+          .uses().of_kind(EntityKind.CLASS).names()     # what Shape's subtree uses
+        eg.query("Logger").used_by().names()            # who uses Logger
+    """
+
+    __slots__ = ("_g", "_nodes", "_edges")
+
+    def __init__(
+        self,
+        graph: "EntityGraph",
+        nodes: list[EntityNode],
+        edges: Optional[list[EntityEdge]] = None,
+    ) -> None:
+        self._g = graph
+        self._nodes = nodes
+        self._edges = edges or []
+
+    # -- the one general step ---------------------------------------------- #
+
+    def relation(
+        self,
+        kind,
+        direction: str = "out",
+        *,
+        transitive: bool = False,
+        max_depth: Optional[int] = None,
+    ) -> "EntityQuery":
+        """Follow ``kind`` edges from the current nodes.
+
+        ``kind`` is an :class:`EdgeKind` or its name (e.g. ``"uses"``).
+        ``direction`` is ``out`` / ``in`` / ``both``.  With ``transitive=True``
+        the step is the cycle-safe transitive closure (and :meth:`edges` is
+        then empty -- a closure has no single connecting edge set).
+        """
+        if isinstance(kind, str):
+            kind = EdgeKind.from_name(kind)
+        if direction not in _DIRECTIONS:
+            raise ValueError(
+                f"direction must be one of {_DIRECTIONS}, got {direction!r}"
+            )
+
+        if transitive:
+            seen: dict[int, EntityNode] = {}
+            for n in self._nodes:
+                for m in n.walk(kind, direction=direction, max_depth=max_depth):
+                    seen.setdefault(m.id, m)
+            return EntityQuery(self._g, list(seen.values()), [])
+
+        nodes: dict[int, EntityNode] = {}
+        edges: list[EntityEdge] = []
+        for n in self._nodes:
+            if direction in ("out", "both"):
+                for e in n.out_edges(kind):
+                    edges.append(e)
+                    nodes.setdefault(e.dst.id, e.dst)
+            if direction in ("in", "both"):
+                for e in n.in_edges(kind):
+                    edges.append(e)
+                    nodes.setdefault(e.src.id, e.src)
+        return EntityQuery(self._g, list(nodes.values()), edges)
+
+    #: ``then`` reads better as a continuation: ``...derived().then(USES)``.
+    then = relation
+    step = relation
+
+    # -- named convenience steps ------------------------------------------- #
+
+    def bases(self, *, transitive: bool = False) -> "EntityQuery":
+        """Base classes of the current nodes (``generalizes``, out)."""
+        return self.relation(EdgeKind.GENERALIZES, "out", transitive=transitive)
+
+    def derived(self, *, transitive: bool = False) -> "EntityQuery":
+        """Subclasses of the current nodes (``generalizes``, in)."""
+        return self.relation(EdgeKind.GENERALIZES, "in", transitive=transitive)
+
+    def implements(self) -> "EntityQuery":
+        """Interfaces the current nodes implement (``implements``, out)."""
+        return self.relation(EdgeKind.IMPLEMENTS, "out")
+
+    def implementors(self) -> "EntityQuery":
+        """Classes that implement the current interfaces (``implements``, in)."""
+        return self.relation(EdgeKind.IMPLEMENTS, "in")
+
+    def uses(self) -> "EntityQuery":
+        """Entities the current nodes use (``uses``, out)."""
+        return self.relation(EdgeKind.USES, "out")
+
+    def used_by(self) -> "EntityQuery":
+        """Entities that use the current nodes (``uses``, in)."""
+        return self.relation(EdgeKind.USES, "in")
+
+    def composes(self) -> "EntityQuery":
+        """Parts the current nodes own by value (``composes``, out)."""
+        return self.relation(EdgeKind.COMPOSES, "out")
+
+    def composed_in(self) -> "EntityQuery":
+        """Owners that compose the current nodes (``composes``, in)."""
+        return self.relation(EdgeKind.COMPOSES, "in")
+
+    def creates(self) -> "EntityQuery":
+        """Entities the current nodes construct (``creates``, out)."""
+        return self.relation(EdgeKind.CREATES, "out")
+
+    def created_by(self) -> "EntityQuery":
+        """Entities that construct the current nodes (``creates``, in)."""
+        return self.relation(EdgeKind.CREATES, "in")
+
+    def friends(self) -> "EntityQuery":
+        """Entities the current nodes befriend (``befriends``, out)."""
+        return self.relation(EdgeKind.BEFRIENDS, "out")
+
+    # -- filters (narrow the current node set) ----------------------------- #
+
+    def where(self, predicate) -> "EntityQuery":
+        """Keep only nodes for which ``predicate(node)`` is truthy."""
+        return EntityQuery(
+            self._g, [n for n in self._nodes if predicate(n)], self._edges
+        )
+
+    def of_kind(self, *entity_kinds: EntityKind) -> "EntityQuery":
+        """Keep only nodes whose entity *type* is one of ``entity_kinds``."""
+        wanted = set(entity_kinds)
+        return self.where(lambda n: n.kind in wanted)
+
+    def named(self, substring: str) -> "EntityQuery":
+        """Keep only nodes whose name contains ``substring`` (case-insensitive)."""
+        needle = substring.lower()
+        return self.where(lambda n: needle in n.name.lower())
+
+    def exclude(self, *others) -> "EntityQuery":
+        """Drop the given entities from the set.
+
+        Each argument is resolved like a query seed (node / id / USR / name or
+        pattern), so ``.exclude("Circle")`` works as readily as passing a node.
+        """
+        drop = {n.id for n in self._g._resolve_seeds(others)}
+        return EntityQuery(
+            self._g, [n for n in self._nodes if n.id not in drop], self._edges
+        )
+
+    # -- terminals --------------------------------------------------------- #
+
+    def nodes(self) -> list[EntityNode]:
+        """The current entities (de-duplicated, insertion-ordered)."""
+        return list(self._nodes)
+
+    def names(self) -> list[str]:
+        """Names of the current entities, sorted for stable output."""
+        return sorted(n.name for n in self._nodes)
+
+    def edges(self) -> list[EntityEdge]:
+        """The edges produced by the most recent (non-transitive) step."""
+        return list(self._edges)
+
+    def first(self) -> Optional[EntityNode]:
+        return self._nodes[0] if self._nodes else None
+
+    def count(self) -> int:
+        return len(self._nodes)
+
+    def to_dict(self) -> list[dict]:
+        """JSON-ready node dicts for the current set."""
+        return [n.to_dict() for n in self._nodes]
+
+    def __iter__(self) -> Iterator[EntityNode]:
+        return iter(self._nodes)
+
+    def __len__(self) -> int:
+        return len(self._nodes)
+
+    def __bool__(self) -> bool:
+        return bool(self._nodes)
+
+    def __repr__(self) -> str:
+        names = ", ".join(n.name for n in self._nodes[:5])
+        more = "" if len(self._nodes) <= 5 else f", +{len(self._nodes) - 5}"
+        return f"<EntityQuery [{names}{more}]>"
 
 
 def open_entity_graph(
