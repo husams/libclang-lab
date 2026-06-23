@@ -161,7 +161,7 @@ def test_node_query_entrypoint(eg):
 
 
 def test_edges_terminal_carries_step_edges(eg):
-    edges = eg.query("Renderer").uses().edges()
+    edges = list(eg.query("Renderer").uses().edges())
     assert len(edges) == 1
     assert edges[0].kind is EdgeKind.USES
     assert edges[0].src.name == "Renderer" and edges[0].dst.name == "Shape"
@@ -179,6 +179,32 @@ def test_empty_seed_queries_all_entities(eg):
     """query() with no args seeds every entity in the graph."""
     everything = eg.query().nodes()
     assert {n.name for n in everything} >= {"Shape", "Circle", "Square", "Renderer"}
+
+
+def test_streaming_terminals_are_generators(eg):
+    """nodes()/edges() and the low-level scans are lazy generators, not lists."""
+    import types
+    assert isinstance(eg.query("Shape").derived().nodes(), types.GeneratorType)
+    assert isinstance(eg.query("Renderer").uses().edges(), types.GeneratorType)
+    assert isinstance(eg.entities(), types.GeneratorType)
+    assert isinstance(eg.edges(), types.GeneratorType)
+    assert isinstance(eg.find("Shape")[0].bases(), types.GeneratorType)
+
+
+def test_first_short_circuits_the_pipeline(eg):
+    """first() pulls exactly one node through the chain (lazy, no full build)."""
+    seen: list[str] = []
+    q = eg.query("Shape").derived().where(lambda n: seen.append(n.name) or True)
+    assert q.first() is not None
+    assert len(seen) == 1, f"expected 1 node pulled, saw {seen}"
+
+
+def test_query_reusable_across_terminals(eg):
+    """A query is a re-runnable thunk: terminals can be called repeatedly."""
+    q = eg.query("Shape").derived()
+    assert sorted(n.name for n in q.nodes()) == ["Circle", "Square"]  # consume once
+    assert sorted(n.name for n in q.nodes()) == ["Circle", "Square"]  # re-run, fresh
+    assert q.count() == 2 and q.names() == ["Circle", "Square"]
 
 
 def test_terminals(eg):
