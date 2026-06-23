@@ -2146,6 +2146,29 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       }
       e.is_virtual = static_cast<int64_t>(lib.clang_isVirtualBase(cursor));
       db_.add_edge(e);
+      // CRTP / template base: also link the specialization instance to its
+      // primary template via instantiates(5).  A template used AS A BASE CLASS
+      // (`class Cache : public Singleton<Cache>`) is the one instantiation site
+      // not covered by the variable/member/call/using paths, so without this
+      // the entity roll-up never sees `Singleton<Cache> instantiates Singleton`.
+      const CXCursor base_primary =
+          lib.clang_getSpecializedCursorTemplate(base_ref);
+      if (!lib.clang_Cursor_isNull(base_primary) &&
+          !is_invalid_kind(lib.clang_getCursorKind(base_primary))) {
+        const std::string base_prim_usr =
+            CxString(lib, lib.clang_getCursorUSR(base_primary)).str();
+        if (!base_prim_usr.empty() && base_prim_usr != base_usr) {
+          const auto base_prim_sym = db_.lookup_symbol(base_prim_usr);
+          if (base_prim_sym) {
+            Edge inst;
+            inst.src_id = dst_id;
+            inst.dst_id = base_prim_sym->id;
+            inst.kind = 5; // instantiates
+            inst.count = 1;
+            db_.add_edge(inst);
+          }
+        }
+      }
       return;
     }
 

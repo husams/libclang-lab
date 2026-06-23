@@ -2248,9 +2248,15 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
   }
 
   for (const auto &r : rows) {
-    // Collapse template instances/specializations onto their primary.
+    // Collapse the DERIVED side (src) onto its primary template, but keep the
+    // BASE (dst) un-collapsed: a template used as a base
+    // (`class Cache : public Singleton<Cache>`) is its OWN design entity, so we
+    // want `Cache generalizes Singleton<Cache>` and let the separate
+    // instantiates(11) edge carry `Singleton<Cache> -> Singleton`.  (Pre-CRTP-
+    // fix this was moot -- no base specifier had an instantiates(5) Layer-0
+    // edge, so collapsing the dst was always a no-op.)
     int64_t src = cpp_collapse_to_primary(db, r.src);
-    int64_t dst = cpp_collapse_to_primary(db, r.dst);
+    int64_t dst = r.dst;
     if (src == dst) continue;  // no self-edge
     int64_t ek = is_interface(dst) ? 2 : 1;  // implements=2 or generalizes=1
     auto ins = db.prepare(

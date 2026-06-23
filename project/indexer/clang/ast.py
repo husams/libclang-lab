@@ -1819,6 +1819,27 @@ def _index_edges_notxn(
                 base_access=base_access,
                 is_virtual=is_virtual,
             )
+            # CRTP / template base: also link the specialization instance to its
+            # primary template via instantiates(5).  A template used AS A BASE
+            # CLASS (`class Cache : public Singleton<Cache>`) is the one
+            # instantiation site not covered by the variable/member/call/using
+            # paths, so without this the entity roll-up never sees the
+            # `Singleton<Cache> instantiates Singleton` relation.
+            base_primary = _lib.clang_getSpecializedCursorTemplate(ref)
+            if (
+                base_primary is not None
+                and base_primary.kind.value > 0
+                and base_primary.kind
+                not in (
+                    cx.CursorKind.NO_DECL_FOUND,
+                    cx.CursorKind.INVALID_FILE,
+                )
+            ):
+                base_prim_usr = base_primary.get_usr()
+                if base_prim_usr and base_prim_usr != base_usr:
+                    base_prim_sym = db.lookup_symbol(base_prim_usr)
+                    if base_prim_sym is not None:
+                        db.add_edge(dst_id, base_prim_sym.id, 5)  # instantiates
             continue
 
         # -- FIELD_DECL: field_of -----------------------------------------
