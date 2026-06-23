@@ -80,6 +80,11 @@
     "file": "shapes.cpp"
   },
   {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
+    "command": "c++ -std=c++17 -I. -c singleton_crtp.cpp -o singleton_crtp.o",
+    "file": "singleton_crtp.cpp"
+  },
+  {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/project",
     "command": "cc -I. -c app.c -o app.o",
     "file": "app.c"

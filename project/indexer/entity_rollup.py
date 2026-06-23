@@ -438,9 +438,14 @@ def _materialise_inheritance(db: "Storage") -> None:
         is_virtual = r[3] or 0
         access = int(raw_access) if raw_access is not None else 0
 
-        # Collapse template instances/specializations onto their primary.
+        # Collapse the DERIVED side (src) onto its primary template, but keep
+        # the BASE (dst) un-collapsed: a template used as a base
+        # (`class Cache : public Singleton<Cache>`) is its OWN design entity,
+        # so we want `Cache generalizes Singleton<Cache>` and let the separate
+        # instantiates(11) edge carry `Singleton<Cache> -> Singleton`.  (Pre-
+        # CRTP-fix this was moot -- no base specifier had an instantiates(5)
+        # Layer-0 edge, so collapsing the dst was always a no-op.)
         src_id = _collapse_to_primary(conn, src_id)
-        dst_id = _collapse_to_primary(conn, dst_id)
         if src_id == dst_id:
             continue  # no self-edge
 
