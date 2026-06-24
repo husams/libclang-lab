@@ -457,6 +457,20 @@ if [ "${PY_EE:-0}" -ne "${CPP_EE:-0}" ]; then
 fi
 echo "parity_check: entity_edge rows identical (py==cpp == $PY_EE rows)"
 
+# --- diff 2c: entity_node parity (Layer-1 design-type classification, v22) -----
+# entity_node rows = the materialized design type (class/abstract_class/interface
+# /union/enum/+template variants) of every entity, written by `resolve` alongside
+# entity_edge. The full .dump diff above already covers these byte-for-byte; this
+# explicit guard names entity_node so a future divergence in the classifier
+# (entity_rollup._materialise_entity_nodes vs cpp_materialise_entity_nodes) fails
+# loudly. (entity_kind lookup rows are excluded by matching the bare table name.)
+PY_EN=$(grep -c '^INSERT INTO entity_node VALUES' "$WORK/py.dump" || true)
+CPP_EN=$(grep -c '^INSERT INTO entity_node VALUES' "$WORK/cpp.dump" || true)
+if [ "${PY_EN:-0}" -ne "${CPP_EN:-0}" ]; then
+  fail "entity_node parity: row count differs (py=$PY_EN cpp=$CPP_EN) (work dir kept: $WORK)"
+fi
+echo "parity_check: entity_node rows identical (py==cpp == $PY_EN rows)"
+
 # --- diff 3: CIDX_MEM per-TU memory report ------------------------------------
 # Both tools call clang_getCXTUResourceUsage on the SAME linked libclang over
 # the SAME sources, so the per-TU byte amounts are deterministic and identical.

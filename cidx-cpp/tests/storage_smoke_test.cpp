@@ -407,7 +407,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "edge_kind", "edge", "edge_site",
                                         "template_param", "template_arg",
                                         "call_arg", "label", "diagnostic",
-                                        "entity_edge_kind", "entity_edge"});
+                                        "entity_edge_kind", "entity_edge",
+                                        "entity_kind", "entity_node"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {

@@ -499,7 +499,9 @@ def test_free_function_template_found_by_function_lookup(tmp_path):
     db_path = str(tmp_path / "t.db")
     _build_template_db(db_path, str(tmp_path / "r"))
     with CodeBase(GraphQuery(db_path)) as cb:
-        f = cb.function("wrap")
+        hits = cb.function("wrap")
+        assert len(hits) == 1
+        f = hits[0]
         assert isinstance(f, FunctionTemplate)
         assert f.spelling == "wrap"
 

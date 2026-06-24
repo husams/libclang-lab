@@ -183,6 +183,76 @@ def _is_interface(db: "Storage", sym_id: int) -> bool:
     return bool(row and row[0] > 0)
 
 
+def _has_pure_method(db: "Storage", sym_id: int) -> bool:
+    """Whether the record owns >=1 pure-virtual method (kind=21, is_pure=1).
+
+    The abstractness signal: any record with a pure method cannot be
+    instantiated. Combined with _is_interface this partitions records into
+    concrete / abstract / interface."""
+    row = db._conn.execute(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 21 AND is_pure = 1",
+        (sym_id,),
+    ).fetchone()
+    return bool(row and row[0] > 0)
+
+
+# entity_kind ids (storage.entity_kind seed) -- the materialized design type.
+_EK_OTHER = 0
+_EK_CLASS = 1
+_EK_ABSTRACT_CLASS = 2
+_EK_INTERFACE = 3
+_EK_UNION = 4
+_EK_ENUM = 5
+_EK_CLASS_TEMPLATE = 6
+_EK_ABSTRACT_CLASS_TEMPLATE = 7
+_EK_INTERFACE_TEMPLATE = 8
+
+
+def _entity_kind_id(db: "Storage", sym_id: int, sym_kind: int) -> int:
+    """Classify an entity symbol into its materialized design type.
+
+    Abstractness (own pure-virtual methods + own data fields) decides
+    class/abstract_class/interface; the same split applies to class templates.
+    Union and enum keep their own type (a union cannot be abstract). The C++
+    keyword (class vs struct) is intentionally NOT distinguished here -- that
+    detail lives at the low-level symbol layer (model.Struct / model.Union).
+
+    sym_kind is the stored CXCursorKind int: struct=2, union=3, class=4,
+    enum=5, class-template=31."""
+    if sym_kind == 5:  # enum
+        return _EK_ENUM
+    if sym_kind == 3:  # union (no virtuals -> never abstract)
+        return _EK_UNION
+    is_template = sym_kind == 31  # class-template
+    if _is_interface(db, sym_id):
+        return _EK_INTERFACE_TEMPLATE if is_template else _EK_INTERFACE
+    if _has_pure_method(db, sym_id):
+        return _EK_ABSTRACT_CLASS_TEMPLATE if is_template else _EK_ABSTRACT_CLASS
+    return _EK_CLASS_TEMPLATE if is_template else _EK_CLASS
+
+
+def _materialise_entity_nodes(db: "Storage") -> None:
+    """Classify every entity symbol into entity_node(id, kind).
+
+    DELETE + rebuild (idempotent, runs inside the resolve transaction). The
+    entity domain = records (class/struct/union), enums, and class templates --
+    the same symbol kinds that can be entity_edge endpoints. One row per symbol.
+    """
+    conn = db._conn
+    conn.execute("DELETE FROM entity_node")
+    rows = conn.execute(
+        "SELECT id, kind FROM symbol WHERE kind IN (2, 3, 4, 5, 31)"
+    ).fetchall()
+    for sym_id, sym_kind in rows:
+        ek = _entity_kind_id(db, sym_id, sym_kind)
+        conn.execute(
+            "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)",
+            (sym_id, ek),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Type-classification kernel (for has-a / creates / by-value-return)
 # ---------------------------------------------------------------------------
@@ -413,6 +483,7 @@ def materialize_entity_edges(db: "Storage") -> None:
         _materialise_creates_destroys(db)
         _materialise_uses(db)
         _materialise_befriends(db)
+        _materialise_entity_nodes(db)
 
 
 # ---------------------------------------------------------------------------
