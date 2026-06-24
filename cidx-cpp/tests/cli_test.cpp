@@ -835,7 +835,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.33.0");
+  CHECK(std::string(cli::kVersion) == "0.38.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});

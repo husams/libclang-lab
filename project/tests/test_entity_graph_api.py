@@ -28,6 +28,9 @@ from indexer.entity_graph import (  # noqa: E402
     EntityKind,
     Access,
     Multiplicity,
+    ClassKind,
+    ClassTemplate,
+    Interface,
 )
 
 try:
@@ -215,3 +218,279 @@ def test_edge_filtering_and_repr(eg):
     assert "generalizes" in repr(leaf_gen[0])
     d = leaf_gen[0].to_dict()
     assert d["src"] == "app::Leaf" and d["dst"] == "app::Mid"
+
+
+# --------------------------------------------------------------------------- #
+# Template-specialization display: a node must render with its template
+# arguments so a specialization is distinguishable from its primary template.
+# --------------------------------------------------------------------------- #
+
+_CRTP_SOURCE = """
+namespace app {
+template <class Derived>
+class Singleton {
+public:
+    static Derived& instance() { static Derived d; return d; }
+protected:
+    Singleton() = default;
+private:
+    int count_;
+};
+class Cache : public Singleton<Cache> {
+    friend class Singleton<Cache>;
+    Cache() = default;
+public:
+    void put(int k, int v);
+    int  get(int k);
+};
+
+// A pure interface + a realizer, for the Interface() seed.
+struct Drawable {
+    virtual void draw() = 0;
+    virtual ~Drawable() = default;
+};
+struct Sprite : Drawable {
+    void draw() override {}
+};
+}  // namespace app
+"""
+
+
+@pytest.fixture
+def crtp_eg():
+    """A real index over a CRTP singleton (Cache : Singleton<Cache>)."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "crtp.cpp")
+        with open(path, "w") as fh:
+            fh.write(_CRTP_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        fatal = [d for d in tu.diagnostics if d.severity >= 3]
+        assert not fatal, "; ".join(d.spelling for d in fatal)
+
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        graph = EntityGraph(GraphQuery.from_connection(db._conn))
+        yield graph
+        db.close()
+
+
+def test_specialization_display_carries_template_args(crtp_eg):
+    """display() shows template arguments; name() stays the bare qual_name."""
+    cache = crtp_eg.find("app::Cache")[0]
+    spec = cache.bases().__next__()  # the Singleton<Cache> specialization
+
+    # The specialization is distinguishable from the primary template.
+    assert spec.display == "app::Singleton<app::Cache>"
+    assert spec.name == "app::Singleton"  # bare qual_name unchanged
+    assert "Singleton<app::Cache>" in repr(spec)
+
+    # Cache (non-template) is unaffected: display == name.
+    assert cache.display == cache.name == "app::Cache"
+
+
+def test_specialization_chain_repr_and_dict(crtp_eg):
+    """The full Cache --generalizes--> Singleton<Cache> --instantiates-->
+    Singleton<T> chain renders the specialization with its arguments."""
+    cache = crtp_eg.find("app::Cache")[0]
+    gen = list(cache.out_edges(EdgeKind.GENERALIZES))[0]
+    assert (
+        repr(gen)
+        == "app::Cache --generalizes--> app::Singleton<app::Cache> [protected]"
+    )
+    assert gen.to_dict()["dst"] == "app::Singleton<app::Cache>"
+
+    inst = list(gen.dst.out_edges(EdgeKind.INSTANTIATES))[0]
+    assert inst.to_dict() == {
+        "src": "app::Singleton<app::Cache>",
+        "kind": "instantiates",
+        "dst": "app::Singleton<Derived>",  # primary's param is named Derived here
+        "count": inst.count,
+    }
+
+
+def test_template_instances_and_primary(crtp_eg):
+    """instances() (instantiates, in) and primary_template() (instantiates, out)."""
+    primary = crtp_eg.find("Singleton")[0]
+    # find returns primary template first; make sure we have the CLASS_TEMPLATE
+    primary = next(
+        n for n in crtp_eg.find("Singleton") if n.kind is EntityKind.CLASS_TEMPLATE
+    )
+    spec = crtp_eg.entity(next(primary.instances()).id)
+
+    assert [n.display for n in primary.instances()] == ["app::Singleton<app::Cache>"]
+    assert spec.primary_template().kind is EntityKind.CLASS_TEMPLATE
+    assert primary.primary_template() is None  # the primary instantiates nothing
+
+
+def test_which_classes_are_singletons_declarative(crtp_eg):
+    """The motivating query: classes that ARE singletons = subclasses of any
+    instantiation of the Singleton primary template."""
+    primary = next(
+        n for n in crtp_eg.find("Singleton") if n.kind is EntityKind.CLASS_TEMPLATE
+    )
+    assert primary.query().instances().displays() == ["app::Singleton<app::Cache>"]
+    assert primary.query().instances().derived().displays() == ["app::Cache"]
+
+
+def test_query_relations_round_trip(crtp_eg):
+    """New fluent steps invert correctly (instances <-> instantiates)."""
+    spec = next(
+        n
+        for n in crtp_eg.find("Singleton")
+        if n.kind is EntityKind.CLASS  # the Singleton<Cache> specialization
+    )
+    # specialization --instantiates--> primary --instances--> specialization
+    assert spec.query().instantiates().instances().displays() == [
+        "app::Singleton<app::Cache>"
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Typed query seeds: g.template / g.klass / g.instance / g.interface and the
+# selector-object form g.query(ClassTemplate(...)).
+# --------------------------------------------------------------------------- #
+
+
+def test_typed_seed_template_and_klass(crtp_eg):
+    # template() seeds only the primary class template.
+    assert crtp_eg.template("Singleton").displays() == ["app::Singleton<Derived>"]
+    # klass() seeds a plain class, excluding the Singleton<Cache> instantiation.
+    assert crtp_eg.klass("Cache").displays() == ["app::Cache"]
+    assert crtp_eg.klass("Singleton").displays() == []  # only a template/instance
+
+
+def test_typed_seed_instance_matches_by_display(crtp_eg):
+    # instance() matches the instantiation by its (unqualified) display string.
+    assert crtp_eg.instance("Singleton<app::Cache>").displays() == [
+        "app::Singleton<app::Cache>"
+    ]
+    # ...and the qualified display works too.
+    assert crtp_eg.instance("app::Singleton<app::Cache>").displays() == [
+        "app::Singleton<app::Cache>"
+    ]
+
+
+def test_typed_seed_declarative_singletons(crtp_eg):
+    # The motivating query reads cleanly with a typed seed.
+    assert crtp_eg.template("Singleton").instances().derived().displays() == [
+        "app::Cache"
+    ]
+    # Selector-object form via query() is equivalent.
+    assert crtp_eg.query(ClassTemplate("Singleton")).instances().derived().displays() == [
+        "app::Cache"
+    ]
+
+
+def test_typed_seed_interface_implemented_by(crtp_eg):
+    # interface() seeds a record realized by others; implemented_by() finds them.
+    assert crtp_eg.interface("Drawable").implemented_by().displays() == ["app::Sprite"]
+    # query(Interface(...)) is the selector-object equivalent.
+    assert crtp_eg.query(Interface("Drawable")).implemented_by().displays() == [
+        "app::Sprite"
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# The three kinds of class: concrete / abstract / interface (ClassKind).
+# --------------------------------------------------------------------------- #
+
+_CLASSKINDS_SOURCE = """
+namespace app {
+struct Shape {                              // INTERFACE: all pure, no fields
+    virtual double area() const = 0;
+    virtual ~Shape() = default;
+};
+class Widget {                              // ABSTRACT: pure method + a field
+public:
+    virtual void draw() = 0;
+private:
+    int z = 0;
+};
+class Button : public Widget {              // CONCRETE: overrides draw
+public:
+    void draw() override {}
+};
+struct Circle : Shape {                     // CONCRETE: overrides area
+    double area() const override { return 3.14; }
+};
+}  // namespace app
+"""
+
+
+@pytest.fixture
+def kinds_eg():
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "kinds.cpp")
+        with open(path, "w") as fh:
+            fh.write(_CLASSKINDS_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        fatal = [d for d in tu.diagnostics if d.severity >= 3]
+        assert not fatal, "; ".join(d.spelling for d in fatal)
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+        graph = EntityGraph(GraphQuery.from_connection(db._conn))
+        yield graph
+        db.close()
+
+
+def test_class_kind_classification(kinds_eg):
+    def ck(name):
+        return kinds_eg.find("app::" + name)[0].class_kind
+
+    assert ck("Shape") is ClassKind.INTERFACE
+    assert ck("Widget") is ClassKind.ABSTRACT
+    assert ck("Button") is ClassKind.CONCRETE
+    assert ck("Circle") is ClassKind.CONCRETE
+
+
+def test_is_abstract_is_interface_flags(kinds_eg):
+    shape = kinds_eg.find("app::Shape")[0]
+    widget = kinds_eg.find("app::Widget")[0]
+    button = kinds_eg.find("app::Button")[0]
+    assert shape.is_interface and shape.is_abstract
+    assert widget.is_abstract and not widget.is_interface  # abstract != interface
+    assert not button.is_abstract and not button.is_interface
+
+
+def test_typed_seeds_partition_the_three_class_kinds(kinds_eg):
+    # interface() / abstract_class() / klass() are mutually exclusive.
+    assert kinds_eg.interface("Shape").displays() == ["app::Shape"]
+    assert kinds_eg.abstract_class("Widget").displays() == ["app::Widget"]
+    assert kinds_eg.klass("Button").displays() == ["app::Button"]
+    # Widget is abstract -> NOT matched by klass(); Shape is an interface ->
+    # NOT matched by abstract_class().
+    assert kinds_eg.klass("Widget").displays() == []
+    assert kinds_eg.abstract_class("Shape").displays() == []
+
+
+def test_query_class_kind_filters(kinds_eg):
+    assert kinds_eg.query().interfaces().displays() == ["app::Shape"]
+    assert kinds_eg.query().abstract().displays() == ["app::Shape", "app::Widget"]
+    assert kinds_eg.query().concrete().displays() == ["app::Button", "app::Circle"]
+    assert kinds_eg.query().of_class_kind(ClassKind.ABSTRACT).displays() == [
+        "app::Widget"
+    ]
+
+
+def test_class_kind_in_to_dict(kinds_eg):
+    d = kinds_eg.find("app::Shape")[0].to_dict()
+    assert d["class_kind"] == "interface" and d["kind"] == "struct"

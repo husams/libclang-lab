@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -322,6 +322,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_edge_identity ON entity_edge(
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
+-- ---- v22: entity-node type (Layer-1 design-entity classification) -----------
+-- The *type of an entity node* in the UML/abstraction graph, materialised at
+-- `cidx resolve` alongside entity_edge. Orthogonal to the C++ keyword (which
+-- stays at the low-level symbol layer): a record is classified by ABSTRACTNESS
+-- into class / abstract_class / interface (and the same split for class
+-- templates); union / enum keep their own type. Same zero-TEXT/lookup-table
+-- pattern as entity_edge_kind. Populated by entity_rollup.materialize_entity_nodes.
+CREATE TABLE IF NOT EXISTS entity_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO entity_kind (id, name) VALUES
+  (0,'other'),
+  (1,'class'), (2,'abstract_class'), (3,'interface'),
+  (4,'union'), (5,'enum'),
+  (6,'class_template'), (7,'abstract_class_template'), (8,'interface_template');
+
+CREATE TABLE IF NOT EXISTS entity_node (
+    id   INTEGER PRIMARY KEY REFERENCES symbol(id) ON DELETE CASCADE,
+    kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
+);
+
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
 
@@ -427,10 +449,20 @@ class Storage:
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._needs_entity_node_backfill = False
         self._migrate()  # before _SCHEMA: its indexes need new columns
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._in_txn = False
+        # v21 -> v22 one-time backfill: entity_node is a pure-DB classification
+        # of existing symbols (no re-parse), so an upgraded index gets its design
+        # types filled in immediately on open -- no `cidx index`/`resolve` needed.
+        # (entity_node did not exist during _migrate; it does now, after _SCHEMA.)
+        if self._needs_entity_node_backfill:
+            from indexer.entity_rollup import _materialise_entity_nodes
+
+            with self.transaction():
+                _materialise_entity_nodes(self)
 
     def _migrate(self) -> None:
         """In-place upgrade of a database created by an older schema version.
@@ -664,6 +696,13 @@ class Storage:
                     "    COALESCE(via_member_id, -1), COALESCE(create_form, -1))"
                 )
                 changed = True
+        if "entity_node" not in tables:
+            # v21 -> v22: entity_node + entity_kind tables (the entity's design
+            # type). The table is created by the schema script (run after this);
+            # because the type is a pure-DB classification of existing symbols,
+            # __init__ backfills it right after _SCHEMA -- no re-index/resolve.
+            self._needs_entity_node_backfill = True
+            changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
             # the tables + indexes + seeds edge_kind; nothing to backfill from

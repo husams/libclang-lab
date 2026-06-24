@@ -48,6 +48,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Literal, Optional, Sequence, overload
 
+from .entity_graph import ClassKind
 from .query import (
     CallArg,
     CallerWithContext,
@@ -65,6 +66,8 @@ from .query import (
 __all__ = [
     "CodeBase",
     "open_codebase",
+    "ClassKind",
+    "Signature",
     "Location",
     "Type",
     "Reference",
@@ -83,6 +86,8 @@ __all__ = [
     "Destructor",
     "Record",
     "Class",
+    "Struct",
+    "Union",
     "Field",
     "Enum",
     "EnumConstant",
@@ -418,25 +423,211 @@ class CodeBase:
     def symbols_in_file(self, path_substr: str, limit: int = 500) -> "list[Entity]":
         return self._wrap_all(self.graph.symbols_in_file(path_substr, limit=limit))
 
-    # convenience single-kind lookups -------------------------------------- #
+    # typed, signature-aware selectors ------------------------------------- #
+    #
+    # Each selector returns a LIST of matching typed entities (empty if none).
+    # Callables (function / method / function_template) accept the three
+    # signature-calling conventions resolved by ``_make_signature``:
+    #
+    #   cb.function("app::f", ret="int", params=["int", "std::string"])  # parts
+    #   cb.function("int app::f(int, std::string)")                       # full
+    #   cb.function("app::f", "int(std::string)")                        # ret(p)
+    #
+    # Omitting ``ret`` / ``params`` leaves that dimension unconstrained; an empty
+    # ``params=[]`` requires zero parameters.  Overloads all come back; narrow by
+    # adding ``ret`` / ``params``.  Type arguments may be strings, ``Type``, or
+    # entity objects, and are matched by NORMALIZED spelling (whitespace / cv /
+    # ``*`` / ``&`` tolerant, ``std::__1::`` folded, namespace-stripped fallback).
 
-    def function(self, name: str) -> "Optional[Function | FunctionTemplate]":
-        """The first free function matching `name`, or None.
+    def _lookup(self, name: str, limit: int = 100) -> "list[Entity]":
+        """Candidate entities for a (possibly qualified) ``name`` -- fuzzy-found
+        by the name AND by its unqualified tail, then narrowed to those whose
+        name / spelling actually matches ``name`` (qualified vs. spelling
+        leniently). De-duplicated, order-stable."""
+        seen: dict[int, Entity] = {}
+        queries = [name]
+        tail = _unqualify(name)
+        if tail and tail != name:
+            queries.append(tail)
+        for q in queries:
+            for e in self.find(q, limit=limit):
+                seen.setdefault(e.id, e)
+        return [e for e in seen.values() if _name_matches(name, e)]
 
-        Includes free function templates (FunctionTemplate), which are a sibling
-        of Function -- not a subclass -- so they must be admitted explicitly."""
-        hits = [
+    def _make_signature(
+        self, name: str, sig: Optional[str], ret, params
+    ) -> "tuple[Signature, str]":
+        """Resolve the three calling conventions into a ``(Signature, name)``.
+
+        * ``name`` containing ``(`` -> a full signature string; the embedded
+          qualified name becomes the lookup name (``sig`` / ``ret`` / ``params``
+          are ignored).
+        * else a non-None ``sig`` -> a ``ret(params)`` signature string.
+        * else the ``ret`` / ``params`` keywords."""
+        if "(" in name:
+            return Signature.parse_full(name)
+        if sig is not None:
+            return Signature.parse_ret_params(sig), name
+        return Signature.from_parts(ret=ret, params=params), name
+
+    def function(
+        self, name: str, sig: Optional[str] = None, *, ret=None, params=None
+    ) -> "list[Function | FunctionTemplate]":
+        """Free functions matching ``name`` and the optional signature.
+
+        Includes free function templates (``FunctionTemplate`` is a sibling of
+        ``Function``, not a subclass).  Member functions are excluded -- use
+        :meth:`method`.  Returns ALL overloads that match; empty when none."""
+        spec, lookup = self._make_signature(name, sig, ret, params)
+        return [
             e
-            for e in self.find(name)
+            for e in self._lookup(lookup)
             if isinstance(e, (Function, FunctionTemplate))
             and not isinstance(e, Method)
+            and spec.matches(e)
         ]
-        return hits[0] if hits else None
 
-    def klass(self, name: str) -> "Optional[Record]":
-        """The first class/struct/union matching `name`, or None."""
-        hits = [e for e in self.find(name) if isinstance(e, Record)]
-        return hits[0] if hits else None
+    def method(
+        self,
+        name: str,
+        sig: Optional[str] = None,
+        *,
+        ret=None,
+        params=None,
+        owner=None,
+    ) -> "list[Method]":
+        """Member functions matching ``name`` and the optional signature.
+
+        ``owner`` (a ``Record``, an entity, or a class-name string) scopes the
+        match to methods of that owning record.  Returns ALL overloads; empty
+        when none."""
+        spec, lookup = self._make_signature(name, sig, ret, params)
+        owner_ok = self._owner_predicate(owner)
+        return [
+            e
+            for e in self._lookup(lookup)
+            if isinstance(e, Method) and spec.matches(e) and owner_ok(e)
+        ]
+
+    def function_template(
+        self, name: str, sig: Optional[str] = None, *, ret=None, params=None
+    ) -> "list[FunctionTemplate]":
+        """Primary free function templates matching ``name`` (and optional
+        signature).  Member function templates are reached via :meth:`method`'s
+        owner or ``Record.methods``."""
+        spec, lookup = self._make_signature(name, sig, ret, params)
+        return [
+            e
+            for e in self._lookup(lookup)
+            if isinstance(e, FunctionTemplate)
+            and not isinstance(e, Method)
+            and spec.matches(e)
+        ]
+
+    def _records(
+        self, name: str, kinds: "set[str]", *, class_kinds=None
+    ) -> "list[Record]":
+        out: list[Record] = []
+        for e in self._lookup(name):
+            if not isinstance(e, Record) or isinstance(e, ClassTemplate):
+                continue
+            if e.kind not in kinds:
+                continue
+            if _is_instance(e):  # a template instantiation is not a plain record
+                continue
+            if class_kinds is not None and e.class_kind not in class_kinds:
+                continue
+            out.append(e)
+        return out
+
+    def klass(self, name: str) -> "list[Record]":
+        """Concrete ``class`` records named ``name`` -- excludes abstract
+        classes, interfaces, template instantiations, and class templates (the
+        entity-graph partitioning).  Returns a list; empty when none."""
+        return self._records(name, {"class"}, class_kinds={ClassKind.CONCRETE})
+
+    def struct(self, name: str) -> "list[Record]":
+        """Concrete ``struct`` records named ``name`` (same exclusions as
+        :meth:`klass`)."""
+        return self._records(name, {"struct"}, class_kinds={ClassKind.CONCRETE})
+
+    def record(self, name: str) -> "list[Record]":
+        """Concrete ``class`` / ``struct`` / ``union`` records named ``name``
+        (same exclusions as :meth:`klass`)."""
+        return self._records(
+            name, {"class", "struct", "union"}, class_kinds={ClassKind.CONCRETE}
+        )
+
+    def interface(self, name: str) -> "list[Record]":
+        """Pure interface records named ``name`` -- all own methods pure-virtual
+        and no data members (``ClassKind.INTERFACE``).  Mutually exclusive with
+        :meth:`klass` and :meth:`abstract_class`."""
+        return [
+            e
+            for e in self._lookup(name)
+            if isinstance(e, Record)
+            and not isinstance(e, ClassTemplate)
+            and not _is_instance(e)
+            and e.is_interface
+        ]
+
+    def abstract_class(self, name: str) -> "list[Record]":
+        """Abstract (but not pure-interface) records named ``name`` -- have a
+        pure-virtual method yet carry state or a concrete method
+        (``ClassKind.ABSTRACT``).  Mutually exclusive with :meth:`klass` and
+        :meth:`interface`."""
+        return [
+            e
+            for e in self._lookup(name)
+            if isinstance(e, Record)
+            and not isinstance(e, ClassTemplate)
+            and not _is_instance(e)
+            and e.class_kind is ClassKind.ABSTRACT
+        ]
+
+    def class_template(self, name: str) -> "list[ClassTemplate]":
+        """Primary class templates named ``name`` (e.g. ``Box<T>``)."""
+        return [e for e in self._lookup(name) if isinstance(e, ClassTemplate)]
+
+    def instance(self, name: Optional[str] = None, *, args=None) -> "list[Record]":
+        """Template instantiations / specializations matched by the types used
+        for the instance.
+
+        Three forms::
+
+            cb.instance("Box<int>")              # base + args in one string
+            cb.instance("app::Box<int>")         # qualified base accepted
+            cb.instance("Box", args=["int"])     # base + explicit arg list
+
+        ``args`` may be strings, ``Type``, or entity objects and are matched by
+        normalized spelling against the instance's stored template arguments
+        (order + arity).  Omitting both the ``<...>`` and ``args`` matches every
+        instantiation of the base.  Returns a list; empty when none."""
+        base, parsed = _parse_instance_name(name)
+        want = args if args is not None else parsed
+        out: list[Record] = []
+        if base is None:
+            return out
+        for e in self._lookup(base):
+            if not _is_instance(e) or not _name_matches(base, e):
+                continue
+            if want is not None:
+                tas = e.template_arguments
+                if len(tas) != len(want):
+                    continue
+                if not all(_types_match(w, _ta_text(t)) for w, t in zip(want, tas)):
+                    continue
+            out.append(e)
+        return out
+
+    def _owner_predicate(self, owner):
+        """A predicate over a ``Method`` enforcing the optional owner scope."""
+        if owner is None:
+            return lambda e: True
+        if isinstance(owner, Entity):
+            oid = owner.id
+            return lambda e: e.owner is not None and e.owner.id == oid
+        return lambda e: e.owner is not None and _name_matches(owner, e.owner)
 
     def stats(self) -> dict:
         return self.graph.stats()
@@ -1432,6 +1623,28 @@ class Record(Entity):
         return self.sym.access
 
     @property
+    def class_kind(self) -> ClassKind:
+        """Abstractness by this record's OWN members -- CONCRETE / ABSTRACT /
+        INTERFACE, the entity-graph "three kinds of class"
+        (:class:`indexer.entity_graph.ClassKind`).
+
+        Computed from direct members only (own pure-virtual methods + own data
+        fields), reusing the canonical ``entity_rollup._is_interface`` rule, so
+        it is consistent with the Layer-1 entity graph's partitioning and is
+        what the :meth:`CodeBase.klass` / :meth:`CodeBase.abstract_class` /
+        :meth:`CodeBase.interface` selectors filter on.  This is orthogonal to
+        the inheritance-aware :attr:`is_abstract` heuristic below (which also
+        considers pure methods inherited but not overridden)."""
+        return _record_class_kind(self._cb.graph._c, self.sym.id)
+
+    @property
+    def is_interface(self) -> bool:
+        """True if this record is a pure interface -- all own methods are
+        pure-virtual (a defaulted virtual destructor is allowed) and it has no
+        data members. Equivalent to ``class_kind is ClassKind.INTERFACE``."""
+        return self.class_kind is ClassKind.INTERFACE
+
+    @property
     def template_arguments(self) -> list[TemplateArg]:
         """The concrete template arguments this record binds, when it is a
         specialization or an instantiation of a class template (e.g.
@@ -1512,7 +1725,23 @@ class Record(Entity):
 
 
 class Class(Record):
-    """A class, struct, or union (kind disambiguates via ``.kind``)."""
+    """A C++ ``class`` record.
+
+    Also the base for the other two keyword record types -- :class:`Struct` and
+    :class:`Union` -- so ``isinstance(x, Class)`` is true for any of the three,
+    while the concrete type (and ``.kind``) tells the keyword apart.  Note this
+    *low-level* layer keeps the C++ keyword distinction; abstractness
+    (class / abstract-class / interface) is the *high-level* entity-graph axis
+    (:class:`indexer.entity_graph.EntityType`), reachable from an entity node via
+    ``EntityNode.as_model()``."""
+
+
+class Struct(Class):
+    """A C++ ``struct`` record (a :class:`Class` whose ``.kind`` is ``struct``)."""
+
+
+class Union(Class):
+    """A C++ ``union`` record (a :class:`Class` whose ``.kind`` is ``union``)."""
 
 
 class Field(Entity):
@@ -1682,8 +1911,8 @@ _KIND_TO_CLASS: dict[str, type] = {
     "constructor": Constructor,
     "destructor": Destructor,
     "class": Class,
-    "struct": Class,
-    "union": Class,
+    "struct": Struct,
+    "union": Union,
     "class-template": ClassTemplate,
     "function-template": FunctionTemplate,
     "member": Field,
@@ -1780,3 +2009,240 @@ def _base_type_name(spelling: str) -> str:
     s = s.replace("*", " ").replace("&", " ")
     parts = s.split()
     return parts[-1] if parts else ""
+
+
+# --------------------------------------------------------------------------- #
+# Typed-selector support: class-kind, signature parsing, type/name matching
+# --------------------------------------------------------------------------- #
+
+
+def _record_class_kind(conn, sym_id: int) -> ClassKind:
+    """Classify a record CONCRETE / ABSTRACT / INTERFACE by its OWN members.
+
+    Mirrors ``entity_rollup._is_interface`` / ``entity_graph._class_kind``
+    exactly: method kind=21, field kind=6, ``is_pure``; destructors (kind=25)
+    are excluded by the ``kind=21`` filter. A record with no own pure-virtual
+    method is CONCRETE; with a pure method it is an INTERFACE when it has no
+    non-pure method and no data field, else ABSTRACT."""
+    usr_sub = "(SELECT usr FROM symbol WHERE id = ?)"
+    pure = conn.execute(
+        f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
+        "AND kind = 21 AND is_pure = 1",
+        (sym_id,),
+    ).fetchone()[0]
+    if not pure:
+        return ClassKind.CONCRETE
+    non_pure = conn.execute(
+        f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
+        "AND kind = 21 AND is_pure = 0",
+        (sym_id,),
+    ).fetchone()[0]
+    fields = conn.execute(
+        f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} AND kind = 6",
+        (sym_id,),
+    ).fetchone()[0]
+    return (
+        ClassKind.INTERFACE
+        if non_pure == 0 and fields == 0
+        else ClassKind.ABSTRACT
+    )
+
+
+_WS_RE = re.compile(r"\s+")
+#: a namespace / scope qualifier prefix (``std::`` / ``app::`` / ``Foo::``).
+_NS_RE = re.compile(r"\b[A-Za-z_]\w*::")
+
+
+def _type_text(x) -> str:
+    """Coerce a type argument (str / :class:`Type` / :class:`Entity`) to its
+    spelling for normalized comparison."""
+    if isinstance(x, Type):
+        return x.spelling
+    if isinstance(x, Entity):
+        return x.name
+    return str(x)
+
+
+def _norm_type(text: str) -> str:
+    """Normalize a type spelling for tolerant comparison: fold ``std::__1::``
+    to ``std::``, collapse whitespace, and drop spaces adjacent to ``:: * & < >
+    , ( )`` so ``const std::string &`` == ``const std::string&``."""
+    s = text.replace("std::__1::", "std::")
+    s = _WS_RE.sub(" ", s).strip()
+    for p in ("::", "*", "&", "<", ">", ",", "(", ")"):
+        s = s.replace(" " + p, p).replace(p + " ", p)
+    return s
+
+
+def _strip_ns(text: str) -> str:
+    """Drop every namespace / scope qualifier so ``std::string`` -> ``string``,
+    ``app::Box<app::Cache>`` -> ``Box<Cache>``."""
+    return _NS_RE.sub("", text)
+
+
+def _types_match(want, got) -> bool:
+    """Whether two type spellings match after normalization, with a
+    namespace-stripped fallback (``std::string`` matches ``string``)."""
+    nw = _norm_type(_type_text(want))
+    ng = _norm_type(_type_text(got))
+    if nw == ng:
+        return True
+    return _strip_ns(nw) == _strip_ns(ng)
+
+
+def _split_ret_and_name(head: str) -> tuple[Optional[str], str]:
+    """Split a ``RET NAME`` head (the part before a signature's ``(``) into
+    ``(return-type, name)``. The name is the final whitespace-separated token at
+    bracket depth 0 (so a return type carrying ``<...>`` with spaces is kept
+    whole); a head with no top-level space is all name, no return type."""
+    head = head.strip()
+    depth = 0
+    pairs = {"<": ">", "(": ")", "[": "]"}
+    closers = set(pairs.values())
+    split_at: Optional[int] = None
+    for i, ch in enumerate(head):
+        if ch in pairs:
+            depth += 1
+        elif ch in closers:
+            depth -= 1
+        elif ch.isspace() and depth == 0:
+            split_at = i
+    if split_at is None:
+        return None, head
+    return (head[:split_at].strip() or None), head[split_at + 1 :].strip()
+
+
+def _strip_template_args(name: str) -> str:
+    """Drop a trailing ``<...>`` from a (qualified) name: ``app::Box<int>`` ->
+    ``app::Box``."""
+    i = name.find("<")
+    return name[:i] if i != -1 else name
+
+
+def _unqualify(name: str) -> str:
+    """The final ``::`` segment of a name, template args dropped:
+    ``app::Box::get`` -> ``get``."""
+    return _strip_template_args(name).rsplit("::", 1)[-1]
+
+
+def _name_matches(requested: str, entity: "Entity") -> bool:
+    """Whether ``entity`` answers to ``requested`` -- exact qualified name or
+    spelling; a bare (unqualified) request matches the spelling / name tail; a
+    qualified request matches when the entity's name ends with it on a ``::``
+    boundary (``Box::get`` matches ``app::Box::get``)."""
+    req = _strip_template_args(requested)
+    nm = _strip_template_args(entity.name)
+    if nm == req or entity.spelling == req:
+        return True
+    if "::" not in req:
+        return _unqualify(nm) == req
+    return nm.endswith("::" + req)
+
+
+def _is_instance(e: "Entity") -> bool:
+    """Whether ``e`` is a template instantiation / specialization record (a
+    record carrying template arguments, but NOT the primary class template)."""
+    return (
+        isinstance(e, Record)
+        and not isinstance(e, ClassTemplate)
+        and bool(e.template_arguments)
+    )
+
+
+def _ta_text(ta: TemplateArg) -> str:
+    """The type-spelling / value text of a template argument for matching."""
+    return ta.literal or ""
+
+
+def _parse_instance_name(
+    name: Optional[str],
+) -> tuple[Optional[str], Optional[list[str]]]:
+    """Split ``Box<int>`` / ``app::Box<int, char>`` into ``(base, [args])``; a
+    name with no ``<`` yields ``(name, None)`` (match any instantiation)."""
+    if name is None:
+        return None, None
+    i = name.find("<")
+    if i == -1:
+        return name, None
+    base = name[:i].strip()
+    inside = name[i + 1 :]
+    j = inside.rfind(">")
+    if j != -1:
+        inside = inside[:j]
+    args = _split_top_level(inside) if inside.strip() else []
+    return base, args
+
+
+@dataclass(frozen=True)
+class Signature:
+    """A parsed, normalized signature constraint used by the typed selectors.
+
+    ``ret`` is the desired return-type spelling (``None`` = don't constrain the
+    return); ``params`` is the ordered list of desired parameter-type spellings
+    (``None`` = don't constrain the parameter list; ``[]`` = require zero
+    parameters). Types match by *normalized spelling* (see :func:`_types_match`).
+
+    Three constructors mirror the selector calling conventions:
+
+      * :meth:`from_parts`      -- ``Signature.from_parts(ret="int", params=["int"])``
+      * :meth:`parse_full`      -- ``Signature.parse_full("int app::f(int)")``
+        (also returns the qualified name to look up)
+      * :meth:`parse_ret_params`-- ``Signature.parse_ret_params("int(std::string)")``
+    """
+
+    ret: Optional[str] = None
+    params: Optional[list[str]] = None
+
+    @classmethod
+    def from_parts(cls, ret=None, params=None) -> "Signature":
+        """Build from an optional return type and optional parameter-type list
+        (each a str / :class:`Type` / :class:`Entity`)."""
+        return cls(
+            ret=_type_text(ret) if ret is not None else None,
+            params=[_type_text(p) for p in params] if params is not None else None,
+        )
+
+    @classmethod
+    def parse_ret_params(cls, sig: str) -> "Signature":
+        """Parse a ``ret(param, ...)`` string (form 3), e.g.
+        ``"int(std::string)"``.  An empty return (``"(int)"``) leaves the return
+        unconstrained.  Raises ``ValueError`` on a string with no ``(...)``."""
+        ret, params = _parse_signature(sig)
+        if params is None:
+            raise ValueError(
+                f"unparseable signature {sig!r}; expected 'ret(param, ...)'"
+            )
+        return cls(ret=ret or None, params=params)
+
+    @classmethod
+    def parse_full(cls, sig: str) -> "tuple[Signature, str]":
+        """Parse a full ``ret name(param, ...)`` string (form 2), e.g.
+        ``"int app::func(int, std::string)"``, returning the ``Signature`` and
+        the embedded qualified name.  Raises ``ValueError`` when there is no
+        ``(...)`` or no function name."""
+        head, params = _parse_signature(sig)
+        if params is None:
+            raise ValueError(
+                f"unparseable signature {sig!r}; expected 'ret name(param, ...)'"
+            )
+        ret, name = _split_ret_and_name(head)
+        if not name:
+            raise ValueError(f"signature {sig!r} has no function name")
+        return cls(ret=ret, params=params), name
+
+    def matches(self, entity: "Callable") -> bool:
+        """Whether ``entity``'s return type and ordered parameter types satisfy
+        this constraint (an unconstrained dimension always passes)."""
+        if self.ret is not None:
+            rt = entity.return_type
+            got = rt.spelling if rt is not None else ""
+            if not _types_match(self.ret, got):
+                return False
+        if self.params is not None:
+            args = entity.arguments
+            if len(args) != len(self.params):
+                return False
+            for want, got_t in zip(self.params, args):
+                if not _types_match(want, got_t.spelling):
+                    return False
+        return True

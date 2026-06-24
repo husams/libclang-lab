@@ -278,7 +278,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_edge_identity ON entity_edge(
 CREATE INDEX IF NOT EXISTS idx_entity_edge_src  ON entity_edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_entity_edge_dst  ON entity_edge(dst_id, kind);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '21');
+-- ---- v22: entity-node type (Layer-1 design-entity classification) -----------
+-- The *type of an entity node* in the UML/abstraction graph, materialised at
+-- `cidx resolve` alongside entity_edge. Mirrors storage.py byte-identically.
+CREATE TABLE IF NOT EXISTS entity_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO entity_kind (id, name) VALUES
+  (0,'other'),
+  (1,'class'), (2,'abstract_class'), (3,'interface'),
+  (4,'union'), (5,'enum'),
+  (6,'class_template'), (7,'abstract_class_template'), (8,'interface_template');
+
+CREATE TABLE IF NOT EXISTS entity_node (
+    id   INTEGER PRIMARY KEY REFERENCES symbol(id) ON DELETE CASCADE,
+    kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
+);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '22');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -606,11 +624,24 @@ void Transaction::rollback() {
 // -- Storage lifecycle
 // ---------------------------------------------------------
 
+// Defined below (materialise pass); forward-declared so the constructor can run
+// the v21->v22 entity_node backfill right after the schema is created.
+static void cpp_materialise_entity_nodes(cidx::SqliteDb &db);
+
 Storage::Storage(const std::string &path) : db_(prepare_db_path(path)) {
   db_.exec("PRAGMA foreign_keys = ON");
   migrate(); // BEFORE the schema script: its indexes need migrated columns
              // (G19)
   db_.exec(kSchema);
+  // v21 -> v22 one-time backfill: entity_node is a pure-DB classification of
+  // existing symbols (no re-parse), so an upgraded index gets its design types
+  // filled in immediately on open -- no re-index/resolve. (entity_node did not
+  // exist during migrate(); it does now, after kSchema.) Mirrors storage.py.
+  if (needs_entity_node_backfill_) {
+    auto txn = transaction();
+    cpp_materialise_entity_nodes(db_);
+    txn.commit();
+  }
 }
 
 void Storage::migrate() {
@@ -879,6 +910,14 @@ void Storage::migrate() {
           "    COALESCE(via_member_id, -1), COALESCE(create_form, -1))");
       changed = true;
     }
+  }
+  // v21 -> v22: entity_node + entity_kind tables (the entity's design type).
+  // The table is created by the schema script (run after migrate); the
+  // constructor backfills it from existing symbols right after -- pure-DB, no
+  // re-index/resolve. Mirrors storage.py.
+  if (!has_table("entity_node")) {
+    needs_entity_node_backfill_ = true;
+    changed = true;
   }
   if (changed) {
     auto st =
@@ -2978,6 +3017,69 @@ static void cpp_materialise_befriends(cidx::SqliteDb &db) {
   }
 }
 
+// Phase 7: entity_node(id, kind) -- the materialized design type of every
+// entity symbol. Mirrors entity_rollup._materialise_entity_nodes byte-identically.
+// Abstractness (own pure-virtual methods + own data fields) decides
+// class/abstract_class/interface (and the same split for class templates);
+// union/enum keep their own type. The C++ keyword (class vs struct) is NOT
+// distinguished here -- that lives at the low-level symbol layer.
+static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
+  // Is sym_id a pure Interface? (identical to cpp_materialise_inheritance)
+  const auto is_interface = [&](int64_t sym_id) -> bool {
+    auto st1 = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 21 AND is_pure = 0");
+    st1.bind(1, sym_id);
+    if (st1.step() && st1.col_int64(0) > 0) return false;
+    auto st2 = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 6");
+    st2.bind(1, sym_id);
+    if (st2.step() && st2.col_int64(0) > 0) return false;
+    auto st3 = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 21 AND is_pure = 1");
+    st3.bind(1, sym_id);
+    return st3.step() && st3.col_int64(0) > 0;
+  };
+  // Owns >=1 pure-virtual method?
+  const auto has_pure = [&](int64_t sym_id) -> bool {
+    auto st = db.prepare(
+        "SELECT COUNT(*) FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
+        "  AND kind = 21 AND is_pure = 1");
+    st.bind(1, sym_id);
+    return st.step() && st.col_int64(0) > 0;
+  };
+  // entity_kind ids: class=1 abstract_class=2 interface=3 union=4 enum=5
+  // class_template=6 abstract_class_template=7 interface_template=8.
+  const auto classify = [&](int64_t sym_id, int64_t sym_kind) -> int64_t {
+    if (sym_kind == 5) return 5;  // enum
+    if (sym_kind == 3) return 4;  // union
+    bool is_template = (sym_kind == 31);
+    if (is_interface(sym_id)) return is_template ? 8 : 3;
+    if (has_pure(sym_id)) return is_template ? 7 : 2;
+    return is_template ? 6 : 1;
+  };
+
+  db.exec("DELETE FROM entity_node");
+  std::vector<std::pair<int64_t, int64_t>> rows;  // (id, kind)
+  {
+    auto st = db.prepare("SELECT id, kind FROM symbol WHERE kind IN (2,3,4,5,31)");
+    while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  }
+  for (const auto &[sym_id, sym_kind] : rows) {
+    auto ins = db.prepare(
+        "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)");
+    ins.bind(1, sym_id);
+    ins.bind(2, classify(sym_id, sym_kind));
+    ins.step_done();
+  }
+}
+
 void Storage::materialise_entity_edges() {
   // Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
   // rebuild transaction so a failure in any phase rolls back to the previous
@@ -2993,6 +3095,7 @@ void Storage::materialise_entity_edges() {
     cpp_materialise_creates_destroys(db_);
     cpp_materialise_uses(db_);
     cpp_materialise_befriends(db_);
+    cpp_materialise_entity_nodes(db_);
     txn.commit();
   }
 }

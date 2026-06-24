@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 21;
+constexpr int kSchemaVersion = 22;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -401,6 +401,9 @@ private:
 
   SqliteDb db_;
   bool in_txn_ = false;
+  // Set by migrate() on the v21->v22 transition; consumed by the constructor to
+  // backfill entity_node from existing symbols (pure-DB, no re-index/resolve).
+  bool needs_entity_node_backfill_ = false;
 };
 
 } // namespace cidx

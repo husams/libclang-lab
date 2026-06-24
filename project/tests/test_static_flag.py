@@ -104,8 +104,9 @@ def test_free_functions_are_not_static(db_path):
 def test_model_layer_exposes_is_static(db_path):
     with GraphQuery(db_path) as g:
         cb = CodeBase(g)
-        widget = cb.klass("Widget")
-        assert widget is not None
+        hits = cb.record("Widget")  # Widget is a struct -> record(), not klass()
+        assert len(hits) == 1
+        widget = hits[0]
         methods = {m.spelling: m for m in widget.methods}
         assert isinstance(methods["make"], Method)
         assert methods["make"].is_static is True

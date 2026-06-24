@@ -12,7 +12,7 @@ because PR2 has not been implemented in this worktree.  Do NOT xfail or skip the
 flag failures as blockers so the developer can act on each one.
 
 Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
-  schema-1      SCHEMA_VERSION == 21
+  schema-1      SCHEMA_VERSION == 22
   schema-2      entity_edge table present in _SCHEMA
   schema-3      entity_edge_kind seed has exactly 11 rows (ids 1-11)
   schema-4      entity_edge columns: id,src_id,dst_id,kind,count,via_member_id,
@@ -21,9 +21,9 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.33.0"  (entity_graph reader API)
-  version-2     C++ kVersion == "0.33.0"
-  version-3     C++ kSchemaVersion == 21
+  version-1     Python VERSION == "0.38.0"  (model-layer typed query selectors)
+  version-2     C++ kVersion == "0.38.0"
+  version-3     C++ kSchemaVersion == 22
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
   parity-1      parity_check.sh includes at least one entity_edge CLI command
@@ -87,11 +87,11 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_21():
-    """SCHEMA_VERSION must be 21 after the v20→v21 NULL-safe identity index."""
+def test_schema_version_is_22():
+    """SCHEMA_VERSION must be 22 after the v20→v21 NULL-safe identity index."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 21, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 21. "
+    assert storage.SCHEMA_VERSION == 22, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 22. "
         "storage.py:35 SCHEMA_VERSION must be bumped to 21 (entity_edge identity index)."
     )
 
@@ -295,38 +295,38 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0300():
-    """Python VERSION must be 0.33.0 (entity_graph reader API added)."""
+def test_python_version_is_0380():
+    """Python VERSION must be 0.38.0 (model-layer typed query selectors)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.33.0", (
-        f"Python VERSION is '{version}'; expected '0.33.0'. "
-        "Bump VERSION to 0.33.0 in cli.py (entity_graph reader API)."
+    assert version == "0.38.0", (
+        f"Python VERSION is '{version}'; expected '0.38.0'. "
+        "Bump VERSION to 0.38.0 in cli.py (model-layer typed query selectors)."
     )
 
 
-def test_cpp_version_is_0300():
-    """C++ kVersion must be 0.33.0 (entity_graph reader API added)."""
+def test_cpp_version_is_0380():
+    """C++ kVersion must be 0.38.0 (model-layer typed query selectors)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.33.0", (
-        f"C++ kVersion is '{version}'; expected '0.33.0'. "
-        "Bump kVersion to 0.33.0 in args.hpp (entity_graph reader API)."
+    assert version == "0.38.0", (
+        f"C++ kVersion is '{version}'; expected '0.38.0'. "
+        "Bump kVersion to 0.38.0 in args.hpp (model-layer typed query selectors)."
     )
 
 
-def test_cpp_schema_version_is_21():
-    """C++ kSchemaVersion must be 21 after the v20->v21 NULL-safe identity index."""
+def test_cpp_schema_version_is_22():
+    """C++ kSchemaVersion must be 22 after the v20->v21 NULL-safe identity index."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 21, (
-        f"C++ kSchemaVersion is {version}; expected 21. "
+    assert version == 22, (
+        f"C++ kSchemaVersion is {version}; expected 22. "
         "Bump kSchemaVersion 20 -> 21 in storage.hpp (entity_edge identity index)."
     )
 
