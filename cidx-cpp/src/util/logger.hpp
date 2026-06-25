@@ -55,4 +55,10 @@ private:
   int warning_count_ = 0;
 };
 
+// Progress heartbeat -- gated OFF by default (CIDX_PROGRESS unset/empty/"0") so
+// it never perturbs the parity transcript gate (which diffs stderr) or any
+// output-asserting test. Set CIDX_PROGRESS=1 to watch long migrate/resolve
+// passes emit "[cidx] ..." lines to stderr.  Mirrors storage.progress (Python).
+void progress(const std::string &msg);
+
 } // namespace cidx

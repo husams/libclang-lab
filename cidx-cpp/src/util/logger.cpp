@@ -1,6 +1,8 @@
 #include "util/logger.hpp"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 namespace cidx {
@@ -82,6 +84,15 @@ void Logger::log(LogLevel level, const std::string &name,
   if (static_cast<int>(level) >= static_cast<int>(LogLevel::kWarning)) {
     std::fputs(record.c_str(), stderr);
   }
+}
+
+void progress(const std::string &msg) {
+  const char *v = std::getenv("CIDX_PROGRESS"); // NOLINT(concurrency-mt-unsafe)
+  if (v == nullptr || v[0] == '\0' || std::strcmp(v, "0") == 0) {
+    return; // gated OFF by default
+  }
+  std::fputs(("[cidx] " + msg + "\n").c_str(), stderr);
+  std::fflush(stderr);
 }
 
 } // namespace cidx
