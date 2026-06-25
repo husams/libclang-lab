@@ -55,10 +55,11 @@ private:
   int warning_count_ = 0;
 };
 
-// Progress heartbeat -- gated OFF by default (CIDX_PROGRESS unset/empty/"0") so
-// it never perturbs the parity transcript gate (which diffs stderr) or any
-// output-asserting test. Set CIDX_PROGRESS=1 to watch long migrate/resolve
-// passes emit "[cidx] ..." lines to stderr.  Mirrors storage.progress (Python).
+// Progress heartbeat -- ON by default; "[cidx] ..." lines to stderr show
+// movement during long migrate/resolve passes. Silenced only by an explicit
+// CIDX_PROGRESS=0/false/off/no. Python and C++ emit byte-identical progress, so
+// the parity transcript gate (which diffs stderr) stays green. Mirrors
+// storage.progress (Python).
 void progress(const std::string &msg);
 
 } // namespace cidx
