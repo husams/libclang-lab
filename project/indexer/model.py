@@ -440,19 +440,35 @@ class CodeBase:
     # ``*`` / ``&`` tolerant, ``std::__1::`` folded, namespace-stripped fallback).
 
     def _lookup(self, name: str, limit: int = 100) -> "list[Entity]":
-        """Candidate entities for a (possibly qualified) ``name`` -- fuzzy-found
-        by the name AND by its unqualified tail, then narrowed to those whose
-        name / spelling actually matches ``name`` (qualified vs. spelling
-        leniently). De-duplicated, order-stable."""
-        seen: dict[int, Entity] = {}
-        queries = [name]
+        """Candidate entities for a (possibly qualified) ``name`` -- narrowed to
+        those whose name / spelling actually matches ``name`` (qualified vs.
+        spelling leniently). De-duplicated, order-stable.
+
+        Fast path: an INDEX-backed exact lookup on qual_name / spelling
+        (``by_qual_or_spelling``) -- on a multi-million-symbol index the old
+        ``self.find`` fuzzy ``LIKE '%..%'`` is a full table scan, run twice
+        (name + tail). When the exact path yields matches we return them; only a
+        partial / suffix-qualified name (e.g. ``Box::get`` for ``app::Box::get``)
+        that the index cannot answer falls back to the fuzzy scan."""
         tail = _unqualify(name)
+
+        def _narrow(syms) -> "list[Entity]":
+            seen: dict[int, Entity] = {}
+            for e in self._wrap_all(syms):
+                seen.setdefault(e.id, e)
+            return [e for e in seen.values() if _name_matches(name, e)]
+
+        exact = _narrow(self.graph.by_qual_or_spelling(name, tail, limit=limit))
+        if exact:
+            return exact
+        # Fallback: fuzzy candidate generation (partial / suffix names).
+        queries = [name]
         if tail and tail != name:
             queries.append(tail)
+        fuzzy = []
         for q in queries:
-            for e in self.find(q, limit=limit):
-                seen.setdefault(e.id, e)
-        return [e for e in seen.values() if _name_matches(name, e)]
+            fuzzy.extend(self.graph.find(q, limit=limit))
+        return _narrow(fuzzy)
 
     def _make_signature(
         self, name: str, sig: Optional[str], ret, params
