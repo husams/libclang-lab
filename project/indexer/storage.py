@@ -35,15 +35,19 @@ from indexer import pathx as _pathx
 
 SCHEMA_VERSION = 22
 
-# Progress heartbeat -- gated OFF by default so it never perturbs the parity
-# transcript gate (parity_check.sh diffs stderr) or any output-asserting test.
-# Set CIDX_PROGRESS=1 (any non-empty value other than "0") to watch long
-# migrate/resolve passes on a large corpus emit "[cidx] ..." lines to stderr.
-_PROGRESS_ON = (os.environ.get("CIDX_PROGRESS") or "") not in ("", "0")
+# Progress heartbeat -- ON by default so long migrate/resolve passes always
+# show movement on the terminal. Written to stderr (stdout stays clean for
+# piping the actual result). Set CIDX_PROGRESS=0 (or false/off/no) to silence
+# for scripting. Python and C++ emit byte-identical progress, so the parity
+# transcript gate (which diffs stderr) stays green even with it on.
+_PROGRESS_OFF_VALUES = {"0", "false", "off", "no"}
+_PROGRESS_ON = (
+    (os.environ.get("CIDX_PROGRESS") or "").strip().lower() not in _PROGRESS_OFF_VALUES
+)
 
 
 def progress(msg: str) -> None:
-    """Write a heartbeat line to stderr when CIDX_PROGRESS is enabled."""
+    """Write a heartbeat line to stderr (on unless CIDX_PROGRESS is 0/off/no)."""
     if _PROGRESS_ON:
         print(f"[cidx] {msg}", file=sys.stderr, flush=True)
 
