@@ -1102,12 +1102,30 @@ class EntityGraph:
             if node is not None:
                 yield node
 
+    def _in_graph(self, sym_id: int) -> bool:
+        """Whether a symbol participates in the design graph: it has a
+        materialized ``entity_node`` row OR appears as an ``entity_edge``
+        endpoint. Exactly the membership the ``entities()`` union expresses, but
+        evaluated as three indexed point lookups (entity_node PK,
+        idx_entity_edge_src/dst) instead of materializing every entity."""
+        row = self._c.execute(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM entity_node WHERE id = :i) "
+            "   OR EXISTS (SELECT 1 FROM entity_edge WHERE src_id = :i) "
+            "   OR EXISTS (SELECT 1 FROM entity_edge WHERE dst_id = :i)",
+            {"i": sym_id},
+        ).fetchone()
+        return row is not None
+
     def find(self, pattern: str, limit: int = 50) -> list[EntityNode]:
-        """Fuzzy qualified-name lookup, filtered to entities in the graph."""
-        in_graph = {n.id for n in self.entities()}
+        """Fuzzy qualified-name lookup, filtered to entities in the graph.
+
+        Checks graph membership per candidate (at most ``limit`` indexed point
+        lookups) instead of materializing the whole entity set first -- the old
+        ``{n.id for n in self.entities()}`` walked all 270k+ entities on every
+        call. Same result set + order (``self._q.find`` order is preserved)."""
         out: list[EntityNode] = []
         for sym in self._q.find(pattern, limit=limit):
-            if sym.id in in_graph:
+            if self._in_graph(sym.id):
                 node = self.entity(sym)
                 if node is not None:
                     out.append(node)
@@ -1258,8 +1276,17 @@ class EntityGraph:
             ).fetchall()
         }
         total = self._c.execute("SELECT COUNT(*) FROM entity_edge").fetchone()[0]
+        # Count distinct entity ids in SQL instead of materializing every node
+        # (the old `sum(1 for _ in self.entities())` ran a get() per entity).
+        n_entities = self._c.execute(
+            "SELECT COUNT(*) FROM ("
+            "  SELECT id FROM entity_node "
+            "  UNION SELECT src_id AS id FROM entity_edge "
+            "  UNION SELECT dst_id AS id FROM entity_edge"
+            ")"
+        ).fetchone()[0]
         return {
-            "entities": sum(1 for _ in self.entities()),
+            "entities": n_entities,
             "edges": total,
             "by_kind": per_kind,
         }

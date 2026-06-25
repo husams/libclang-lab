@@ -761,6 +761,28 @@ class GraphQuery:
         sql += " ORDER BY s.usr"
         return [self._sym(r) for r in self._c.execute(sql, args)]
 
+    def by_qual_or_spelling(self, *names: str, limit: int = 200) -> list[Sym]:
+        """Exact, INDEX-backed lookup over qual_name and spelling for any of
+        ``names`` -- uses idx_symbol_qual / idx_symbol_spelling (an OR of two
+        equality IN-clauses), so it never scans the full symbol table the way
+        the fuzzy LIKE ``find`` must. Shortest-name-first, same ordering as
+        ``find`` so callers can swap one for the other. Empty / falsy names are
+        dropped; returns [] when none remain."""
+        uniq = list(dict.fromkeys(n for n in names if n))
+        if not uniq:
+            return []
+        ph = ",".join("?" * len(uniq))
+        sql = (
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            f"WHERE s.qual_name IN ({ph}) OR s.spelling IN ({ph}) "
+            "ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
+            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        )
+        return [
+            self._sym(r)
+            for r in self._c.execute(sql, [*uniq, *uniq, limit])
+        ]
+
     def symbols_in_file(self, path_substr: str, limit: int = 500) -> list[Sym]:
         """Symbols whose definition file path contains `path_substr`. Useful to
         enumerate a file's API without opening it."""
