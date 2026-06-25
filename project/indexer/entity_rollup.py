@@ -55,6 +55,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from indexer.storage import progress
+
 if TYPE_CHECKING:
     from indexer.storage import Storage
 
@@ -111,6 +113,111 @@ _ACCESS_INT = {"public": 0, "protected": 1, "private": 2}
 
 
 # ---------------------------------------------------------------------------
+# Per-pass precomputed lookups (perf: O(n^2) -> O(n))
+# ---------------------------------------------------------------------------
+#
+# The collapse + interface/abstractness helpers used to issue a fresh SQL query
+# (often several) PER edge row, across every phase -- on a large corpus
+# (hundreds of thousands of symbols) that is the dominant cost of `resolve` and
+# made the pass run for a very long time with no DB writes (read-heavy, so the
+# index.db mtime / journal never moved -- looking frozen).
+#
+# _RollupState precomputes, ONCE per materialise pass, the same answers from
+# tables that are READ-ONLY for the duration of the pass (edge, symbol), then
+# the hot helpers become in-memory map/set lookups.  The results are
+# byte-identical to the old per-row queries (the parity gate + acceptance suite
+# verify this), so this is a pure speedup, not a behaviour change.
+
+
+class _RollupState:
+    """Precomputed collapse next-hop map + interface owner-sets for one pass."""
+
+    def __init__(self, conn) -> None:
+        # collapse next-hop: the FIRST (kind, dst_id) per src among kind 4/5
+        # edges == the old `WHERE src_id=? AND kind IN (4,5) ORDER BY kind,
+        # dst_id LIMIT 1`, evaluated for every src in a single ordered scan.
+        self.next_hop: dict[int, int] = {}
+        for src, dst in conn.execute(
+            "SELECT src_id, dst_id FROM edge WHERE kind IN (4, 5) "
+            "ORDER BY src_id, kind, dst_id"
+        ):
+            if src not in self.next_hop:
+                self.next_hop[src] = dst
+        self._collapse_cache: dict[int, int] = {}
+        # Interface / abstractness owner-sets keyed by parent_usr -- the three
+        # COUNT(*) probes the old _is_interface ran PER call, hoisted to three
+        # GROUP-BY scans: a record is an interface iff it owns >=1 pure method,
+        # NO non-pure method (destructors kind=25 are not kind=21, so already
+        # excluded), and NO data field (kind=6).
+        self.non_pure_method_owners: set[str] = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT parent_usr FROM symbol "
+                "WHERE kind = 21 AND is_pure = 0 AND parent_usr IS NOT NULL"
+            )
+        }
+        self.field_owners: set[str] = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT parent_usr FROM symbol "
+                "WHERE kind = 6 AND parent_usr IS NOT NULL"
+            )
+        }
+        self.pure_method_owners: set[str] = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT parent_usr FROM symbol "
+                "WHERE kind = 21 AND is_pure = 1 AND parent_usr IS NOT NULL"
+            )
+        }
+        # usr by id, for the only ids ever classified (entity-kind symbols).
+        self.usr_by_id: dict[int, str] = {
+            r[0]: r[1] for r in conn.execute(
+                "SELECT id, usr FROM symbol WHERE kind IN (2, 3, 4, 5, 31)"
+            )
+        }
+
+    def collapse(self, sym_id: int) -> int:
+        cache = self._collapse_cache
+        hit = cache.get(sym_id)
+        if hit is not None:
+            return hit
+        seen: set[int] = set()
+        cur = sym_id
+        while cur not in seen:
+            seen.add(cur)
+            nxt = self.next_hop.get(cur)
+            if nxt is None:
+                break
+            cur = nxt
+        cache[sym_id] = cur
+        return cur
+
+    def is_interface(self, sym_id: int) -> bool:
+        usr = self.usr_by_id.get(sym_id)
+        if usr is None:
+            return False
+        if usr in self.non_pure_method_owners:
+            return False
+        if usr in self.field_owners:
+            return False
+        return usr in self.pure_method_owners
+
+    def has_pure(self, sym_id: int) -> bool:
+        usr = self.usr_by_id.get(sym_id)
+        return usr is not None and usr in self.pure_method_owners
+
+
+# Module-global state for the in-progress pass.  Set by materialize_entity_edges
+# (and _materialise_entity_nodes when called standalone for the v21->v22
+# backfill); cleared in the matching finally.  resolve is single-threaded and
+# the helpers only run synchronously within a pass, so a module global is safe.
+_CTX: Optional["_RollupState"] = None
+
+
+def _ctx() -> "_RollupState":
+    assert _CTX is not None, "entity_rollup state used outside a materialise pass"
+    return _CTX
+
+
+# ---------------------------------------------------------------------------
 # Template-instance collapse (ADR-008 decision 6 / OQ-3)
 # ---------------------------------------------------------------------------
 
@@ -125,20 +232,11 @@ def _collapse_to_primary(conn, sym_id: int) -> int:
 
     Returns ``sym_id`` unchanged when it is not an instance/specialization.
     A visited-set guards against any pathological cycle.
+
+    Delegates to the per-pass precomputed next-hop map (see _RollupState);
+    ``conn`` is retained for signature stability but unused.
     """
-    seen: set[int] = set()
-    cur = sym_id
-    while cur not in seen:
-        seen.add(cur)
-        row = conn.execute(
-            "SELECT dst_id FROM edge WHERE src_id = ? AND kind IN (4, 5) "
-            "ORDER BY kind, dst_id LIMIT 1",
-            (cur,),
-        ).fetchone()
-        if row is None:
-            break
-        cur = row[0]
-    return cur
+    return _ctx().collapse(sym_id)
 
 
 # ---------------------------------------------------------------------------
@@ -152,35 +250,11 @@ def _is_interface(db: "Storage", sym_id: int) -> bool:
     fields (member symbols with kind=6/member).
     Destructor (kind=25) is EXCLUDED from the pure-virtual check so a class
     with only `virtual ~T() = default` can still qualify.
+
+    Delegates to the per-pass precomputed owner-sets (see _RollupState); ``db``
+    is retained for signature stability but unused.
     """
-    conn = db._conn
-    # Any non-pure method (excluding destructors)?
-    row = conn.execute(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 "       # method (CXCursor_CXXMethod=21)
-        "  AND is_pure = 0",
-        (sym_id,),
-    ).fetchone()
-    if row and row[0] > 0:
-        return False
-    # Any data members?
-    row = conn.execute(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 6",       # member (CXCursor_FieldDecl=6)
-        (sym_id,),
-    ).fetchone()
-    if row and row[0] > 0:
-        return False
-    # Must have at least one pure method to be a real interface
-    row = conn.execute(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 1",
-        (sym_id,),
-    ).fetchone()
-    return bool(row and row[0] > 0)
+    return _ctx().is_interface(sym_id)
 
 
 def _has_pure_method(db: "Storage", sym_id: int) -> bool:
@@ -188,14 +262,11 @@ def _has_pure_method(db: "Storage", sym_id: int) -> bool:
 
     The abstractness signal: any record with a pure method cannot be
     instantiated. Combined with _is_interface this partitions records into
-    concrete / abstract / interface."""
-    row = db._conn.execute(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 1",
-        (sym_id,),
-    ).fetchone()
-    return bool(row and row[0] > 0)
+    concrete / abstract / interface.
+
+    Delegates to the per-pass precomputed owner-sets (see _RollupState); ``db``
+    is retained for signature stability but unused."""
+    return _ctx().has_pure(sym_id)
 
 
 # entity_kind ids (storage.entity_kind seed) -- the materialized design type.
@@ -239,18 +310,31 @@ def _materialise_entity_nodes(db: "Storage") -> None:
     DELETE + rebuild (idempotent, runs inside the resolve transaction). The
     entity domain = records (class/struct/union), enums, and class templates --
     the same symbol kinds that can be entity_edge endpoints. One row per symbol.
+
+    Usable standalone (the v21->v22 entity_node backfill in Storage.__init__
+    calls this directly), so it sets up the per-pass _RollupState itself when
+    one is not already active (i.e. when NOT called from materialize_entity_edges).
     """
-    conn = db._conn
-    conn.execute("DELETE FROM entity_node")
-    rows = conn.execute(
-        "SELECT id, kind FROM symbol WHERE kind IN (2, 3, 4, 5, 31)"
-    ).fetchall()
-    for sym_id, sym_kind in rows:
-        ek = _entity_kind_id(db, sym_id, sym_kind)
-        conn.execute(
-            "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)",
-            (sym_id, ek),
-        )
+    global _CTX
+    owns_ctx = _CTX is None
+    if owns_ctx:
+        _CTX = _RollupState(db._conn)
+    try:
+        conn = db._conn
+        conn.execute("DELETE FROM entity_node")
+        rows = conn.execute(
+            "SELECT id, kind FROM symbol WHERE kind IN (2, 3, 4, 5, 31)"
+        ).fetchall()
+        progress(f"resolve: phase entity_nodes ({len(rows)} entities)...")
+        for sym_id, sym_kind in rows:
+            ek = _entity_kind_id(db, sym_id, sym_kind)
+            conn.execute(
+                "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)",
+                (sym_id, ek),
+            )
+    finally:
+        if owns_ctx:
+            _CTX = None
 
 
 # ---------------------------------------------------------------------------
@@ -473,17 +557,35 @@ def materialize_entity_edges(db: "Storage") -> None:
     # Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
     # rebuild transaction so a failure in any phase rolls back to the previous
     # rows instead of leaving entity_edge empty (atomic resolve).
-    with db.transaction():
-        db._conn.execute("DELETE FROM entity_edge")
-        _materialise_inheritance(db)
-        _materialise_specializes(db)
-        _materialise_instantiates(db)
-        _materialise_field_relations(db)
-        _materialise_instance_composition(db)
-        _materialise_creates_destroys(db)
-        _materialise_uses(db)
-        _materialise_befriends(db)
-        _materialise_entity_nodes(db)
+    #
+    # _RollupState precomputes the collapse next-hop map + interface owner-sets
+    # ONCE for the whole pass (edge/symbol are read-only here), so every phase's
+    # collapse / interface lookups are in-memory instead of per-row SQL.
+    global _CTX
+    phases = (
+        ("inheritance", _materialise_inheritance),
+        ("specializes", _materialise_specializes),
+        ("instantiates", _materialise_instantiates),
+        ("field_relations", _materialise_field_relations),
+        ("instance_composition", _materialise_instance_composition),
+        ("creates_destroys", _materialise_creates_destroys),
+        ("uses", _materialise_uses),
+        ("befriends", _materialise_befriends),
+        ("entity_nodes", _materialise_entity_nodes),
+    )
+    _CTX = _RollupState(db._conn)
+    try:
+        with db.transaction():
+            db._conn.execute("DELETE FROM entity_edge")
+            for name, fn in phases:
+                progress(f"resolve: phase {name}...")
+                fn(db)
+                n = db._conn.execute(
+                    "SELECT COUNT(*) FROM entity_edge"
+                ).fetchone()[0]
+                progress(f"resolve: phase {name} done ({n} entity edges so far)")
+    finally:
+        _CTX = None
 
 
 # ---------------------------------------------------------------------------

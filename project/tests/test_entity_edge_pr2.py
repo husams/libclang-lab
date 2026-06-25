@@ -98,9 +98,9 @@ def test_schema_version_is_22():
     assert SCHEMA_VERSION == 22, f"Expected 22, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0380():
+def test_product_version_is_0390():
     from indexer import cli
-    assert cli.VERSION == "0.38.0", f"Expected '0.38.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.39.0", f"Expected '0.39.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():

@@ -12,12 +12,16 @@
 #include <exception>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
 #include "util/json_min.hpp"
+#include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx {
@@ -638,9 +642,11 @@ Storage::Storage(const std::string &path) : db_(prepare_db_path(path)) {
   // filled in immediately on open -- no re-index/resolve. (entity_node did not
   // exist during migrate(); it does now, after kSchema.) Mirrors storage.py.
   if (needs_entity_node_backfill_) {
+    cidx::progress("migrate: backfilling entity_node design types...");
     auto txn = transaction();
     cpp_materialise_entity_nodes(db_);
     txn.commit();
+    cidx::progress("migrate: entity_node backfill complete");
   }
 }
 
@@ -737,7 +743,17 @@ void Storage::migrate() {
       c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
     if (kind_type != "INTEGER") {
+      int64_t nrows = 0;
+      {
+        auto cs = db_.prepare("SELECT COUNT(*) FROM symbol");
+        if (cs.step()) {
+          nrows = cs.col_int64(0);
+        }
+      }
+      cidx::progress("migrate: rebuilding symbol table as integer kinds (" +
+                     std::to_string(nrows) + " rows)...");
       migrate_symbol_kind_to_int();
+      cidx::progress("migrate: symbol table rebuilt");
       changed = true;
     }
   }
@@ -2219,51 +2235,154 @@ void Storage::clear_entity_edges() {
 // Mirrors indexer/entity_rollup.py:materialize_entity_edges() byte-identically.
 // ---------------------------------------------------------------------------
 
+// Per-pass precomputed lookups (perf: O(n^2) -> O(n)). The collapse +
+// interface/abstractness helpers used to issue a fresh SQL query (often
+// several) PER edge row across every phase -- on a large corpus that is the
+// dominant cost of `resolve` and made the pass run for a very long time with no
+// DB writes (read-heavy, so index.db mtime / journal never moved -- looking
+// frozen). RollupState precomputes the same answers ONCE per materialise pass
+// from tables that are READ-ONLY for the pass (edge, symbol), then the hot
+// helpers become in-memory map/set lookups. Byte-identical to the old per-row
+// queries (the parity gate + acceptance suite verify), so a pure speedup.
+// Mirrors entity_rollup._RollupState (Python).
+struct RollupState {
+  std::unordered_map<int64_t, int64_t> next_hop;       // src -> first 4/5 dst
+  std::unordered_map<int64_t, int64_t> collapse_cache; // memoised collapse
+  std::unordered_set<std::string> non_pure_method_owners;
+  std::unordered_set<std::string> field_owners;
+  std::unordered_set<std::string> pure_method_owners;
+  std::unordered_map<int64_t, std::string> usr_by_id; // entity-kind ids only
+
+  explicit RollupState(cidx::SqliteDb &db) {
+    // collapse next-hop: FIRST (kind, dst_id) per src among kind 4/5 edges ==
+    // the old `WHERE src_id=? AND kind IN (4,5) ORDER BY kind, dst_id LIMIT 1`
+    // for every src in one ordered scan (emplace keeps the first per key).
+    {
+      auto st = db.prepare("SELECT src_id, dst_id FROM edge WHERE kind IN (4, 5) "
+                           "ORDER BY src_id, kind, dst_id");
+      while (st.step()) {
+        next_hop.emplace(st.col_int64(0), st.col_int64(1));
+      }
+    }
+    // Interface / abstractness owner-sets keyed by parent_usr (the three
+    // COUNT(*) probes the old is_interface ran PER call, hoisted to 3 scans).
+    {
+      auto st = db.prepare("SELECT DISTINCT parent_usr FROM symbol "
+                           "WHERE kind = 21 AND is_pure = 0 AND parent_usr IS NOT NULL");
+      while (st.step()) {
+        non_pure_method_owners.insert(st.col_text(0));
+      }
+    }
+    {
+      auto st = db.prepare("SELECT DISTINCT parent_usr FROM symbol "
+                           "WHERE kind = 6 AND parent_usr IS NOT NULL");
+      while (st.step()) {
+        field_owners.insert(st.col_text(0));
+      }
+    }
+    {
+      auto st = db.prepare("SELECT DISTINCT parent_usr FROM symbol "
+                           "WHERE kind = 21 AND is_pure = 1 AND parent_usr IS NOT NULL");
+      while (st.step()) {
+        pure_method_owners.insert(st.col_text(0));
+      }
+    }
+    {
+      auto st = db.prepare("SELECT id, usr FROM symbol WHERE kind IN (2,3,4,5,31)");
+      while (st.step()) {
+        usr_by_id.emplace(st.col_int64(0), st.col_text(1));
+      }
+    }
+  }
+
+  int64_t collapse(int64_t sym_id) {
+    auto hit = collapse_cache.find(sym_id);
+    if (hit != collapse_cache.end()) {
+      return hit->second;
+    }
+    std::set<int64_t> seen;
+    int64_t cur = sym_id;
+    while (seen.find(cur) == seen.end()) {
+      seen.insert(cur);
+      auto nit = next_hop.find(cur);
+      if (nit == next_hop.end()) {
+        break;
+      }
+      cur = nit->second;
+    }
+    collapse_cache.emplace(sym_id, cur);
+    return cur;
+  }
+
+  bool is_interface(int64_t sym_id) const {
+    auto it = usr_by_id.find(sym_id);
+    if (it == usr_by_id.end()) {
+      return false;
+    }
+    const std::string &usr = it->second;
+    if (non_pure_method_owners.count(usr) != 0) {
+      return false;
+    }
+    if (field_owners.count(usr) != 0) {
+      return false;
+    }
+    return pure_method_owners.count(usr) != 0;
+  }
+
+  bool has_pure(int64_t sym_id) const {
+    auto it = usr_by_id.find(sym_id);
+    return it != usr_by_id.end() && pure_method_owners.count(it->second) != 0;
+  }
+};
+
+// Module-global state for the in-progress pass. Set by materialise_entity_edges
+// (and cpp_materialise_entity_nodes when called standalone for the v21->v22
+// backfill); cleared by the matching CtxGuard destructor. resolve is
+// single-threaded and the helpers only run synchronously within a pass.
+RollupState *g_rollup_ctx = nullptr;
+
+// RAII guard: builds + installs a RollupState only if none is active yet (the
+// outermost caller "owns" it), and uninstalls on scope exit. A nested call
+// (entity_nodes inside materialise_entity_edges) reuses the active state with
+// no rebuild. Mirrors the owns_ctx logic in entity_rollup (Python).
+struct CtxGuard {
+  std::optional<RollupState> st;
+  bool owned;
+  explicit CtxGuard(cidx::SqliteDb &db) : owned(g_rollup_ctx == nullptr) {
+    if (owned) {
+      st.emplace(db);
+      g_rollup_ctx = &*st;
+    }
+  }
+  ~CtxGuard() {
+    if (owned) {
+      g_rollup_ctx = nullptr;
+    }
+  }
+  CtxGuard(const CtxGuard &) = delete;
+  CtxGuard &operator=(const CtxGuard &) = delete;
+  CtxGuard(CtxGuard &&) = delete;
+  CtxGuard &operator=(CtxGuard &&) = delete;
+};
+
 // Template-instance collapse (ADR-008 decision 6 / OQ-3): map a template
 // instance/specialization symbol onto its primary template. Both the Layer-0
 // instantiates(5) and specializes(4) edges point instance -> primary, so we
 // follow an outgoing 4/5 edge until none remains. Returns sym_id unchanged
 // when it is not an instance/specialization. Mirrors entity_rollup._collapse_to_primary.
+// Delegates to the per-pass precomputed next-hop map; `db` is unused (kept for
+// signature stability with the call sites).
 static int64_t cpp_collapse_to_primary(cidx::SqliteDb &db, int64_t sym_id) {
-  std::set<int64_t> seen;
-  int64_t cur = sym_id;
-  while (seen.find(cur) == seen.end()) {
-    seen.insert(cur);
-    auto st = db.prepare(
-        "SELECT dst_id FROM edge WHERE src_id = ? AND kind IN (4, 5) "
-        "ORDER BY kind, dst_id LIMIT 1");
-    st.bind(1, cur);
-    if (!st.step()) break;
-    cur = st.col_int64(0);
-  }
-  return cur;
+  (void)db;
+  return g_rollup_ctx->collapse(sym_id);
 }
 
 // Phase 1: generalizes(1) / implements(2) from inherits(2) edges.
 static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
-  // Is sym_id a pure Interface (all methods pure-virtual, no data fields)?
-  const auto is_interface = [&](int64_t sym_id) -> bool {
-    // Any non-pure method (excluding destructors kind=25)?
-    auto st1 = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 0");
-    st1.bind(1, sym_id);
-    if (st1.step() && st1.col_int64(0) > 0) return false;
-    // Any data members?
-    auto st2 = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 6");
-    st2.bind(1, sym_id);
-    if (st2.step() && st2.col_int64(0) > 0) return false;
-    // Must have at least one pure method
-    auto st3 = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 1");
-    st3.bind(1, sym_id);
-    return st3.step() && st3.col_int64(0) > 0;
+  // Is sym_id a pure Interface? Delegates to the per-pass precomputed
+  // owner-sets (RollupState), identical to the old per-row COUNT(*) probes.
+  const auto is_interface = [](int64_t sym_id) -> bool {
+    return g_rollup_ctx->is_interface(sym_id);
   };
 
   auto st = db.prepare(
@@ -3024,44 +3143,19 @@ static void cpp_materialise_befriends(cidx::SqliteDb &db) {
 // union/enum keep their own type. The C++ keyword (class vs struct) is NOT
 // distinguished here -- that lives at the low-level symbol layer.
 static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
-  // Is sym_id a pure Interface? (identical to cpp_materialise_inheritance)
-  const auto is_interface = [&](int64_t sym_id) -> bool {
-    auto st1 = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 0");
-    st1.bind(1, sym_id);
-    if (st1.step() && st1.col_int64(0) > 0) return false;
-    auto st2 = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 6");
-    st2.bind(1, sym_id);
-    if (st2.step() && st2.col_int64(0) > 0) return false;
-    auto st3 = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 1");
-    st3.bind(1, sym_id);
-    return st3.step() && st3.col_int64(0) > 0;
-  };
-  // Owns >=1 pure-virtual method?
-  const auto has_pure = [&](int64_t sym_id) -> bool {
-    auto st = db.prepare(
-        "SELECT COUNT(*) FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?) "
-        "  AND kind = 21 AND is_pure = 1");
-    st.bind(1, sym_id);
-    return st.step() && st.col_int64(0) > 0;
-  };
+  // Usable standalone (the v21->v22 entity_node backfill in the Storage ctor
+  // calls this directly), so it installs the per-pass RollupState itself when
+  // one is not already active (i.e. when NOT called from materialise_entity_edges).
+  CtxGuard guard(db);
   // entity_kind ids: class=1 abstract_class=2 interface=3 union=4 enum=5
   // class_template=6 abstract_class_template=7 interface_template=8.
-  const auto classify = [&](int64_t sym_id, int64_t sym_kind) -> int64_t {
+  // is_interface / has_pure delegate to the precomputed owner-sets.
+  const auto classify = [](int64_t sym_id, int64_t sym_kind) -> int64_t {
     if (sym_kind == 5) return 5;  // enum
     if (sym_kind == 3) return 4;  // union
     bool is_template = (sym_kind == 31);
-    if (is_interface(sym_id)) return is_template ? 8 : 3;
-    if (has_pure(sym_id)) return is_template ? 7 : 2;
+    if (g_rollup_ctx->is_interface(sym_id)) return is_template ? 8 : 3;
+    if (g_rollup_ctx->has_pure(sym_id)) return is_template ? 7 : 2;
     return is_template ? 6 : 1;
   };
 
@@ -3071,6 +3165,8 @@ static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
     auto st = db.prepare("SELECT id, kind FROM symbol WHERE kind IN (2,3,4,5,31)");
     while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
   }
+  cidx::progress("resolve: phase entity_nodes (" + std::to_string(rows.size()) +
+                 " entities)...");
   for (const auto &[sym_id, sym_kind] : rows) {
     auto ins = db.prepare(
         "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)");
@@ -3084,27 +3180,43 @@ void Storage::materialise_entity_edges() {
   // Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
   // rebuild transaction so a failure in any phase rolls back to the previous
   // rows instead of leaving entity_edge empty (atomic resolve).
+  //
+  // RollupState precomputes the collapse next-hop map + interface owner-sets
+  // ONCE for the whole pass (edge/symbol are read-only here), so every phase's
+  // collapse / interface lookups are in-memory instead of per-row SQL.
+  CtxGuard guard(db_);
   {
     auto txn = transaction();
     db_.exec("DELETE FROM entity_edge");
-    cpp_materialise_inheritance(db_);
-    cpp_materialise_specializes(db_);
-    cpp_materialise_instantiates(db_);
-    cpp_materialise_field_relations(db_);
-    cpp_materialise_instance_composition(db_);
-    cpp_materialise_creates_destroys(db_);
-    cpp_materialise_uses(db_);
-    cpp_materialise_befriends(db_);
-    cpp_materialise_entity_nodes(db_);
+    const auto run = [&](const char *name, void (*fn)(cidx::SqliteDb &)) {
+      cidx::progress(std::string("resolve: phase ") + name + "...");
+      fn(db_);
+      auto c = db_.prepare("SELECT COUNT(*) FROM entity_edge");
+      const int64_t n = c.step() ? c.col_int64(0) : 0;
+      cidx::progress(std::string("resolve: phase ") + name + " done (" +
+                     std::to_string(n) + " entity edges so far)");
+    };
+    run("inheritance", cpp_materialise_inheritance);
+    run("specializes", cpp_materialise_specializes);
+    run("instantiates", cpp_materialise_instantiates);
+    run("field_relations", cpp_materialise_field_relations);
+    run("instance_composition", cpp_materialise_instance_composition);
+    run("creates_destroys", cpp_materialise_creates_destroys);
+    run("uses", cpp_materialise_uses);
+    run("befriends", cpp_materialise_befriends);
+    run("entity_nodes", cpp_materialise_entity_nodes);
     txn.commit();
   }
 }
 
 int Storage::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
+  cidx::progress("resolve: rolling up edge counts...");
   rollup_edge_counts();
   // Materialise Layer-1 entity_edge from the Layer-0 graph.
+  cidx::progress("resolve: materialising entity (Layer-1) edges...");
   materialise_entity_edges();
+  cidx::progress("resolve: entity edges materialised");
   // Count remaining stub symbols: a minted placeholder never backfilled by a
   // real symbol -- resolved=0 with NO location (neither a definition nor a decl
   // site). NOT keyed on spelling -- stubs are now minted NAMED, so the absence
