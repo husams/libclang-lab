@@ -452,6 +452,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_symbol_qual", "idx_symbol_file",
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
+                                         "idx_symbol_spelling_nc",
+                                         "idx_symbol_qual_nc",
                                          "idx_edge_src", "idx_edge_dst",
                                          "idx_call_arg_edge",
                                          "idx_diagnostic_file",

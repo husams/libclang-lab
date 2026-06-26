@@ -721,12 +721,54 @@ class GraphQuery:
     def find(
         self, pattern: str, kind: Optional[str] = None, limit: int = 50
     ) -> list[Sym]:
-        """Fuzzy lookup by qualified name. '::'-separated segments must appear in
-        order: find('conf::set') matches 'RdKafka::ConfImpl::set'. Shortest names
-        first (the closest matches). `kind` filters by symbol.kind.
+        """Lookup by qualified name, fast path first. `kind` filters by
+        symbol.kind; results are shortest-name-first (the closest matches).
 
-        Mirrors storage.search_symbols, but over COALESCE(qual_name, spelling) so
-        C symbols (no qual_name) are still found."""
+        Three tiers, each returning as soon as it finds anything so the common
+        case never touches the slow scan:
+
+          1. **exact** ``qual_name = p OR spelling = p`` -- an indexed point
+             lookup (idx_symbol_qual / idx_symbol_spelling). Most ``find`` calls
+             pass an exact or fully-qualified name and stop here.
+          2. **prefix** ``qual_name LIKE 'p%' OR spelling LIKE 'p%'`` -- a range
+             SEARCH on the NOCASE indexes (idx_symbol_qual_nc / _spelling_nc).
+          3. **fuzzy** ``COALESCE(qual_name, spelling) LIKE '%a%b%'`` -- the
+             original '::'-segmented infix match (find('conf::set') matches
+             'RdKafka::ConfImpl::set'), over COALESCE so C symbols with no
+             qual_name are still found. This is a FULL TABLE SCAN, reached only
+             when neither exact nor prefix matched (or the pattern is empty).
+
+        Mirrors storage.search_symbols (the fuzzy tier is identical)."""
+        order = (
+            " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
+            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        )
+        kind_id = SYMBOL_KIND_IDS.get(kind, -1) if kind else None
+
+        def run(where: str, params: tuple) -> list[Sym]:
+            sql = f"SELECT {_SYM_COLS} FROM symbol s WHERE {where}"
+            args: list = list(params)
+            if kind_id is not None:
+                sql += " AND s.kind = ?"
+                args.append(kind_id)
+            sql += order
+            args.append(limit)
+            return [self._sym(r) for r in self._c.execute(sql, args)]
+
+        if pattern:
+            # 1) exact -- case-sensitive equality, indexed point lookup.
+            hits = run("(s.qual_name = ? OR s.spelling = ?)", (pattern, pattern))
+            if hits:
+                return hits
+            # 2) prefix -- NOCASE range SEARCH (case-insensitive, like the scan).
+            pref = pattern.replace("%", r"\%").replace("_", r"\_") + "%"
+            hits = run(
+                r"(s.qual_name LIKE ? ESCAPE '\' OR s.spelling LIKE ? ESCAPE '\')",
+                (pref, pref),
+            )
+            if hits:
+                return hits
+        # 3) fuzzy fallback -- the original infix scan (also handles '' = all).
         like = (
             "%"
             + "%".join(
@@ -736,20 +778,7 @@ class GraphQuery:
             )
             + "%"
         )
-        sql = (
-            f"SELECT {_SYM_COLS} FROM symbol s "
-            r"WHERE COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'"
-        )
-        args: list = [like]
-        if kind:
-            sql += " AND s.kind = ?"
-            args.append(SYMBOL_KIND_IDS.get(kind, -1))
-        sql += (
-            " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
-            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
-        )
-        args.append(limit)
-        return [self._sym(r) for r in self._c.execute(sql, args)]
+        return run(r"COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\'", (like,))
 
     def by_name(self, spelling: str, kind: Optional[str] = None) -> list[Sym]:
         """Exact-spelling lookup (overloads/statics yield several rows)."""
