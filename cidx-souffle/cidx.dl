@@ -5,6 +5,6 @@
 // Run from the directory holding graph.db:  souffle /path/to/cidx.dl
 #include "cidx_base.dl"
 
-.output subtype(IO=sqlite, dbname="graph.db")
-.output edep(IO=sqlite, dbname="graph.db")
-.output reach(IO=sqlite, dbname="graph.db")
+.output subtype(IO=sqlite, dbname="index.db")
+.output edep(IO=sqlite, dbname="index.db")
+.output reach(IO=sqlite, dbname="index.db")
