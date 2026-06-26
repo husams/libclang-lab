@@ -16,37 +16,37 @@
 // edge.kind: 1 calls 2 inherits 3 contains 4 specializes 5 instantiates
 //            6 overrides 7 uses 8 field_of 9 method_of 17 friend
 .decl calls(caller:Sym, callee:Sym)
-.input calls(IO=sqlite, dbname="graph.db")
+.input calls(IO=sqlite, dbname="index.db")
 .decl inherits(derived:Sym, base:Sym)
-.input inherits(IO=sqlite, dbname="graph.db")
+.input inherits(IO=sqlite, dbname="index.db")
 .decl overrides(method:Sym, base_method:Sym)
-.input overrides(IO=sqlite, dbname="graph.db")
+.input overrides(IO=sqlite, dbname="index.db")
 .decl uses(src:Sym, dst:Sym)
-.input uses(IO=sqlite, dbname="graph.db")
+.input uses(IO=sqlite, dbname="index.db")
 .decl field_of(field:Sym, record:Sym)
-.input field_of(IO=sqlite, dbname="graph.db")
+.input field_of(IO=sqlite, dbname="index.db")
 .decl method_of(method:Sym, cls:Sym)
-.input method_of(IO=sqlite, dbname="graph.db")
+.input method_of(IO=sqlite, dbname="index.db")
 
 // ============================================================ entity edges (Layer 1)
 // entity_edge.kind: 1 generalizes 2 implements 3 specializes 4 composes 5 aggregates
 //                   6 associates 7 creates 8 uses 9 destroys 10 befriends 11 instantiates
 .decl e_generalizes(sub:Sym, super:Sym)
-.input e_generalizes(IO=sqlite, dbname="graph.db")
+.input e_generalizes(IO=sqlite, dbname="index.db")
 .decl e_implements(impl:Sym, iface:Sym)
-.input e_implements(IO=sqlite, dbname="graph.db")
+.input e_implements(IO=sqlite, dbname="index.db")
 .decl e_composes(owner:Sym, part:Sym)
-.input e_composes(IO=sqlite, dbname="graph.db")
+.input e_composes(IO=sqlite, dbname="index.db")
 .decl e_aggregates(owner:Sym, part:Sym)
-.input e_aggregates(IO=sqlite, dbname="graph.db")
+.input e_aggregates(IO=sqlite, dbname="index.db")
 .decl e_associates(src:Sym, dst:Sym)
-.input e_associates(IO=sqlite, dbname="graph.db")
+.input e_associates(IO=sqlite, dbname="index.db")
 .decl e_creates(src:Sym, dst:Sym)
-.input e_creates(IO=sqlite, dbname="graph.db")
+.input e_creates(IO=sqlite, dbname="index.db")
 .decl e_uses(src:Sym, dst:Sym)
-.input e_uses(IO=sqlite, dbname="graph.db")
+.input e_uses(IO=sqlite, dbname="index.db")
 .decl e_destroys(src:Sym, dst:Sym)
-.input e_destroys(IO=sqlite, dbname="graph.db")
+.input e_destroys(IO=sqlite, dbname="index.db")
 
 // ============================================================ common derived predicates
 // Reusable building blocks. Small/safe ones are computed eagerly; call reachability is
@@ -72,7 +72,7 @@ edep(a, b) :- edep(a, k), edep(k, b).
 // SEEDED call reachability. `seed` is projected by run.sh (symbols matching a name).
 // reach(a,b) = "a transitively calls b", expanded only from seeds. Empty seed ⇒ empty.
 .decl seed(x:Sym)
-.input seed(IO=sqlite, dbname="graph.db")
+.input seed(IO=sqlite, dbname="index.db")
 .decl reach(a:Sym, b:Sym)
 reach(a, b) :- seed(a), calls(a, b).
 reach(a, b) :- reach(a, k), calls(k, b).

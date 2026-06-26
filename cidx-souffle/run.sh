@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# run.sh — apply the cidx Soufflé reasoning layer WITHOUT copying the index.
+# run.sh — run the cidx Soufflé reasoning layer IN PLACE on the index. No copy, no
+# separate database: integer VIEWs are created directly in index.db and Soufflé writes
+# its result tables (subtype, edep, reach) back into the SAME index.db.
 #
 #   ./run.sh [path/to/index.db] [seed_name_substring]
 #
-# Reads the (possibly multi-GiB / 12M-symbol) index READ-ONLY, projects only the small
-# integer edge tables into build/graph.db, runs Soufflé over integer ids, then joins names
-# back onto the small result rows. The canonical index is NEVER opened read-write.
+# The index is used as-is. Soufflé's sqlite directive needs the file named `index.db`
+# in its working dir, so we run it through a symlink in build/ that points at the real
+# file — the file itself is never moved or copied. Only the `edge`/`entity_edge` tables
+# are read (via the views), never the millions of `symbol` rows.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${1:-$HOME/.cache/cidx/index.db}"
-SEED="${2:-}"                                    # optional: seed reach() from symbols whose name matches
+SEED="${2:-}"
 BUILD="$HERE/build"
 
 command -v souffle >/dev/null || { echo "error: souffle not on PATH"; exit 1; }
@@ -17,25 +20,23 @@ command -v souffle >/dev/null || { echo "error: souffle not on PATH"; exit 1; }
 SRC_ABS="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
 
 mkdir -p "$BUILD"
-rm -f "$BUILD/graph.db"
+ln -sf "$SRC_ABS" "$BUILD/index.db"               # symlink — Soufflé reads/writes the REAL file
 
-echo "── projecting edges (read-only) from $SRC_ABS ──"
+echo "── creating views + seed in $SRC_ABS (in place) ──"
 SEED_SQL=""
-[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT id FROM src.symbol WHERE qual_name LIKE '%$SEED%' OR spelling LIKE '%$SEED%';"
-time sqlite3 "$BUILD/graph.db" <<SQL
-ATTACH 'file:$SRC_ABS?immutable=1' AS src;
-.read $HERE/project.sql
-CREATE TABLE seed(x INTEGER);
+[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT id FROM symbol WHERE qual_name LIKE '%$SEED%' OR spelling LIKE '%$SEED%';"
+sqlite3 "$SRC_ABS" <<SQL
+.read $HERE/cidx_views.sql
 $SEED_SQL
 SQL
 
-echo "── running soufflé (integer ids) ──"
+echo "── running soufflé (writes results into the same index.db) ──"
 time ( cd "$BUILD" && souffle "$HERE/cidx.dl" )
 
-echo "── resolving names on result rows (read-only join) ──"
-sqlite3 "$BUILD/graph.db" \
-  "ATTACH 'file:$SRC_ABS?immutable=1' AS src;
-   SELECT 'subtype', count(*) FROM subtype
+echo "── result tables now live in $SRC_ABS ──"
+sqlite3 "$SRC_ABS" \
+  "SELECT 'subtype', count(*) FROM subtype
    UNION ALL SELECT 'edep', count(*) FROM edep
    UNION ALL SELECT 'reach(seeded)', count(*) FROM reach;"
-echo "name a result e.g.:  sqlite3 $BUILD/graph.db \"ATTACH 'file:$SRC_ABS?immutable=1' AS src; SELECT sa.qual_name, sb.qual_name FROM reach r JOIN src.symbol sa ON sa.id=r.a JOIN src.symbol sb ON sb.id=r.b LIMIT 20;\""
+echo "names are a plain join in the SAME db, e.g.:"
+echo "  sqlite3 $SRC_ABS \"SELECT sb.qual_name FROM reach r JOIN symbol sb ON sb.id=r.b LIMIT 20;\""
