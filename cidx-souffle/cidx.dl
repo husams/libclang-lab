@@ -2,7 +2,8 @@
 // this file only declares which results to materialize. Copy it as a template for new
 // reasoning: `#include "cidx_base.dl"`, write your rules, `.output` them.
 //
-// Run from the directory holding graph.db:  souffle /path/to/cidx.dl
+// Prefer `./run.sh [index.db] [seed]`, which creates the views + seed and runs Soufflé
+// in place. (Directly: from a dir whose `index.db` is the index, run `souffle cidx.dl`.)
 #include "cidx_base.dl"
 
 .output subtype(IO=sqlite, dbname="index.db")

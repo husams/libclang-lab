@@ -2,8 +2,9 @@
 //
 // `#include "cidx_base.dl"` at the top of any reasoning .dl to get the full base
 // vocabulary (types, edge relations, common derived predicates) without repeating it.
-// All relations read the small projected sidecar build/graph.db (see project.sql) —
-// integer symbol ids, never the 12M-row symbol/name table.
+// All relations read the cidx index directly (dbname="index.db") via the integer VIEWs
+// from cidx_views.sql — raw symbol ids, never the millions of symbol/name rows. Results
+// are written back into the SAME index.db; names resolve by a plain join afterwards.
 //
 // Your script then only writes its OWN rules + `.output`s. Example: see cidx.dl.
 
