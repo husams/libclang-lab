@@ -24,7 +24,7 @@ ln -sf "$SRC_ABS" "$BUILD/index.db"               # symlink — Soufflé reads/w
 
 echo "── creating views + seed in $SRC_ABS (in place) ──"
 SEED_SQL=""
-[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT id FROM symbol WHERE qual_name LIKE '%$SEED%' OR spelling LIKE '%$SEED%';"
+[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT COALESCE(qual_name,spelling,usr) FROM symbol WHERE qual_name LIKE '%$SEED%' OR spelling LIKE '%$SEED%';"
 sqlite3 "$SRC_ABS" <<SQL
 .read $HERE/cidx_views.sql
 $SEED_SQL
@@ -33,10 +33,10 @@ SQL
 echo "── running soufflé (writes results into the same index.db) ──"
 time ( cd "$BUILD" && souffle "$HERE/cidx.dl" )
 
-echo "── result tables now live in $SRC_ABS ──"
+echo "── result tables now live in $SRC_ABS (names, not ids) ──"
 sqlite3 "$SRC_ABS" \
   "SELECT 'subtype', count(*) FROM subtype
    UNION ALL SELECT 'edep', count(*) FROM edep
    UNION ALL SELECT 'reach(seeded)', count(*) FROM reach;"
-echo "names are a plain join in the SAME db, e.g.:"
-echo "  sqlite3 $SRC_ABS \"SELECT sb.qual_name FROM reach r JOIN symbol sb ON sb.id=r.b LIMIT 20;\""
+echo "results already carry names, e.g.:"
+echo "  sqlite3 $SRC_ABS \"SELECT b FROM reach WHERE a='X::func' LIMIT 20;\""
