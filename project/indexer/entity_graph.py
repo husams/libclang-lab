@@ -1195,14 +1195,38 @@ class EntityGraph:
                 seen.setdefault(node.id, node)
         return list(seen.values())
 
+    def _exact_nodes(self, *names: str) -> list[EntityNode]:
+        """Graph entities whose ``qual_name`` OR ``spelling`` exactly equals any
+        of ``names`` -- index-backed point lookups (idx_symbol_qual /
+        idx_symbol_spelling via :meth:`Codebase.by_qual_or_spelling`), filtered
+        to nodes that participate in the design graph. Replaces walking every
+        materialised entity in Python (the old ``for n in self.entities()``)."""
+        out: list[EntityNode] = []
+        seen: set[int] = set()
+        for sym in self._q.by_qual_or_spelling(*names):
+            if sym.id in seen or not self._in_graph(sym.id):
+                continue
+            seen.add(sym.id)
+            node = self.entity(sym)
+            if node is not None:
+                out.append(node)
+        return out
+
     def _named(self, name: str) -> list[EntityNode]:
         """Entities whose qualified name, spelling, display name, OR unqualified
         ``spelling<args>`` form equals ``name``; falls back to fuzzy
         :meth:`find` when none match exactly. The extra forms let a seed match a
         specialization by either ``Singleton<app::Cache>`` (unqualified) or
-        ``app::Singleton<app::Cache>`` (qualified display)."""
+        ``app::Singleton<app::Cache>`` (qualified display).
+
+        Candidates come from an indexed exact lookup on ``name`` and its
+        template base (the text before ``<``: the spelling for the unqualified
+        form, the qual_name for the qualified form) rather than scanning every
+        entity; the candidate set is then filtered to the exact name / display /
+        targs forms below, so the result is identical to the old full walk."""
+        base = name.split("<", 1)[0]
         out: list[EntityNode] = []
-        for n in self.entities():
+        for n in self._exact_nodes(name, base):
             cands = {n.name, n.spelling, n.display}
             d = n.display
             if "<" in d:
@@ -1215,7 +1239,7 @@ class EntityGraph:
         if isinstance(item, Seed):
             return [n for n in self._named(item.name) if item.admits(n)]
         if isinstance(item, str):
-            exact = [n for n in self.entities() if n.name == item]
+            exact = [n for n in self._exact_nodes(item) if n.name == item]
             return exact if exact else self.find(item)
         node = self.entity(item)
         return [node] if node is not None else []

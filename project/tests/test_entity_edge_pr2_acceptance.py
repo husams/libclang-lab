@@ -296,26 +296,26 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 
 
 def test_python_version_is_0390():
-    """Python VERSION must be 0.39.2 (query-API perf: indexed Codebase lookup + entity-graph membership)."""
+    """Python VERSION must be 0.39.3 (find fast-path: indexed exact/prefix lookup + NOCASE indexes)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.39.2", (
-        f"Python VERSION is '{version}'; expected '0.39.2'. "
-        "Bump VERSION to 0.39.2 in cli.py (query-API perf: indexed Codebase lookup + entity-graph membership)."
+    assert version == "0.39.3", (
+        f"Python VERSION is '{version}'; expected '0.39.3'. "
+        "Bump VERSION to 0.39.3 in cli.py (find fast-path: indexed exact/prefix lookup + NOCASE indexes)."
     )
 
 
 def test_cpp_version_is_0390():
-    """C++ kVersion must be 0.39.2 (query-API perf: indexed Codebase lookup + entity-graph membership)."""
+    """C++ kVersion must be 0.39.3 (find fast-path: indexed exact/prefix lookup + NOCASE indexes)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.39.2", (
-        f"C++ kVersion is '{version}'; expected '0.39.2'. "
-        "Bump kVersion to 0.39.2 in args.hpp (query-API perf: indexed Codebase lookup + entity-graph membership)."
+    assert version == "0.39.3", (
+        f"C++ kVersion is '{version}'; expected '0.39.3'. "
+        "Bump kVersion to 0.39.3 in args.hpp (find fast-path: indexed exact/prefix lookup + NOCASE indexes)."
     )
 
 

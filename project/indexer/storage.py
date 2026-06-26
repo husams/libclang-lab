@@ -175,6 +175,13 @@ CREATE TABLE IF NOT EXISTS symbol (
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
 CREATE INDEX IF NOT EXISTS idx_symbol_qual     ON symbol(qual_name);
+-- NOCASE companions: let a case-insensitive prefix LIKE ('Foo%') on these
+-- columns become a range SEARCH instead of a full scan (query.py find tier 2,
+-- search_symbols). A BINARY index cannot serve a case-insensitive LIKE; a
+-- NOCASE index can. Additive -- created on every open via this script, so an
+-- existing index gains them with no reindex.
+CREATE INDEX IF NOT EXISTS idx_symbol_spelling_nc ON symbol(spelling COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_symbol_qual_nc     ON symbol(qual_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
