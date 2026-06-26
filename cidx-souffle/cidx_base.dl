@@ -2,16 +2,18 @@
 //
 // `#include "cidx_base.dl"` at the top of any reasoning .dl to get the full base
 // vocabulary (types, edge relations, common derived predicates) without repeating it.
-// All relations read the cidx index directly (dbname="index.db") via the integer VIEWs
-// from cidx_views.sql — raw symbol ids, never the millions of symbol/name rows. Results
-// are written back into the SAME index.db; names resolve by a plain join afterwards.
+// All relations read the cidx index directly (dbname="index.db") via the NAME-keyed VIEWs
+// from cidx_views.sql — every edge is keyed by qualified name, so you write rules and
+// checks in real names, e.g.  calls("rd_kafka_produceva", "rd_kafka_msg_new").
+// Soufflé interns these strings internally, so reasoning stays fast. Results are written
+// back into the SAME index.db with names already in them — no id→name join needed.
 //
 // Your script then only writes its OWN rules + `.output`s. Example: see cidx.dl.
 
 // ============================================================ types
-// Every node is a symbol id (INTEGER from cidx's symbol.id). One alias type so rule
-// signatures read as intent, not as bare `number`.
-.type Sym <: number
+// A node is a symbol's qualified name (COALESCE(qual_name,spelling,usr)). `Sym` is just
+// the built-in string type, named for intent.
+.type Sym <: symbol
 
 // ============================================================ base edges (Layer 0)
 // edge.kind: 1 calls 2 inherits 3 contains 4 specializes 5 instantiates
@@ -50,9 +52,9 @@
 .input e_destroys(IO=sqlite, dbname="index.db")
 
 // ============================================================ common derived predicates
-// Reusable building blocks. Small/safe ones are computed eagerly; call reachability is
-// SEEDED (write the `seed` table before running) so it never builds the full closure
-// over a 12M-symbol graph.
+// Reusable building blocks, all in names. Small/safe ones are computed eagerly; call
+// reachability is SEEDED (write the `seed` table before running) so it never builds the
+// full closure over a 12M-symbol graph.
 
 // transitive class hierarchy (all ancestors) over raw + design-level edges — small.
 .decl subtype(sub:Sym, super:Sym)
@@ -70,7 +72,7 @@ edep(a, b) :- e_aggregates(a, b).
 edep(a, b) :- e_associates(a, b).
 edep(a, b) :- edep(a, k), edep(k, b).
 
-// SEEDED call reachability. `seed` is projected by run.sh (symbols matching a name).
+// SEEDED call reachability. `seed` is written by run.sh (names matching a substring).
 // reach(a,b) = "a transitively calls b", expanded only from seeds. Empty seed ⇒ empty.
 .decl seed(x:Sym)
 .input seed(IO=sqlite, dbname="index.db")
