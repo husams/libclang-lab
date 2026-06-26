@@ -24,7 +24,7 @@ ln -sf "$SRC_ABS" "$BUILD/index.db"               # symlink — Soufflé reads/w
 
 echo "── creating views + seed in $SRC_ABS (in place) ──"
 SEED_SQL=""
-[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT COALESCE(qual_name,spelling,usr) FROM symbol WHERE qual_name LIKE '%$SEED%' OR spelling LIKE '%$SEED%';"
+[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT name FROM symdisp WHERE name LIKE '%$SEED%';"
 sqlite3 "$SRC_ABS" <<SQL
 .read $HERE/cidx_views.sql
 $SEED_SQL

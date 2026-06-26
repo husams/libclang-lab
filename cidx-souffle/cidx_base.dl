@@ -3,10 +3,13 @@
 // `#include "cidx_base.dl"` at the top of any reasoning .dl to get the full base
 // vocabulary (types, edge relations, common derived predicates) without repeating it.
 // All relations read the cidx index directly (dbname="index.db") via the NAME-keyed VIEWs
-// from cidx_views.sql — every edge is keyed by qualified name, so you write rules and
-// checks in real names, e.g.  calls("rd_kafka_produceva", "rd_kafka_msg_new").
-// Soufflé interns these strings internally, so reasoning stays fast. Results are written
-// back into the SAME index.db with names already in them — no id→name join needed.
+// from cidx_views.sql — every edge is keyed by an ANNOTATED qualified name that keeps
+// overloads and template instances distinct, so you write rules/checks in real names:
+//   calls("main()", "app::scale(int)")          // overloads stay separate
+//   e_uses("cont::Wrapper<int>", "...")         // template instances stay separate
+// (residual same-name symbols get a " #<id>" suffix; see cidx_views.sql). Soufflé interns
+// these strings internally, so reasoning stays fast. Results are written back into the
+// SAME index.db with names already in them — no id→name join needed.
 //
 // Your script then only writes its OWN rules + `.output`s. Example: see cidx.dl.
 

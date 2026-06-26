@@ -44,20 +44,38 @@ only rows added to `index.db`; drop them anytime to remove all trace.
   depends on whom".
 
 ## Query it (the "query language" target, hand-written for now)
-Results live in the same DB, so names are a plain join — no ATTACH:
+Relations and results are keyed by **annotated names**, so you query in names directly —
+overloads and template instances stay distinct:
 ```sql
+-- a specific overload's callees
+SELECT b FROM calls WHERE a='app::scale(int)';
+
 -- what a function transitively reaches (seed it first with run.sh)
-SELECT DISTINCT sb.qual_name FROM reach r JOIN symbol sb ON sb.id=r.b
-WHERE r.a=(SELECT id FROM symbol WHERE qual_name='rd_kafka_produceva');
+SELECT DISTINCT b FROM reach WHERE a='rd_kafka_produceva';
+
+-- check a specific edge holds (1 = yes)
+SELECT count(*) FROM reach WHERE a='rd_kafka_produceva' AND b='__builtin_object_size';
 
 -- all ancestors of a class
-SELECT sp.qual_name FROM subtype t JOIN symbol sp ON sp.id=t.super
-WHERE t.sub=(SELECT id FROM symbol WHERE qual_name='chain::D');
+SELECT super FROM subtype WHERE sub='chain::D';
 
--- design-level dependencies of an entity
-SELECT sb.qual_name FROM edep e JOIN symbol sb ON sb.id=e.b
-WHERE e.a=(SELECT id FROM symbol WHERE qual_name='app::Dashboard');
+-- design-level dependencies of an entity (a template instance stays distinct)
+SELECT b FROM edep WHERE a='cont::Wrapper<int>';
 ```
+
+### Annotated names (overloads & template instances)
+Each node is keyed by `qual_name` + the signature/template-arg suffix from libclang's
+`display_name`, so distinct symbols never merge:
+| symbol | annotated name |
+|--------|----------------|
+| overloaded `scale` | `app::scale(int)`, `app::scale(double)`, `app::scale(int, int)` |
+| ctor overloads | `Widget()`, `Widget(int)`, `Widget(Widget &&)` |
+| template instances | `cont::Wrapper<int>`, `cont::Wrapper<bool>`, `cont::Wrapper<T>` |
+
+Where a name still collides across distinct symbols — const/ref-qualified overloads (not in
+`display_name`), methods of different template instances, or same-named functions in
+different TUs — a ` #<id>` suffix is appended to the colliding names only (e.g. `main() #132`),
+so reasoning stays sound.
 
 ## Add your own reasoning (reuse the prelude)
 1. Write a new `.dl` and `#include "cidx_base.dl"` — you get every type/edge/predicate for free.
