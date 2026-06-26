@@ -5,11 +5,12 @@
 // All relations read the cidx index directly (dbname="index.db") via the NAME-keyed VIEWs
 // from cidx_views.sql — every edge is keyed by an ANNOTATED qualified name that keeps
 // overloads and template instances distinct, so you write rules/checks in real names:
-//   calls("main()", "app::scale(int)")          // overloads stay separate
-//   e_uses("cont::Wrapper<int>", "...")         // template instances stay separate
-// (residual same-name symbols get a " #<id>" suffix; see cidx_views.sql). Soufflé interns
-// these strings internally, so reasoning stays fast. Results are written back into the
-// SAME index.db with names already in them — no id→name join needed.
+//   calls("main()", "app::scale(int)")              // overloads stay separate
+//   e_uses("cont::Wrapper<int>", "...")             // template instances stay separate
+//   method_of("cont::Wrapper<bool>::label()", ...)  // instance methods stay separate
+// (rare residual same-name symbols get a " @file:line" / " [n]" suffix; see cidx_views.sql).
+// Soufflé interns these strings internally, so reasoning stays fast. Results are written
+// back into the SAME index.db with names already in them — no id→name join needed.
 //
 // Your script then only writes its OWN rules + `.output`s. Example: see cidx.dl.
 
