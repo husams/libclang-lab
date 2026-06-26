@@ -649,11 +649,9 @@ Storage::Storage(const std::string &path) : db_(prepare_db_path(path)) {
   // filled in immediately on open -- no re-index/resolve. (entity_node did not
   // exist during migrate(); it does now, after kSchema.) Mirrors storage.py.
   if (needs_entity_node_backfill_) {
-    cidx::progress("migrate: backfilling entity_node design types...");
     auto txn = transaction();
     cpp_materialise_entity_nodes(db_);
     txn.commit();
-    cidx::progress("migrate: entity_node backfill complete");
   }
 }
 
@@ -757,10 +755,7 @@ void Storage::migrate() {
           nrows = cs.col_int64(0);
         }
       }
-      cidx::progress("migrate: rebuilding symbol table as integer kinds (" +
-                     std::to_string(nrows) + " rows)...");
       migrate_symbol_kind_to_int();
-      cidx::progress("migrate: symbol table rebuilt");
       changed = true;
     }
   }
@@ -3172,8 +3167,6 @@ static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
     auto st = db.prepare("SELECT id, kind FROM symbol WHERE kind IN (2,3,4,5,31)");
     while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
   }
-  cidx::progress("resolve: phase entity_nodes (" + std::to_string(rows.size()) +
-                 " entities)...");
   for (const auto &[sym_id, sym_kind] : rows) {
     auto ins = db.prepare(
         "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)");
@@ -3196,12 +3189,9 @@ void Storage::materialise_entity_edges() {
     auto txn = transaction();
     db_.exec("DELETE FROM entity_edge");
     const auto run = [&](const char *name, void (*fn)(cidx::SqliteDb &)) {
-      cidx::progress(std::string("resolve: phase ") + name + "...");
       fn(db_);
       auto c = db_.prepare("SELECT COUNT(*) FROM entity_edge");
       const int64_t n = c.step() ? c.col_int64(0) : 0;
-      cidx::progress(std::string("resolve: phase ") + name + " done (" +
-                     std::to_string(n) + " entity edges so far)");
     };
     run("inheritance", cpp_materialise_inheritance);
     run("specializes", cpp_materialise_specializes);
@@ -3218,12 +3208,9 @@ void Storage::materialise_entity_edges() {
 
 int Storage::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
-  cidx::progress("resolve: rolling up edge counts...");
   rollup_edge_counts();
   // Materialise Layer-1 entity_edge from the Layer-0 graph.
-  cidx::progress("resolve: materialising entity (Layer-1) edges...");
   materialise_entity_edges();
-  cidx::progress("resolve: entity edges materialised");
   // Count remaining stub symbols: a minted placeholder never backfilled by a
   // real symbol -- resolved=0 with NO location (neither a definition nor a decl
   // site). NOT keyed on spelling -- stubs are now minted NAMED, so the absence

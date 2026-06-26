@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import sys
 from dataclasses import dataclass, fields
 from collections.abc import Sequence
 from typing import Any, Optional
@@ -34,22 +33,6 @@ from typing import Any, Optional
 from indexer import pathx as _pathx
 
 SCHEMA_VERSION = 22
-
-# Progress heartbeat -- ON by default so long migrate/resolve passes always
-# show movement on the terminal. Written to stderr (stdout stays clean for
-# piping the actual result). Set CIDX_PROGRESS=0 (or false/off/no) to silence
-# for scripting. Python and C++ emit byte-identical progress, so the parity
-# transcript gate (which diffs stderr) stays green even with it on.
-_PROGRESS_OFF_VALUES = {"0", "false", "off", "no"}
-_PROGRESS_ON = (
-    (os.environ.get("CIDX_PROGRESS") or "").strip().lower() not in _PROGRESS_OFF_VALUES
-)
-
-
-def progress(msg: str) -> None:
-    """Write a heartbeat line to stderr (on unless CIDX_PROGRESS is 0/off/no)."""
-    if _PROGRESS_ON:
-        print(f"[cidx] {msg}", file=sys.stderr, flush=True)
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -485,10 +468,8 @@ class Storage:
         if self._needs_entity_node_backfill:
             from indexer.entity_rollup import _materialise_entity_nodes
 
-            progress("migrate: backfilling entity_node design types...")
             with self.transaction():
                 _materialise_entity_nodes(self)
-            progress("migrate: entity_node backfill complete")
 
     def _migrate(self) -> None:
         """In-place upgrade of a database created by an older schema version.
@@ -584,9 +565,7 @@ class Storage:
                 (r[0] for r in self._conn.execute("SELECT COUNT(*) FROM symbol")),
                 0,
             )
-            progress(f"migrate: rebuilding symbol table as integer kinds ({nrows} rows)...")
             self._migrate_symbol_kind_to_int()
-            progress("migrate: symbol table rebuilt")
             changed = True
         # v19 -> v20: named-instance marker. A template instance minted from a
         # NAMED `using`/typedef alias (X<B>) carries its own composes/aggregates
@@ -2101,11 +2080,8 @@ class Storage:
         from datetime import datetime, timezone
         from indexer.entity_rollup import materialize_entity_edges
 
-        progress("resolve: rolling up edge counts...")
         self.rollup_edge_counts()
-        progress("resolve: materialising entity (Layer-1) edges...")
         materialize_entity_edges(self)
-        progress("resolve: entity edges materialised")
         # A still-stub is a minted placeholder never backfilled by a real
         # symbol: resolved=0 with NO location (neither a definition nor a decl
         # site). NOT keyed on spelling -- stubs are now minted NAMED, so the

@@ -55,7 +55,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from indexer.storage import progress
 
 if TYPE_CHECKING:
     from indexer.storage import Storage
@@ -325,7 +324,6 @@ def _materialise_entity_nodes(db: "Storage") -> None:
         rows = conn.execute(
             "SELECT id, kind FROM symbol WHERE kind IN (2, 3, 4, 5, 31)"
         ).fetchall()
-        progress(f"resolve: phase entity_nodes ({len(rows)} entities)...")
         for sym_id, sym_kind in rows:
             ek = _entity_kind_id(db, sym_id, sym_kind)
             conn.execute(
@@ -578,12 +576,10 @@ def materialize_entity_edges(db: "Storage") -> None:
         with db.transaction():
             db._conn.execute("DELETE FROM entity_edge")
             for name, fn in phases:
-                progress(f"resolve: phase {name}...")
                 fn(db)
                 n = db._conn.execute(
                     "SELECT COUNT(*) FROM entity_edge"
                 ).fetchone()[0]
-                progress(f"resolve: phase {name} done ({n} entity edges so far)")
     finally:
         _CTX = None
 

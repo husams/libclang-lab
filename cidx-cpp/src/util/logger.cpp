@@ -87,20 +87,5 @@ void Logger::log(LogLevel level, const std::string &name,
   }
 }
 
-void progress(const std::string &msg) {
-  // ON by default; silenced only by an explicit CIDX_PROGRESS=0/false/off/no.
-  const char *v = std::getenv("CIDX_PROGRESS"); // NOLINT(concurrency-mt-unsafe)
-  if (v != nullptr) {
-    std::string s(v);
-    for (char &c : s) {
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    if (s == "0" || s == "false" || s == "off" || s == "no") {
-      return; // explicitly silenced
-    }
-  }
-  std::fputs(("[cidx] " + msg + "\n").c_str(), stderr);
-  std::fflush(stderr);
-}
 
 } // namespace cidx
