@@ -1,82 +1,10 @@
-// cidx.dl — first-version Soufflé query/reasoning layer over the cidx code graph.
+// cidx.dl — example reasoning script. All vocabulary comes from the shared prelude;
+// this file only declares which results to materialize. Copy it as a template for new
+// reasoning: `#include "cidx_base.dl"`, write your rules, `.output` them.
 //
-// Reads the cidx graph straight from SQLite (a COPY of index.db named graph.db, via the
-// adapter views in cidx_views.sql), reasons over it with Datalog, and writes the derived
-// relations BACK into the same SQLite file. No export step — cidx and Soufflé share one file.
-//
-// Run from the directory that holds graph.db:  souffle /path/to/cidx.dl
+// Run from the directory holding graph.db:  souffle /path/to/cidx.dl
+#include "cidx_base.dl"
 
-// ============================================================ base relations (input)
-.decl symname(usr:symbol, name:symbol)
-.input symname(IO=sqlite, dbname="graph.db")
-
-.decl calls(caller:symbol, callee:symbol)
-.input calls(IO=sqlite, dbname="graph.db")
-.decl inherits(derived:symbol, base:symbol)
-.input inherits(IO=sqlite, dbname="graph.db")
-.decl overrides(method:symbol, base_method:symbol)
-.input overrides(IO=sqlite, dbname="graph.db")
-.decl uses(src:symbol, dst:symbol)
-.input uses(IO=sqlite, dbname="graph.db")
-.decl field_of(field:symbol, record:symbol)
-.input field_of(IO=sqlite, dbname="graph.db")
-.decl method_of(method:symbol, cls:symbol)
-.input method_of(IO=sqlite, dbname="graph.db")
-
-// design-level (entity) edges — the higher-level graph
-.decl e_generalizes(sub:symbol, super:symbol)
-.input e_generalizes(IO=sqlite, dbname="graph.db")
-.decl e_implements(impl:symbol, iface:symbol)
-.input e_implements(IO=sqlite, dbname="graph.db")
-.decl e_composes(owner:symbol, part:symbol)
-.input e_composes(IO=sqlite, dbname="graph.db")
-.decl e_aggregates(owner:symbol, part:symbol)
-.input e_aggregates(IO=sqlite, dbname="graph.db")
-.decl e_associates(src:symbol, dst:symbol)
-.input e_associates(IO=sqlite, dbname="graph.db")
-.decl e_creates(src:symbol, dst:symbol)
-.input e_creates(IO=sqlite, dbname="graph.db")
-.decl e_uses(src:symbol, dst:symbol)
-.input e_uses(IO=sqlite, dbname="graph.db")
-.decl e_destroys(src:symbol, dst:symbol)
-.input e_destroys(IO=sqlite, dbname="graph.db")
-
-// ============================================================ derived reasoning
-
-// (1) transitive call reachability — the core of "who calls X" / "impact of X".
-.decl reach(a:symbol, b:symbol)
-reach(a, b) :- calls(a, b).
-reach(a, b) :- calls(a, k), reach(k, b).
-
-// (2) transitive class hierarchy (all ancestors), via both raw inherits and the
-//     design-level generalizes/implements edges.
-.decl subtype(sub:symbol, super:symbol)
-subtype(s, p) :- inherits(s, p).
-subtype(s, p) :- e_generalizes(s, p).
-subtype(s, p) :- e_implements(s, p).
-subtype(s, p) :- subtype(s, k), subtype(k, p).
-
-// (3) design-level dependency closure over the ENTITY graph: who (transitively)
-//     depends on whom at the class/architecture altitude.
-.decl edep(a:symbol, b:symbol)
-edep(a, b) :- e_uses(a, b).
-edep(a, b) :- e_creates(a, b).
-edep(a, b) :- e_composes(a, b).
-edep(a, b) :- e_aggregates(a, b).
-edep(a, b) :- e_associates(a, b).
-edep(a, b) :- edep(a, k), edep(k, b).
-
-// ============================================================ materialized output
-// Resolve USRs to names so the result tables are human/LLM-readable, and write them
-// back into graph.db. Query them later with a trivial `SELECT ... WHERE ...`.
-.decl reachable(src:symbol, src_name:symbol, dst:symbol, dst_name:symbol)
-reachable(a, an, b, bn) :- reach(a, b), symname(a, an), symname(b, bn).
-.output reachable(IO=sqlite, dbname="graph.db")
-
-.decl subtype_named(sub:symbol, sub_name:symbol, super:symbol, super_name:symbol)
-subtype_named(s, sn, p, pn) :- subtype(s, p), symname(s, sn), symname(p, pn).
-.output subtype_named(IO=sqlite, dbname="graph.db")
-
-.decl entity_depends(a:symbol, a_name:symbol, b:symbol, b_name:symbol)
-entity_depends(a, an, b, bn) :- edep(a, b), symname(a, an), symname(b, bn).
-.output entity_depends(IO=sqlite, dbname="graph.db")
+.output subtype(IO=sqlite, dbname="graph.db")
+.output edep(IO=sqlite, dbname="graph.db")
+.output reach(IO=sqlite, dbname="graph.db")
