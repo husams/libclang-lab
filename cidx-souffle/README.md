@@ -64,18 +64,21 @@ SELECT b FROM edep WHERE a='cont::Wrapper<int>';
 ```
 
 ### Annotated names (overloads & template instances)
-Each node is keyed by `qual_name` + the signature/template-arg suffix from libclang's
-`display_name`, so distinct symbols never merge:
+Each node is keyed by a readable name built in three layers, so distinct symbols never merge:
+1. `qual_name` + the signature/template-arg suffix from libclang's `display_name`.
+2. for a member of a template **instance**, the owner's instance args are spliced in.
+3. if a name still collides, a readable ` @file:line` tiebreaker (and, only for genuinely
+   indistinguishable rows, a final ` [n]`).
+
 | symbol | annotated name |
 |--------|----------------|
 | overloaded `scale` | `app::scale(int)`, `app::scale(double)`, `app::scale(int, int)` |
 | ctor overloads | `Widget()`, `Widget(int)`, `Widget(Widget &&)` |
 | template instances | `cont::Wrapper<int>`, `cont::Wrapper<bool>`, `cont::Wrapper<T>` |
+| instance methods | `cont::Wrapper<bool>::label()`, `geo::Box<T>::get()` |
+| const overload / cross-TU | `geo::Box::get() @box.hpp:46`, `main() @app.c:8` |
 
-Where a name still collides across distinct symbols — const/ref-qualified overloads (not in
-`display_name`), methods of different template instances, or same-named functions in
-different TUs — a ` #<id>` suffix is appended to the colliding names only (e.g. `main() #132`),
-so reasoning stays sound.
+No two distinct symbols ever share a node, so reasoning stays sound.
 
 ## Add your own reasoning (reuse the prelude)
 1. Write a new `.dl` and `#include "cidx_base.dl"` — you get every type/edge/predicate for free.
