@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.39.3";
+inline constexpr const char *kVersion = "0.40.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -111,6 +111,10 @@ struct ParsedArgs {
   std::vector<std::string> pch_add_headers; // pch build --include HEADER (repeat)
   std::optional<std::string> pch_driver;    // pch build --driver DRIVER
   std::optional<std::string> pch_std;       // pch build --std STD
+  bool pch_from_corpus = false;             // pch build --from-corpus
+  double pch_coverage = 0.7;                // pch build --coverage FRAC
+  int pch_min_tus = 0;                      // pch build --min-tus N
+  int pch_jobs = 0;                         // pch build --jobs N (0 = auto)
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

@@ -1306,6 +1306,9 @@ int cmd_pch_build(const ParsedArgs &args, Context &ctx) {
   std::optional<std::set<std::string>> common;
   std::map<std::optional<std::string>, int> driver_counts;
   int n_cpp = 0;
+  std::vector<pch::TuFlags> tus;             // for --from-corpus survey
+  std::vector<std::pair<std::string, std::string>> idirs; // union, order-stable
+  std::set<std::pair<std::string, std::string>> seen_idirs;
   {
     Storage db(ctx.index_path);
     for (const std::pair<File, std::string> &pr : db.list_files()) {
@@ -1333,6 +1336,15 @@ int cmd_pch_build(const ParsedArgs &args, Context &ctx) {
         common = std::move(inter);
       }
       ++driver_counts[rec.driver];
+      if (args.pch_from_corpus) {
+        tus.push_back({rec.driver, opts, path});
+        for (const std::pair<std::string, std::string> &p :
+             pch::include_dirs(opts)) {
+          if (seen_idirs.insert(p).second) {
+            idirs.push_back(p);
+          }
+        }
+      }
     }
   }
   if (n_cpp == 0) {
@@ -1363,11 +1375,36 @@ int cmd_pch_build(const ParsedArgs &args, Context &ctx) {
     kept.push_back("-std=" + *args.pch_std);
     flags = std::move(kept);
   }
+
+  std::vector<std::string> headers;
+  bool quoted = false;
+  if (args.pch_from_corpus) {
+    const pch::HeaderSurvey survey = pch::survey_headers(tus, args.pch_jobs);
+    headers = pch::select_shared_headers(survey, n_cpp, args.pch_coverage,
+                                         args.pch_min_tus);
+    if (headers.empty()) {
+      *ctx.err << "error: no header is shared by >= " << args.pch_coverage
+               << " of " << n_cpp
+               << " C++ TUs (lower --coverage / --min-tus, or this corpus is "
+                  "too heterogeneous for a single shared PCH)\n";
+      return 1;
+    }
+    // Retain the union of include-search dirs so project headers + their
+    // transitive #includes resolve while building the umbrella.
+    for (const std::pair<std::string, std::string> &p : idirs) {
+      flags.push_back(p.first);
+      flags.push_back(p.second);
+    }
+    quoted = true;
+    *ctx.err << "corpus survey: " << survey.freq.size() << " headers across "
+             << n_cpp << " C++ TUs; " << headers.size()
+             << " shared by >= " << args.pch_coverage << "\n";
+  } else {
+    headers = pch::default_headers();
+  }
   for (const std::string &f : args.pch_add_flags) {
     flags.push_back(f);
   }
-
-  std::vector<std::string> headers = pch::default_headers();
   for (const std::string &h : args.pch_add_headers) {
     headers.push_back(h);
   }
@@ -1375,7 +1412,8 @@ int cmd_pch_build(const ParsedArgs &args, Context &ctx) {
   Toolchain toolchain(log);
   Parser parser(toolchain, log);
   return pch::build_pch(parser, flags, headers, driver, n_cpp, *ctx.out,
-                        *ctx.err);
+                        *ctx.err, quoted, args.pch_from_corpus,
+                        args.pch_coverage);
 }
 
 int cmd_pch_status(const ParsedArgs &args, Context &ctx) {

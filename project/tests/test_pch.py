@@ -85,6 +85,74 @@ def test_common_cpp_flags_empty_when_no_cpp(tmp_path):
     assert (flags, driver, n) == ([], None, 0)
 
 
+def test_pch_relevant_drops_arch_value_pair():
+    # `-arch arm64` must be dropped WHOLE: the common-flag set is order-
+    # insensitive, so a dangling `-arch` would break the umbrella parse.
+    kept = pch.pch_relevant(["-std=c++17", "-arch", "arm64", "-target",
+                             "arm64-apple", "-DK"])
+    assert "-arch" not in kept and "arm64" not in kept
+    assert "-target" not in kept and "arm64-apple" not in kept
+    assert "-std=c++17" in kept and "-DK" in kept
+
+
+# -- corpus survey (cidx pch build --from-corpus) ------------------------------
+
+
+def test_include_dirs_separate_and_joined():
+    pairs = pch.include_dirs(["-I/a", "-I", "/b", "-isystem", "/sys",
+                              "-isystem/joined", "-DX", "-iquote", "/q"])
+    assert pairs == [("-I", "/a"), ("-I", "/b"), ("-isystem", "/sys"),
+                     ("-isystem", "/joined"), ("-iquote", "/q")]
+
+
+def test_select_shared_headers_coverage_and_directability():
+    from collections import Counter
+    freq = Counter({"/h/hot.h": 9, "/h/mid.h": 6, "/h/rare.h": 1,
+                    "/h/internal.h": 10})
+    directable = {"/h/hot.h", "/h/mid.h", "/h/rare.h"}  # internal.h never direct
+    # coverage 0.7 over n=10 -> threshold 7: only hot.h (9) qualifies;
+    # internal.h (10) is filtered out as never-directly-included.
+    sel = pch.select_shared_headers(freq, directable, 10, 0.7, 0)
+    assert sel == ["/h/hot.h"]
+    # lower coverage admits mid.h too, most-shared first; internal.h still out.
+    sel2 = pch.select_shared_headers(freq, directable, 10, 0.5, 0)
+    assert sel2 == ["/h/hot.h", "/h/mid.h"]
+    assert "/h/internal.h" not in sel2
+
+
+def test_from_corpus_builds_quoted_umbrella(tmp_path, monkeypatch):
+    """End-to-end --from-corpus: a real `-E -H` survey over two TUs that share a
+    header builds a PCH whose umbrella quotes the shared header's abspath."""
+    monkeypatch.setenv(astcache.CACHE_ENV, str(tmp_path))
+    src = tmp_path / "src"
+    src.mkdir()
+    common = src / "common.hpp"
+    common.write_text("#pragma once\nstruct Common { int x; };\n")
+    for name in ("a.cpp", "b.cpp"):
+        (src / name).write_text('#include "common.hpp"\nCommon mk();\n')
+
+    db_path = str(tmp_path / "index.db")
+    opts = ["--driver-mode=g++", "-std=c++17", f"-I{src}"]
+    with Storage(db_path) as db:
+        comp = db.add_component("lab", str(src))
+        d = db.add_directory(comp, "")
+        db.add_file(d, "a.cpp", compile_options=opts, driver="c++")
+        db.add_file(d, "b.cpp", compile_options=opts, driver="c++")
+
+    rc = pch.cmd_build(db_path, from_corpus=True, coverage=0.7, force=True)
+    assert rc == 0
+    assert os.path.exists(pch.pch_path())
+    umbrella = open(pch.umbrella_path()).read()
+    # the shared header is quoted by its absolute path
+    assert f'#include "{os.path.realpath(common)}"' in umbrella or \
+           f'#include "{common}"' in umbrella
+    side = json.load(open(pch.sidecar_path()))
+    assert side["mode"] == "corpus"
+    assert side["coverage"] == 0.7
+    # -I retained in the baked flags (the corpus-mode requirement)
+    assert any(f.startswith("-I") or f == "-I" for f in side["flags"])
+
+
 # -- consumption gate ----------------------------------------------------------
 
 

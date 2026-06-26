@@ -5,18 +5,24 @@
 #include <clang-c/Index.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <sys/stat.h>
+#include <thread>
 
 #include "astcache/astcache.hpp"
 #include "clangx/libclang.hpp"
 #include "clangx/parse.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
+#include "util/pathutil.hpp"
+#include "util/subprocess.hpp"
 
 namespace cidx {
 namespace pch {
@@ -39,12 +45,101 @@ const std::vector<std::string> kDefaultHeaders = {
 // pch.py _TAKES_VALUE / _DROP_EXACT / _DROP_PREFIX.
 const std::set<std::string> kTakesValue = {
     "-Xlinker", "-MT",     "-MF",         "-include", "-include-pch",
-    "-x",       "-isystem","-iquote",     "-idirafter"};
+    "-x",       "-isystem","-iquote",     "-idirafter",
+    // Separated flag+value pairs dropped WHOLE: the common-flag set is
+    // order-insensitive, so a kept "-arch arm64" scrambles into two
+    // disconnected tokens and a dangling "-arch" breaks the umbrella parse.
+    "-arch",    "-target", "-Xclang",     "-mllvm"};
 const std::set<std::string> kDropExact = {"-shared", "-static", "-rdynamic",
                                           "-pthread"};
 const std::vector<std::string> kDropPrefix = {"-I",      "-L",       "-l",
                                               "-Wl,",    "-iquote",  "-isystem",
                                               "-idirafter"};
+
+// --from-corpus survey: TU sources and non-standalone include fragments.
+const std::set<std::string> kSrcExt = {".c",  ".cc", ".cpp", ".cxx",
+                                       ".c++", ".cp", ".m",  ".mm"};
+const std::set<std::string> kFragmentExt = {".def", ".inc", ".td",
+                                            ".gen", ".x",   ".inl"};
+const std::vector<std::string> kIncludeDirFlags = {"-I", "-isystem", "-iquote",
+                                                   "-idirafter"};
+
+// Lower-cased file extension of `path` (including the dot), or "".
+std::string lower_ext(const std::string &path) {
+  const std::string base = pathutil::basename(path);
+  const std::size_t dot = base.rfind('.');
+  if (dot == std::string::npos || dot == 0) {
+    return "";
+  }
+  std::string ext = base.substr(dot);
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return ext;
+}
+
+bool path_exists(const std::string &p) {
+  struct stat st {};
+  return ::stat(p.c_str(), &st) == 0;
+}
+
+// `<driver> <opts> -E -H -o /dev/null <path>` -> (direct, transitive) header
+// sets. -H prints the inclusion tree to stderr, one line per header, leading
+// dots = depth; depth 1 is a direct #include (a safe umbrella entry point).
+// Returns ({}, {}) on any failure -- an unscannable TU contributes nothing.
+std::pair<std::set<std::string>, std::set<std::string>>
+scan_one(const std::optional<std::string> &driver,
+         const std::vector<std::string> &opts, const std::string &path) {
+  std::vector<std::string> argv;
+  argv.push_back(driver ? *driver : "c++");
+  for (const std::string &o : opts) {
+    argv.push_back(o);
+  }
+  argv.emplace_back("-E");
+  argv.emplace_back("-H");
+  argv.emplace_back("-o");
+  argv.emplace_back("/dev/null");
+  argv.push_back(path);
+
+  std::set<std::string> direct;
+  std::set<std::string> trans;
+  const RunResult res = run(argv, 180.0);
+  if (res.timed_out) {
+    return {direct, trans};
+  }
+  std::istringstream iss(res.err);
+  std::string line;
+  while (std::getline(iss, line)) {
+    std::size_t depth = 0;
+    while (depth < line.size() && line[depth] == '.') {
+      ++depth;
+    }
+    if (depth == 0 || depth >= line.size() || line[depth] != ' ') {
+      continue;
+    }
+    std::string hdr = line.substr(depth + 1);
+    // trim trailing whitespace / CR.
+    while (!hdr.empty() &&
+           std::isspace(static_cast<unsigned char>(hdr.back()))) {
+      hdr.pop_back();
+    }
+    if (hdr.empty() || hdr.find('/') == std::string::npos) {
+      continue;
+    }
+    const std::string ext = lower_ext(hdr);
+    if (kSrcExt.count(ext) != 0 || kFragmentExt.count(ext) != 0) {
+      continue;
+    }
+    hdr = pathutil::normpath(hdr);
+    if (!path_exists(hdr)) { // skip phantom / generated headers
+      continue;
+    }
+    trans.insert(hdr);
+    if (depth == 1) {
+      direct.insert(hdr);
+    }
+  }
+  return {direct, trans};
+}
 
 bool truthy_env(const char *name) {
   std::string v = get_env(name).value_or("");
@@ -177,6 +272,102 @@ std::vector<std::string> pch_relevant(const std::vector<std::string> &options) {
   return keep;
 }
 
+// --- corpus header survey (cidx pch build --from-corpus) ---------------------
+
+std::vector<std::pair<std::string, std::string>>
+include_dirs(const std::vector<std::string> &options) {
+  std::vector<std::pair<std::string, std::string>> pairs;
+  std::string take;
+  bool taking = false;
+  for (const std::string &a : options) {
+    if (taking) {
+      pairs.emplace_back(take, a);
+      taking = false;
+      continue;
+    }
+    if (std::find(kIncludeDirFlags.begin(), kIncludeDirFlags.end(), a) !=
+        kIncludeDirFlags.end()) {
+      take = a;
+      taking = true;
+      continue;
+    }
+    for (const std::string &f : kIncludeDirFlags) {
+      if (a.size() > f.size() && a.rfind(f, 0) == 0) {
+        pairs.emplace_back(f, a.substr(f.size()));
+        break;
+      }
+    }
+  }
+  return pairs;
+}
+
+HeaderSurvey survey_headers(const std::vector<TuFlags> &tus, int jobs) {
+  HeaderSurvey survey;
+  if (tus.empty()) {
+    return survey;
+  }
+  unsigned hw = std::thread::hardware_concurrency();
+  unsigned nthreads = jobs > 0 ? static_cast<unsigned>(jobs)
+                               : (hw != 0U ? hw : 4U);
+  nthreads = std::max(1U, std::min(nthreads, static_cast<unsigned>(tus.size())));
+
+  std::atomic<std::size_t> next{0};
+  std::mutex merge_mu;
+  auto worker = [&]() {
+    for (;;) {
+      const std::size_t i = next.fetch_add(1);
+      if (i >= tus.size()) {
+        return;
+      }
+      const TuFlags &t = tus[i];
+      std::pair<std::set<std::string>, std::set<std::string>> r =
+          scan_one(t.driver, t.options, t.path);
+      std::lock_guard<std::mutex> lk(merge_mu);
+      for (const std::string &h : r.second) {
+        ++survey.freq[h];
+      }
+      survey.directable.insert(r.first.begin(), r.first.end());
+    }
+  };
+
+  std::vector<std::thread> pool;
+  pool.reserve(nthreads);
+  for (unsigned i = 0; i < nthreads; ++i) {
+    pool.emplace_back(worker);
+  }
+  for (std::thread &th : pool) {
+    th.join();
+  }
+  return survey;
+}
+
+std::vector<std::string> select_shared_headers(const HeaderSurvey &survey,
+                                               int n_cpp, double coverage,
+                                               int min_tus) {
+  const double threshold =
+      std::max(coverage * static_cast<double>(n_cpp),
+               static_cast<double>(min_tus));
+  // Rank by frequency desc, then path asc for a stable order.
+  std::vector<std::pair<std::string, int>> ranked(survey.freq.begin(),
+                                                  survey.freq.end());
+  std::sort(ranked.begin(), ranked.end(),
+            [](const std::pair<std::string, int> &a,
+               const std::pair<std::string, int> &b) {
+              if (a.second != b.second) {
+                return a.second > b.second;
+              }
+              return a.first < b.first;
+            });
+  std::vector<std::string> out;
+  for (const std::pair<std::string, int> &p : ranked) {
+    if (static_cast<double>(p.second) >= threshold &&
+        survey.directable.count(p.first) != 0) {
+      out.push_back(p.first);
+    }
+  }
+  return out;
+}
+
 // --- consumption gate (pch.py consume_args) ----------------------------------
 
 std::vector<std::string>
@@ -213,7 +404,8 @@ consume_args(bool cpp, const std::optional<std::string> &driver) {
 int build_pch(Parser &parser, const std::vector<std::string> &flags,
               const std::vector<std::string> &headers,
               const std::optional<std::string> &driver, int n_cpp_tus,
-              std::ostream &out, std::ostream &err) {
+              std::ostream &out, std::ostream &err, bool quoted, bool corpus,
+              double coverage) {
   LibClang &lib = LibClang::instance();
   lib.load();
 
@@ -229,8 +421,14 @@ int build_pch(Parser &parser, const std::vector<std::string> &flags,
     uf << "// Generated by `cidx pch build` -- shared system/C++ precompiled "
           "header.\n"
        << "// Edit via `cidx pch build --include <header>`; do not hand-edit.\n";
+    // Absolute corpus headers are #include "..."-quoted (resolve without -I);
+    // bare system/STL names are #include <...>-angled.
     for (const std::string &h : headers) {
-      uf << "#include <" << h << ">\n";
+      if (quoted) {
+        uf << "#include \"" << h << "\"\n";
+      } else {
+        uf << "#include <" << h << ">\n";
+      }
     }
   }
 
@@ -288,8 +486,12 @@ int build_pch(Parser &parser, const std::vector<std::string> &flags,
        << "  \"headers\": " << json_array(headers) << ",\n"
        << "  \"n_cpp_tus\": " << n_cpp_tus << ",\n"
        << "  \"built_at\": \"" << iso_now() << "\",\n"
-       << "  \"cpp\": true\n"
-       << "}";
+       << "  \"cpp\": true,\n"
+       << "  \"mode\": \"" << (corpus ? "corpus" : "system") << "\"";
+    if (corpus) {
+      sf << ",\n  \"coverage\": " << coverage;
+    }
+    sf << "\n}";
   }
 
   struct stat st {};

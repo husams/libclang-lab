@@ -65,7 +65,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.39.3"
+VERSION = "0.40.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -622,6 +622,10 @@ def cmd_pch_build(args) -> int:
         driver=args.driver,
         std=args.std,
         force=args.force,
+        from_corpus=args.from_corpus,
+        coverage=args.coverage,
+        min_tus=args.min_tus,
+        jobs=args.jobs,
     )
 
 
@@ -1932,6 +1936,35 @@ def main(argv=None) -> int:
     q.add_argument("--std", help="override the C++ standard, e.g. c++17")
     q.add_argument(
         "--force", action="store_true", help="rebuild even if a PCH already exists"
+    )
+    q.add_argument(
+        "--from-corpus",
+        action="store_true",
+        help="build the umbrella from the headers actually shared by the index's "
+        "C++ TUs (a `clang -M` survey), retaining -I so project headers are "
+        "included -- the lever for parse-bound cold indexing",
+    )
+    q.add_argument(
+        "--coverage",
+        type=float,
+        default=0.7,
+        metavar="FRAC",
+        help="with --from-corpus: include a header if shared by >= this fraction "
+        "of C++ TUs (default: 0.7)",
+    )
+    q.add_argument(
+        "--min-tus",
+        type=int,
+        default=0,
+        metavar="N",
+        help="with --from-corpus: also require a header in >= N TUs (default: 0)",
+    )
+    q.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="with --from-corpus: parallel `clang -M` scans (default: CPU count)",
     )
     q.set_defaults(fn=cmd_pch_build)
 

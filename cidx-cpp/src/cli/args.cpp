@@ -188,11 +188,15 @@ const char kPchHelp[] =
 
 const char kPchBuildUsage[] =
     "usage: cidx pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
-    "                      [--driver DRIVER] [--std STD] [--force]\n";
+    "                      [--driver DRIVER] [--std STD] [--force]\n"
+    "                      [--from-corpus] [--coverage FRAC] [--min-tus N]\n"
+    "                      [--jobs N]\n";
 
 const char kPchBuildHelp[] =
     "usage: cidx pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
     "                      [--driver DRIVER] [--std STD] [--force]\n"
+    "                      [--from-corpus] [--coverage FRAC] [--min-tus N]\n"
+    "                      [--jobs N]\n"
     "\n"
     "options:\n"
     "  -h, --help        show this help message and exit\n"
@@ -205,7 +209,18 @@ const char kPchBuildHelp[] =
     "(default:\n"
     "                    the index's dominant C++ driver)\n"
     "  --std STD         override the C++ standard, e.g. c++17\n"
-    "  --force           rebuild even if a PCH already exists\n";
+    "  --force           rebuild even if a PCH already exists\n"
+    "  --from-corpus     build the umbrella from the headers actually shared by\n"
+    "                    the index's C++ TUs (a `clang -E -H` survey), "
+    "retaining\n"
+    "                    -I so project headers are included\n"
+    "  --coverage FRAC   with --from-corpus: include a header if shared by >= "
+    "this\n"
+    "                    fraction of C++ TUs (default: 0.7)\n"
+    "  --min-tus N       with --from-corpus: also require a header in >= N TUs\n"
+    "  --jobs N          with --from-corpus: parallel `clang -E -H` scans "
+    "(default:\n"
+    "                    CPU count)\n";
 
 const char kPchStatusUsage[] = "usage: cidx pch status [-h]\n";
 
@@ -1745,6 +1760,10 @@ const Spec kPchBuildSpec = {
         {"--driver", '\0', ValueKind::kString, "--driver"},
         {"--std", '\0', ValueKind::kString, "--std"},
         {"--force", '\0', ValueKind::kNone, "--force"},
+        {"--from-corpus", '\0', ValueKind::kNone, "--from-corpus"},
+        {"--coverage", '\0', ValueKind::kString, "--coverage"},
+        {"--min-tus", '\0', ValueKind::kString, "--min-tus"},
+        {"--jobs", '\0', ValueKind::kString, "--jobs"},
     },
     {},
     false,
@@ -2404,6 +2423,16 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.pch_driver = opt_value(st, "--driver");
       pa.pch_std = opt_value(st, "--std");
       pa.force = st.flags.count("--force") != 0;
+      pa.pch_from_corpus = st.flags.count("--from-corpus") != 0;
+      if (const std::optional<std::string> cov = opt_value(st, "--coverage")) {
+        pa.pch_coverage = std::stod(*cov);
+      }
+      if (const std::optional<std::string> mt = opt_value(st, "--min-tus")) {
+        pa.pch_min_tus = std::stoi(*mt);
+      }
+      if (const std::optional<std::string> jb = opt_value(st, "--jobs")) {
+        pa.pch_jobs = std::stoi(*jb);
+      }
     } else if (pa.what == "status") {
       ParseState st = parse_leaf(kPchStatusSpec, argv, what.next, extras);
       if (st.help) {

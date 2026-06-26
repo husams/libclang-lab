@@ -15,6 +15,7 @@ set(CIDX_DEFAULT_TESTS
   fuzzy_match_test
   repo_test
   include_aliasing_test
+  pch_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)

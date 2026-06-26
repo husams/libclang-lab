@@ -23,9 +23,12 @@
 // CIDX_NO_PCH (truthy) disables injection entirely.
 #pragma once
 
+#include <map>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cidx {
@@ -50,6 +53,39 @@ std::vector<std::string> pch_relevant(const std::vector<std::string> &options);
 // Default umbrella headers (heavy STL), exposed for tests.
 const std::vector<std::string> &default_headers();
 
+// --- corpus header survey (cidx pch build --from-corpus) ---------------------
+
+// One C++ TU's flags for the survey: its driver, resolved compile options
+// (sanitized + <label>/$VAR decoded), and absolute source path.
+struct TuFlags {
+  std::optional<std::string> driver;
+  std::vector<std::string> options;
+  std::string path;
+};
+
+// Survey result: `freq` = header path -> #TUs that include it transitively
+// (coverage / parse-cost signal); `directable` = headers that are a direct
+// (depth-1) include in at least one TU (the safe-to-umbrella entry points).
+struct HeaderSurvey {
+  std::map<std::string, int> freq;
+  std::set<std::string> directable;
+};
+
+// Extract (flag, dir) include-search pairs from options (both `-I dir` and
+// joined `-Idir`; also -isystem/-iquote/-idirafter). Order preserved.
+std::vector<std::pair<std::string, std::string>>
+include_dirs(const std::vector<std::string> &options);
+
+// Run a parse-free `<driver> <opts> -E -H` survey over `tus` (up to `jobs`
+// concurrent) and aggregate the inclusion frequency + directable set.
+HeaderSurvey survey_headers(const std::vector<TuFlags> &tus, int jobs);
+
+// Headers shared (transitively) by >= `coverage` fraction (and >= `min_tus`) of
+// the surveyed TUs AND directly included by at least one -- most-shared first.
+std::vector<std::string> select_shared_headers(const HeaderSurvey &survey,
+                                               int n_cpp, double coverage,
+                                               int min_tus);
+
 // --- consumption gate (called from Parser::parse for every TU) ---------------
 
 // {"-include-pch", <path>} when a compatible system PCH should be injected into
@@ -63,10 +99,13 @@ std::vector<std::string> consume_args(bool cpp,
 // Compile an umbrella of `headers` with `flags` (+ driver) into the cached PCH
 // and write the sidecar. Disables injection while building. Returns 0 on
 // success. The Storage-derived common flags are computed by the caller.
+// `quoted` writes `#include "h"` (absolute corpus headers) instead of
+// `#include <h>`; `corpus`/`coverage` are recorded in the sidecar.
 int build_pch(Parser &parser, const std::vector<std::string> &flags,
               const std::vector<std::string> &headers,
               const std::optional<std::string> &driver, int n_cpp_tus,
-              std::ostream &out, std::ostream &err);
+              std::ostream &out, std::ostream &err, bool quoted = false,
+              bool corpus = false, double coverage = 0.0);
 
 int status_pch(std::ostream &out);
 int clear_pch(std::ostream &out);
