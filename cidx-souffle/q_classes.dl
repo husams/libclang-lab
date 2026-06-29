@@ -1,0 +1,7 @@
+// q_classes.dl — SEEDED hierarchy only (anc/desc). Soufflé prunes reach/edep/cg/subtype
+// (no .output, not depended on), so this loads ONLY the small inherits/generalizes/
+// implements views and expands just the seeded class's neighborhood — never the giant
+// calls/uses closure nor the global hierarchy. Used by `query.sh classes`.
+#include "cidx_base.dl"
+.output anc(IO=sqlite, dbname="index.db")
+.output desc(IO=sqlite, dbname="index.db")

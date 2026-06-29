@@ -22,6 +22,7 @@ language** lowers to rules like these; a controlled-English **query language** l
 | `cidx.dl`        | example reasoning script (`#include "cidx_base.dl"` + `.output`s) — copy as a template |
 | `run.sh`         | create views + seed in place → run Soufflé (writes results into the same `index.db`) |
 | `query.sh`       | **per-symbol** front-end for the three canonical questions (reachable / callgraph / classes) |
+| `q_reach.dl` / `q_callgraph.dl` / `q_classes.dl` | **targeted** one-question programs `query.sh` runs so Soufflé computes only that relation |
 
 ## Run
 ```bash
@@ -52,6 +53,12 @@ front-end for the three things you usually want. Names are the annotated names b
 Use `-d /path/to/index.db` for a non-default index. An unknown exact name prints LIKE
 candidates so you can find the right annotated spelling.
 
+**Each question runs its own minimal program** (`q_reach.dl` / `q_callgraph.dl` /
+`q_classes.dl`), so Soufflé evaluates and loads the views for *only* that relation — the
+unseeded `edep`/`subtype` full-graph closures are pruned and never paid. `classes` is fully
+**seeded** too (`anc`/`desc` expand only the queried class's neighborhood), so all three
+questions stay fast on a large index. (`run.sh` is the batch path that computes everything.)
+
 ## What it computes
 - **`reach(a, b)`** — **seeded** transitive call reachability (`calls+`) from the symbols in
   the `seed` table. The full closure over millions of symbols is a space bomb, so it expands
@@ -60,9 +67,12 @@ candidates so you can find the right annotated spelling.
   flattened set like `reach`): every `(caller, callee)` hop in the forward (`cg_out`, callees)
   or reverse (`cg_in`, callers) cone of the seed. This is what makes the result a renderable
   graph (DOT/Mermaid); `query.sh callgraph` emits DOT from these.
-- **`subtype(sub, super)`** — transitive class hierarchy (all ancestors), over raw `inherits`
-  **and** the design-level `generalizes`/`implements` entity edges. Query `WHERE sub='X'` for
-  ancestors, `WHERE super='X'` for subclasses.
+- **`subtype(sub, super)`** — GLOBAL transitive class hierarchy (all ancestors of everything),
+  over raw `inherits` **and** design-level `generalizes`/`implements`. Unseeded full closure
+  used by the batch `run.sh`.
+- **`anc(x, ancestor)` / `desc(x, descendant)`** — **seeded** hierarchy: transitive ancestors
+  (up) and descendants (down) of the seeded class only. What `query.sh classes` reads, so it
+  scales without materializing the whole hierarchy.
 - **`edep(a, b)`** — transitive dependency closure over the **entity graph**
   (`uses`/`creates`/`composes`/`aggregates`/`associates`) — architecture-altitude "who
   depends on whom".

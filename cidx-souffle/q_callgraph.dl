@@ -1,0 +1,5 @@
+// q_callgraph.dl — seeded callgraph edges only (cg_out/cg_in). reach/edep/subtype are
+// pruned. Used by `query.sh callgraph`.
+#include "cidx_base.dl"
+.output cg_out(IO=sqlite, dbname="index.db")
+.output cg_in(IO=sqlite, dbname="index.db")
