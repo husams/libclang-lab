@@ -76,10 +76,26 @@ edep(a, b) :- e_aggregates(a, b).
 edep(a, b) :- e_associates(a, b).
 edep(a, b) :- edep(a, k), edep(k, b).
 
-// SEEDED call reachability. `seed` is written by run.sh (names matching a substring).
+// SEEDED call reachability. `seed` is written by run.sh / query.sh.
 // reach(a,b) = "a transitively calls b", expanded only from seeds. Empty seed ⇒ empty.
 .decl seed(x:Sym)
 .input seed(IO=sqlite, dbname="index.db")
 .decl reach(a:Sym, b:Sym)
 reach(a, b) :- seed(a), calls(a, b).
 reach(a, b) :- reach(a, k), calls(k, b).
+
+// SEEDED CALLGRAPH EDGES — unlike reach (which flattens to a reachable *set* and loses
+// structure), these keep every (caller, callee) hop, so the result IS a renderable graph
+// (DOT/Mermaid). Both are SEEDED, so they expand only from the symbols you ask about.
+//
+// cg_out = forward call cone: edges in the subgraph the seed transitively CALLS
+//          ("the callgraph of function X" / what X depends on at runtime).
+.decl cg_out(caller:Sym, callee:Sym)
+cg_out(x, y) :- seed(x), calls(x, y).
+cg_out(x, y) :- cg_out(_, x), calls(x, y).
+
+// cg_in = reverse call cone: edges in the subgraph that transitively CALLS the seed
+//         ("who reaches X" / blast radius / impact of changing X).
+.decl cg_in(caller:Sym, callee:Sym)
+cg_in(x, y) :- seed(y), calls(x, y).
+cg_in(x, y) :- cg_in(y, _), calls(x, y).

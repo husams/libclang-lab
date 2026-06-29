@@ -23,12 +23,12 @@ mkdir -p "$BUILD"
 ln -sf "$SRC_ABS" "$BUILD/index.db"               # symlink — Soufflé reads/writes the REAL file
 
 echo "── creating views + seed in $SRC_ABS (in place) ──"
-SEED_SQL=""
-[ -n "$SEED" ] && SEED_SQL="INSERT INTO seed SELECT name FROM symdisp WHERE name LIKE '%$SEED%';"
-sqlite3 "$SRC_ABS" <<SQL
-.read $HERE/cidx_views.sql
-$SEED_SQL
-SQL
+sqlite3 "$SRC_ABS" ".read $HERE/cidx_views.sql"
+# type-agnostic reset of output + seed objects (a prior run may have left views, not tables)
+DROPS="$(sqlite3 "$SRC_ABS" "SELECT 'DROP '||type||' IF EXISTS \"'||name||'\";' FROM sqlite_master WHERE name IN ('subtype','edep','reach','cg_out','cg_in','seed');")"
+[ -n "$DROPS" ] && sqlite3 "$SRC_ABS" "$DROPS"
+sqlite3 "$SRC_ABS" "CREATE TABLE seed(x TEXT);"
+[ -n "$SEED" ] && sqlite3 "$SRC_ABS" "INSERT INTO seed SELECT name FROM symdisp WHERE name LIKE '%$SEED%';"
 
 echo "── running soufflé (writes results into the same index.db) ──"
 time ( cd "$BUILD" && souffle "$HERE/cidx.dl" )
@@ -37,6 +37,8 @@ echo "── result tables now live in $SRC_ABS (names, not ids) ──"
 sqlite3 "$SRC_ABS" \
   "SELECT 'subtype', count(*) FROM subtype
    UNION ALL SELECT 'edep', count(*) FROM edep
-   UNION ALL SELECT 'reach(seeded)', count(*) FROM reach;"
+   UNION ALL SELECT 'reach(seeded)', count(*) FROM reach
+   UNION ALL SELECT 'cg_out(seeded)', count(*) FROM cg_out
+   UNION ALL SELECT 'cg_in(seeded)', count(*) FROM cg_in;"
 echo "results already carry names, e.g.:"
 echo "  sqlite3 $SRC_ABS \"SELECT b FROM reach WHERE a='X::func' LIMIT 20;\""

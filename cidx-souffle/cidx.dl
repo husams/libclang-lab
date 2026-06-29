@@ -9,3 +9,5 @@
 .output subtype(IO=sqlite, dbname="index.db")
 .output edep(IO=sqlite, dbname="index.db")
 .output reach(IO=sqlite, dbname="index.db")
+.output cg_out(IO=sqlite, dbname="index.db")
+.output cg_in(IO=sqlite, dbname="index.db")
