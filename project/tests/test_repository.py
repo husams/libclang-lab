@@ -28,7 +28,7 @@ def test_fresh_schema_has_repository_clone_and_column():
         ver = db._conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        assert ver == str(SCHEMA_VERSION) == "23"
+        assert ver == str(SCHEMA_VERSION) == "24"
         tables = {
             r[0]
             for r in db._conn.execute(
@@ -79,7 +79,10 @@ def test_add_clone_idempotent_on_path_and_active_pointer():
         db.close()
 
 
-def test_rebase_components_prefix_rewrite():
+def test_relativize_component_stores_clone_relative_path():
+    """v24: relativize_component rewrites a grouped component's path to be
+    RELATIVE to its clone root (`.` when it IS the root); component_abs_base
+    resolves it back. A path outside the clone stays absolute."""
     db = Storage(":memory:")
     try:
         rid = db.add_repository("r")
@@ -90,21 +93,80 @@ def test_rebase_components_prefix_rewrite():
         c_ext = db.add_component("ext", "/opt/lib", "external")
         for c in (c_root, c_sub, c_ext):
             db.set_component_repository(c, rid)
-        n = db.rebase_components(rid, "/w/a", "/w/b")
-        assert n == 2  # the /opt/lib component is outside the old root -> skipped
-        paths = sorted(c.path for c in db.components_for_repository(rid))
-        assert paths == ["/opt/lib", "/w/b", "/w/b/src"]
+            db.relativize_component(c, "/w/a")
+        by_name = {c.name: c for c in db.components_for_repository(rid)}
+        # Stored paths are now relative to the clone (or absolute when outside).
+        assert by_name["r"].path == "."
+        assert by_name["sub"].path == "src"
+        assert by_name["ext"].path == "/opt/lib"  # outside the clone -> absolute
+        # ... and they resolve back to absolute under the active clone.
+        assert db.component_abs_base(by_name["r"]) == "/w/a"
+        assert db.component_abs_base(by_name["sub"]) == "/w/a/src"
+        assert db.component_abs_base(by_name["ext"]) == "/opt/lib"
     finally:
         db.close()
 
 
-def test_rebase_skips_portable_paths():
+def test_switch_is_one_pointer_update_no_path_rewrite():
+    """v24: switching the active clone repoints `active_clone_id` only -- no
+    component.path row changes -- yet resolution follows the new clone."""
     db = Storage(":memory:")
     try:
         rid = db.add_repository("r")
+        a = db.add_clone(rid, "/w/a")
+        b = db.add_clone(rid, "/w/b")
+        db.set_active_clone(rid, a)
+        c_root = db.add_component("r", "/w/a", "repo")
+        c_sub = db.add_component("sub", "/w/a/src", "repo")
+        for c in (c_root, c_sub):
+            db.set_component_repository(c, rid)
+            db.relativize_component(c, "/w/a")
+        before = {c.id: c.path for c in db.components_for_repository(rid)}
+        # The switch is a single pointer move.
+        db.set_active_clone(rid, b)
+        after = {c.id: c.path for c in db.components_for_repository(rid)}
+        assert before == after  # not one component.path row changed
+        # Resolution now follows clone b.
+        names = {c.name: db.component_abs_base(c)
+                 for c in db.components_for_repository(rid)}
+        assert names == {"r": "/w/b", "sub": "/w/b/src"}
+    finally:
+        db.close()
+
+
+def test_multiple_repos_each_have_a_dot_root_no_unique_collision():
+    """v24: each repository's root component relativizes to '.', so several
+    coexist in one index -- `component.path` is UNIQUE per repository, not
+    globally. (Pre-v24 this tripped the global UNIQUE(path).)"""
+    db = Storage(":memory:")
+    try:
+        roots = {"a": "/w/a", "b": "/w/b", "c": "/w/c"}
+        for name, root in roots.items():
+            rid = db.add_repository(name)
+            cl = db.add_clone(rid, root)
+            db.set_active_clone(rid, cl)
+            cid = db.add_component(name, root, "repo")
+            db.set_component_repository(cid, rid)
+            db.relativize_component(cid, root)  # all become "."
+        comps = {c.name: c for c in db.list_components()}
+        assert {c.path for c in comps.values()} == {"."}  # all three roots
+        # ... and each resolves to its own clone.
+        assert db.component_abs_base(comps["a"]) == "/w/a"
+        assert db.component_abs_base(comps["b"]) == "/w/b"
+        assert db.component_abs_base(comps["c"]) == "/w/c"
+    finally:
+        db.close()
+
+
+def test_relativize_skips_portable_paths():
+    db = Storage(":memory:")
+    try:
+        rid = db.add_repository("r")
+        a = db.add_clone(rid, "/w/a")
+        db.set_active_clone(rid, a)
         c = db.add_component("p", "<LABEL>/inc", "external")
         db.set_component_repository(c, rid)
-        assert db.rebase_components(rid, "/w/a", "/w/b") == 0
+        db.relativize_component(c, "/w/a")
         assert db.get_component_by_id(c).path == "<LABEL>/inc"
     finally:
         db.close()
@@ -144,7 +206,7 @@ def test_migration_recreates_dropped_repository_tables():
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            assert ver == "23"
+            assert ver == "24"
             tables = {
                 r[0]
                 for r in db._conn.execute(
@@ -305,14 +367,42 @@ def test_cli_import_groups_and_switch_rebases(tmp_path):
     rs = _cidx(cache, "repo", "show", "libclang-lab")
     assert rs.returncode == 0 and "active clone" in rs.stdout
 
-    # add a second clone dir and switch to it: component paths rebase under it.
+    # The stored component path is RELATIVE (the component is the clone root,
+    # so it stores "."); list components shows the RESOLVED absolute path.
+    lc_db = _cidx(cache, "repo", "show", "libclang-lab")
+    assert lc_db.returncode == 0
+
+    # Capture the stored component.path rows before the switch.
+    import sqlite3
+    dbfile = os.path.join(cache, "index.db")
+    con = sqlite3.connect(dbfile)
+    stored_before = sorted(
+        con.execute(
+            "SELECT id, path FROM component WHERE repository_id IS NOT NULL"
+        ).fetchall()
+    )
+    con.close()
+    assert stored_before, "expected at least one grouped component"
+    assert any(p in (".", "") for _i, p in stored_before)  # root stored relative
+
+    # add a second clone dir and switch to it: a switch is a SINGLE pointer
+    # update -- no component.path row changes -- yet paths resolve under it.
     wt = tmp_path / "wt"
     wt.mkdir()
     ac = _cidx(cache, "repo", "add-clone", "libclang-lab", str(wt), "--label", "feat")
     assert ac.returncode == 0, ac.stderr
     sw = _cidx(cache, "repo", "switch", "libclang-lab", "feat")
     assert sw.returncode == 0, sw.stderr
-    assert "rebased" in sw.stdout
+    assert "switched" in sw.stdout
+
+    con = sqlite3.connect(dbfile)
+    stored_after = sorted(
+        con.execute(
+            "SELECT id, path FROM component WHERE repository_id IS NOT NULL"
+        ).fetchall()
+    )
+    con.close()
+    assert stored_after == stored_before  # not one component.path row changed
 
     lc2 = _cidx(cache, "list", "components")
     assert str(wt) in lc2.stdout

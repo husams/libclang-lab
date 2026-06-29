@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 23;
+constexpr int kSchemaVersion = 24;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -71,6 +71,12 @@ public:
                         const std::string &kind = "repo",
                         const std::optional<std::string> &version =
                             std::nullopt);
+  // v24: refresh an EXISTING component's name/kind in place (version COALESCE-
+  // kept) without touching its stored path. Mirrors Python update_component_meta.
+  void update_component_meta(int64_t component_id, const std::string &name,
+                             const std::string &kind,
+                             const std::optional<std::string> &version =
+                                 std::nullopt);
   // Two-step lookup: first by stored BASE path, then by effective root.
   // Required because version-detection may split a trailing segment off the
   // registered path (see §2 hazard in portable_paths_contract.md).
@@ -102,6 +108,21 @@ public:
   // Stored effective root: version ? normpath(join(path, version)) : path.
   // NOT resolved (may contain $VAR). Static so callers can use it anywhere.
   static std::string effective_root(const Component &comp);
+
+  // v24: absolute base directory of a component's tree (the effective root). A
+  // component grouped under a repository stores its `path` RELATIVE to that
+  // repository's active clone root; this anchors the (relative) effective root
+  // under the resolved clone path. An ungrouped component (repository_id null),
+  // an absolute path, or a portable <label>/$VAR path resolves exactly as
+  // before -- clone-agnostic. The single choke point for path reconstruction.
+  // Mirrors Python Storage.component_abs_base.
+  std::string component_abs_base(const Component &comp);
+
+  // v24: rewrite a grouped component's stored `path` to be RELATIVE to its
+  // repository's active clone root (`.` when it IS the clone root). A portable
+  // path, an already-relative path, a version-in-path representation, or a base
+  // outside clone_root is left untouched. Mirrors Python relativize_component.
+  void relativize_component(int64_t component_id, const std::string &clone_root);
 
   // v23: attach (or, with nullopt, detach) a component to a repository.
   void set_component_repository(int64_t component_id,
@@ -136,11 +157,6 @@ public:
   list_clones(const std::optional<int64_t> &repository_id = std::nullopt);
   // Remove a clone; clears the repository's active pointer if it pointed here.
   void delete_clone(int64_t clone_id);
-  // Rewrite the absolute-path prefix of a repository's components from
-  // old_root to new_root (`repo switch` rebase). Skips portable (`<`/`$`) and
-  // outside-root paths. Returns the number of components rewritten.
-  int64_t rebase_components(int64_t repository_id, const std::string &old_root,
-                            const std::string &new_root);
 
   // -- directories -----------------------------------------------------------
   int64_t add_directory(int64_t component_id, const std::string &path);
@@ -433,6 +449,11 @@ private:
 
   void migrate(); // column-presence detection, §4.1
   void migrate_symbol_kind_to_int(); // v15 -> v16: rebuild symbol, kind->int
+  void migrate_component_repo_unique(); // v23 -> v24: path UNIQUE per repo
+  // v24: resolved absolute path of a repository's active clone, or nullopt when
+  // ungrouped / no live clone. Mirrors Python Storage._active_clone_root.
+  std::optional<std::string>
+  active_clone_root(const std::optional<int64_t> &repository_id);
   // (component_id, relative dir, file name) for an absolute path; nullopt
   // when no component owns it.
   std::optional<std::tuple<int64_t, std::string, std::string>>

@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS meta (
 -- v23: a repository groups one or more components under one logical code base.
 -- A repo can be checked out in several directories (git worktrees / separate
 -- clones); each is a `clone` row and `active_clone_id` names the live one.
+-- v24: a grouped component stores its `path` RELATIVE to the repository's active
+-- clone root (resolved at read time via component_abs_base); `repo switch` then
+-- only repoints `active_clone_id` -- no per-component path rewrite. An ungrouped
+-- component (repository_id NULL) keeps an absolute path. `remote_url` (git origin)
+-- lets two checkouts of the same repo map to one repository.
 CREATE TABLE IF NOT EXISTS repository (
     id              INTEGER PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
@@ -60,12 +65,18 @@ CREATE TABLE IF NOT EXISTS clone (
 CREATE TABLE IF NOT EXISTS component (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
-    path    TEXT NOT NULL UNIQUE,         -- base path (no version segment)
+    path    TEXT NOT NULL,                -- base path (no version segment);
+                                          -- v24: RELATIVE to the active clone
+                                          -- root when grouped, else absolute
     kind    TEXT NOT NULL DEFAULT 'repo'
             CHECK (kind IN ('repo', 'external')),
     version TEXT,                         -- v14: nullable; NULL = unversioned
     repository_id INTEGER                 -- v23: -> repository.id; NULL = ungrouped
-            REFERENCES repository(id) ON DELETE SET NULL
+            REFERENCES repository(id) ON DELETE SET NULL,
+    -- v24: path is UNIQUE per repository -- a grouped component stores a
+    -- clone-relative path, so several repos can each carry a '.' root;
+    -- ungrouped rows (repository_id NULL) are de-duplicated by add_component.
+    UNIQUE (repository_id, path)
 );
 
 CREATE TABLE IF NOT EXISTS directory (
@@ -328,7 +339,7 @@ CREATE TABLE IF NOT EXISTS entity_node (
     kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '23');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '24');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -907,6 +918,102 @@ void Storage::migrate() {
   if (!has_table("repository")) {
     changed = true; // table will be created by the schema script
   }
+  // v23 -> v24: `component.path` is now UNIQUE per repository (was global).
+  // Rebuild the table when the old global UNIQUE(path) is still in place so the
+  // clone-relative paths below (multiple '.' roots) do not collide. Mirrors
+  // storage.py.
+  if (has_table("component")) {
+    std::string comp_sql;
+    { // scope the read statement so it is finalized before the table rebuild
+      auto sq = db_.prepare("SELECT sql FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'component'");
+      if (sq.step()) {
+        comp_sql = sq.col_text(0);
+      }
+    }
+    if (!comp_sql.empty() &&
+        comp_sql.find("UNIQUE (repository_id, path)") == std::string::npos) {
+      migrate_component_repo_unique();
+      changed = true;
+    }
+  }
+  // v23 -> v24: a grouped component's path becomes RELATIVE to its repository's
+  // active clone root, so `repo switch` only repoints the active pointer (no
+  // per-component rewrite). Convert any component that is grouped, has a live
+  // active clone, stores an ABSOLUTE path (not version-in-path), and sits under
+  // that clone -- strip the clone prefix (`.` when it IS the clone root).
+  // Idempotent: an already-relative path is skipped. Mirrors storage.py.
+  if (has_table("repository") && has_table("clone") && has_table("component") &&
+      has_col(table_columns("component"), "repository_id")) {
+    struct Pending {
+      int64_t id;
+      std::string rel;
+    };
+    std::vector<Pending> pend;
+    { // scope the read statement so it is finalized before the UPDATEs below
+    auto scan = db_.prepare("SELECT id, path, repository_id FROM component "
+                            "WHERE repository_id IS NOT NULL");
+    while (scan.step()) {
+      const int64_t cid = scan.col_int64(0);
+      const std::string cpath = scan.col_text(1);
+      const int64_t rid = scan.col_int64(2);
+      if (cpath.find('<') != std::string::npos ||
+          cpath.find('$') != std::string::npos || !pathutil::isabs(cpath)) {
+        continue; // portable or already relative
+      }
+      if (!CompileDb::split_base_version(cpath).second.empty()) {
+        continue; // version-in-path: keep absolute (see relativize_component)
+      }
+      std::optional<int64_t> active;
+      {
+        auto rst =
+            db_.prepare("SELECT active_clone_id FROM repository WHERE id = ?");
+        rst.bind(1, rid);
+        if (!rst.step()) {
+          continue;
+        }
+        active = opt_int64(rst, 0);
+      }
+      if (!active) {
+        continue;
+      }
+      std::string clone_path;
+      {
+        auto cst = db_.prepare("SELECT path FROM clone WHERE id = ?");
+        cst.bind(1, *active);
+        if (!cst.step()) {
+          continue;
+        }
+        clone_path = cst.col_text(0);
+      }
+      std::string root =
+          pathutil::abspath(pathutil::resolve_fs_path(clone_path));
+      while (!root.empty() && root.back() == '/') {
+        root.pop_back();
+      }
+      std::string base = pathutil::abspath(cpath);
+      while (!base.empty() && base.back() == '/') {
+        base.pop_back();
+      }
+      std::string rel;
+      if (base == root) {
+        rel = ".";
+      } else if (base.starts_with(root + "/")) {
+        rel = pathutil::relpath(base, root);
+      } else {
+        continue; // component outside the active clone -> keep absolute
+      }
+      pend.push_back({cid, rel});
+    }
+    } // scan finalized
+    for (const Pending &p : pend) {
+      auto upd = db_.prepare("UPDATE component SET path = ? WHERE id = ?");
+      upd.bind(1, std::string_view(p.rel));
+      upd.bind(2, p.id);
+      upd.step_done();
+      changed = true;
+    }
+  }
   // v14 -> v15: per-file parse diagnostics. Created by the schema script
   // (CREATE TABLE IF NOT EXISTS); no backfill -- a reindex repopulates it.
   if (!has_table("diagnostic")) {
@@ -1049,6 +1156,34 @@ void Storage::migrate_symbol_kind_to_int() {
   db_.exec("PRAGMA foreign_keys = ON");
 }
 
+// v23 -> v24: rebuild `component` so `path` is UNIQUE per repository (was
+// globally UNIQUE). A grouped component stores a clone-RELATIVE path, so several
+// repositories can each carry a '.' root -- the old global UNIQUE(path) would
+// reject that. Foreign keys are disabled for the swap so dropping the table does
+// not cascade-delete directories (they keep the ids the copied rows carry). The
+// schema script (run right after) is a no-op (CREATE TABLE IF NOT EXISTS).
+// Mirrors Python _migrate_component_repo_unique.
+void Storage::migrate_component_repo_unique() {
+  db_.exec("PRAGMA foreign_keys = OFF");
+  db_.exec(
+      "CREATE TABLE component_new ("
+      " id      INTEGER PRIMARY KEY,"
+      " name    TEXT NOT NULL,"
+      " path    TEXT NOT NULL,"
+      " kind    TEXT NOT NULL DEFAULT 'repo'"
+      "         CHECK (kind IN ('repo', 'external')),"
+      " version TEXT,"
+      " repository_id INTEGER"
+      "         REFERENCES repository(id) ON DELETE SET NULL,"
+      " UNIQUE (repository_id, path)"
+      ");"
+      "INSERT INTO component_new"
+      " SELECT id, name, path, kind, version, repository_id FROM component;"
+      "DROP TABLE component;"
+      "ALTER TABLE component_new RENAME TO component;");
+  db_.exec("PRAGMA foreign_keys = ON");
+}
+
 // -- components
 // ----------------------------------------------------------------
 
@@ -1062,24 +1197,57 @@ int64_t Storage::add_component(const std::string &name, const std::string &path,
        path.find('<') == std::string::npos)
           ? pathutil::abspath(path)
           : path;
-  // v14: COALESCE(excluded.version, component.version) so a re-import that
-  // supplies NO version (excluded.version bound NULL) PRESERVES the existing
-  // stored version instead of silently wiping it (contract §4.2).
-  auto st = db_.prepare(
-      "INSERT INTO component (name, path, kind, version) VALUES (?, ?, ?, ?) "
-      "ON CONFLICT(path) DO UPDATE SET name = excluded.name, kind = "
-      "excluded.kind, version = COALESCE(excluded.version, component.version) "
-      "RETURNING id");
+  // v24: `path` is no longer globally UNIQUE (it is UNIQUE per repository, so
+  // grouped components can share a '.' root), so the dedup is done here in code
+  // rather than via ON CONFLICT(path). Idempotent on the exact stored path
+  // string: an existing row has name/kind updated (version COALESCE-preserved
+  // when none supplied). Low-level primitive -- callers pass the ABSOLUTE base
+  // before grouping; re-resolving an already-relativized component is the
+  // caller's job (get_component / component_for_path are clone-aware). Mirrors
+  // Python add_component.
+  {
+    auto sel = db_.prepare("SELECT id FROM component WHERE path = ?");
+    sel.bind(1, std::string_view(abs));
+    if (sel.step()) {
+      const int64_t cid = sel.col_int64(0);
+      auto upd = db_.prepare("UPDATE component SET name = ?, kind = ?, "
+                             "version = COALESCE(?, version) WHERE id = ?");
+      upd.bind(1, std::string_view(name));
+      upd.bind(2, std::string_view(kind));
+      bind_opt(upd, 3, version);
+      upd.bind(4, cid);
+      upd.step_done();
+      return cid;
+    }
+  }
+  auto st = db_.prepare("INSERT INTO component (name, path, kind, version) "
+                        "VALUES (?, ?, ?, ?) RETURNING id");
   st.bind(1, std::string_view(name));
   st.bind(2, std::string_view(abs));
   st.bind(3, std::string_view(kind));
   bind_opt(st, 4, version);
   if (!st.step()) {
-    throw StorageError("component upsert returned no id");
+    throw StorageError("component insert returned no id");
   }
   const int64_t cid = st.col_int64(0);
   st.step_done();
   return cid;
+}
+
+void Storage::update_component_meta(int64_t component_id,
+                                    const std::string &name,
+                                    const std::string &kind,
+                                    const std::optional<std::string> &version) {
+  // Refresh an EXISTING (already-grouped, possibly clone-relative) component's
+  // name/kind in place without touching its stored path; version COALESCE-kept.
+  // Mirrors Python Storage.update_component_meta.
+  auto st = db_.prepare("UPDATE component SET name = ?, kind = ?, "
+                        "version = COALESCE(?, version) WHERE id = ?");
+  st.bind(1, std::string_view(name));
+  st.bind(2, std::string_view(kind));
+  bind_opt(st, 3, version);
+  st.bind(4, component_id);
+  st.step_done();
 }
 
 bool Storage::set_component_version(const std::string &name,
@@ -1140,6 +1308,77 @@ std::string Storage::effective_root(const Component &comp) {
   return pathutil::normpath(pathutil::join(comp.path, *comp.version));
 }
 
+// Resolved absolute path of a repository's active clone, or nullopt when the
+// component is ungrouped / the repository has no live clone. Mirrors Python
+// Storage._active_clone_root.
+std::optional<std::string>
+Storage::active_clone_root(const std::optional<int64_t> &repository_id) {
+  if (!repository_id) {
+    return std::nullopt;
+  }
+  const auto repo = get_repository_by_id(*repository_id);
+  if (!repo || !repo->active_clone_id) {
+    return std::nullopt;
+  }
+  const auto clone = get_clone_by_id(*repo->active_clone_id);
+  if (!clone) {
+    return std::nullopt;
+  }
+  return pathutil::abspath(pathutil::resolve_fs_path(clone->path));
+}
+
+std::string Storage::component_abs_base(const Component &comp) {
+  const std::string eff = effective_root(comp);
+  if (comp.repository_id && !pathutil::isabs(comp.path) &&
+      comp.path.find('<') == std::string::npos &&
+      comp.path.find('$') == std::string::npos) {
+    const auto root = active_clone_root(comp.repository_id);
+    if (root) {
+      return pathutil::abspath(pathutil::join(*root, eff));
+    }
+  }
+  return pathutil::abspath(pathutil::resolve_fs_path(eff));
+}
+
+void Storage::relativize_component(int64_t component_id,
+                                   const std::string &clone_root) {
+  const auto comp = get_component_by_id(component_id);
+  if (!comp) {
+    return;
+  }
+  if (comp->path.find('<') != std::string::npos ||
+      comp->path.find('$') != std::string::npos ||
+      !pathutil::isabs(comp->path)) {
+    return;
+  }
+  if (!CompileDb::split_base_version(comp->path).second.empty()) {
+    // version-in-path representation: the version segment is part of the
+    // absolute path identity (set_component_effective_version rewrites it in
+    // place), so keep it absolute -- relativizing would drop it.
+    return;
+  }
+  std::string root = pathutil::abspath(pathutil::resolve_fs_path(clone_root));
+  while (!root.empty() && root.back() == '/') {
+    root.pop_back();
+  }
+  std::string base = pathutil::abspath(comp->path);
+  while (!base.empty() && base.back() == '/') {
+    base.pop_back();
+  }
+  std::string rel;
+  if (base == root) {
+    rel = ".";
+  } else if (base.starts_with(root + "/")) {
+    rel = pathutil::relpath(base, root);
+  } else {
+    return; // component lives outside this clone -> keep it absolute
+  }
+  auto upd = db_.prepare("UPDATE component SET path = ? WHERE id = ?");
+  upd.bind(1, std::string_view(rel));
+  upd.bind(2, component_id);
+  upd.step_done();
+}
+
 std::optional<Component> Storage::get_component(const std::string &path) {
   const std::string abs = pathutil::abspath(path);
   // Step 1: exact match on stored BASE path (fast-path for unversioned comps).
@@ -1158,8 +1397,7 @@ std::optional<Component> Storage::get_component(const std::string &path) {
         db_.prepare(std::string("SELECT ") + kComponentCols + " FROM component");
     while (st.step()) {
       Component c = component_from(st);
-      const std::string root =
-          pathutil::abspath(pathutil::resolve_fs_path(effective_root(c)));
+      const std::string root = component_abs_base(c);
       if (root == abs) {
         return c;
       }
@@ -1198,10 +1436,10 @@ Storage::component_for_path(const std::string &abs_path) {
       db_.prepare(std::string("SELECT ") + kComponentCols + " FROM component");
   while (st.step()) {
     Component c = component_from(st);
-    // Use the resolved effective root (base+version) for prefix matching
-    // (contract §4.4 item 1 / §2 hazard). Strip trailing slashes.
-    std::string root =
-        pathutil::abspath(pathutil::resolve_fs_path(effective_root(c)));
+    // Use the resolved effective root (base+version, clone-anchored when
+    // grouped) for prefix matching (contract §4.4 item 1 / §2 hazard). Strip
+    // trailing slashes.
+    std::string root = component_abs_base(c);
     while (!root.empty() && root.back() == '/') {
       root.pop_back(); // rstrip(os.sep)
     }
@@ -1500,42 +1738,6 @@ void Storage::delete_clone(int64_t clone_id) {
   del.step_done();
 }
 
-int64_t Storage::rebase_components(int64_t repository_id,
-                                   const std::string &old_root,
-                                   const std::string &new_root) {
-  std::string oldr = pathutil::abspath(old_root);
-  std::string newr = pathutil::abspath(new_root);
-  while (!oldr.empty() && oldr.back() == '/') {
-    oldr.pop_back();
-  }
-  while (!newr.empty() && newr.back() == '/') {
-    newr.pop_back();
-  }
-  if (oldr == newr) {
-    return 0;
-  }
-  int64_t n = 0;
-  for (const Component &comp : components_for_repository(repository_id)) {
-    const std::string &p = comp.path;
-    if (p.find('<') != std::string::npos || p.find('$') != std::string::npos) {
-      continue; // portable path: clone-root agnostic already
-    }
-    std::string new_path;
-    if (p == oldr) {
-      new_path = newr;
-    } else if (p.starts_with(oldr + "/")) {
-      new_path = newr + p.substr(oldr.size());
-    } else {
-      continue;
-    }
-    auto upd = db_.prepare("UPDATE component SET path = ? WHERE id = ?");
-    upd.bind(1, std::string_view(new_path));
-    upd.bind(2, comp.id);
-    upd.step_done();
-    ++n;
-  }
-  return n;
-}
 
 // -- directories
 // -----------------------------------------------------------------
@@ -1679,10 +1881,9 @@ Storage::split_path(const std::string &abs_path) {
   if (!comp) {
     return std::nullopt;
   }
-  // Use the resolved effective root (base+version) for relpath computation
-  // (contract §4.4 item 2).
-  const std::string root =
-      pathutil::abspath(pathutil::resolve_fs_path(effective_root(*comp)));
+  // Use the resolved effective root (base+version, clone-anchored when grouped)
+  // for relpath computation (contract §4.4 item 2).
+  const std::string root = component_abs_base(*comp);
   const std::string rel = pathutil::relpath(abs, root);
   auto [rel_dir, name] = pathutil::split(rel);
   if (rel_dir == ".") {
@@ -1737,9 +1938,10 @@ std::optional<File> Storage::get_file_by_id(int64_t file_id) {
 }
 
 std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
-  // SELECT c.path AND c.version so we can build the effective root.
+  // SELECT c.path, c.version, c.repository_id so we can build the effective root
+  // (clone-anchored when grouped).
   auto st = db_.prepare(
-      "SELECT c.path, c.version, d.path AS rel, f.name AS name "
+      "SELECT c.path, c.version, c.repository_id, d.path AS rel, f.name AS name "
       "FROM file f JOIN directory d ON d.id = f.directory_id "
       "JOIN component c ON c.id = d.component_id WHERE f.id = ?");
   st.bind(1, file_id);
@@ -1750,14 +1952,14 @@ std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
   Component tmp;
   tmp.path = st.col_text(0);
   tmp.version = opt_text(st, 1);
-  const std::string root =
-      pathutil::abspath(pathutil::resolve_fs_path(effective_root(tmp)));
-  return reconstruct_path(root, st.col_text(2), st.col_text(3));
+  tmp.repository_id = opt_int64(st, 2);
+  const std::string root = component_abs_base(tmp);
+  return reconstruct_path(root, st.col_text(3), st.col_text(4));
 }
 
 std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
   auto st = db_.prepare(
-      "SELECT c.path, c.version, d.path AS rel FROM directory d "
+      "SELECT c.path, c.version, c.repository_id, d.path AS rel FROM directory d "
       "JOIN component c ON c.id = d.component_id WHERE d.id = ?");
   st.bind(1, directory_id);
   if (!st.step()) {
@@ -1766,9 +1968,9 @@ std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
   Component tmp;
   tmp.path = st.col_text(0);
   tmp.version = opt_text(st, 1);
-  const std::string root =
-      pathutil::abspath(pathutil::resolve_fs_path(effective_root(tmp)));
-  const std::string rel = st.col_text(2);
+  tmp.repository_id = opt_int64(st, 2);
+  const std::string root = component_abs_base(tmp);
+  const std::string rel = st.col_text(3);
   return rel.empty() ? root : pathutil::join(root, rel);
 }
 
@@ -1780,7 +1982,7 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   std::string sql =
       "SELECT f.id, f.directory_id, f.name, f.mtime, f.md5, f.compile_options, "
       "f.driver, f.indexed, f.indexed_at, f.args_overridden, "
-      "c.path AS root, c.version, d.path AS rel "
+      "c.path AS root, c.version, c.repository_id, d.path AS rel "
       "FROM file f JOIN directory d ON d.id = f.directory_id "
       "JOIN component c ON c.id = d.component_id";
   std::vector<std::string> where;
@@ -1810,14 +2012,15 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   }
   std::vector<std::pair<File, std::string>> out;
   while (st.step()) {
-    // Columns 10=c.path, 11=c.version, 12=d.path (rel); f.name is col 2.
+    // Columns 10=c.path, 11=c.version, 12=c.repository_id, 13=d.path (rel);
+    // f.name is col 2.
     Component tmp;
     tmp.path = st.col_text(10);
     tmp.version = opt_text(st, 11);
-    const std::string root =
-        pathutil::abspath(pathutil::resolve_fs_path(effective_root(tmp)));
+    tmp.repository_id = opt_int64(st, 12);
+    const std::string root = component_abs_base(tmp);
     out.emplace_back(file_from(st),
-                     reconstruct_path(root, st.col_text(12), st.col_text(2)));
+                     reconstruct_path(root, st.col_text(13), st.col_text(2)));
   }
   return out;
 }
@@ -3887,11 +4090,12 @@ Storage::component_alias_index() {
   };
   std::map<std::string, std::vector<Row>> by_name;
   for (const auto &c : list_components()) {
-    const std::string eff =
-        pathutil::abspath(pathutil::resolve_fs_path(effective_root(c)));
+    const std::string eff = component_abs_base(c);
     const auto [base, ver] = CompileDb::split_base_version(eff);
-    const auto [pbase, pver] = CompileDb::split_base_version(
-        pathutil::abspath(pathutil::resolve_fs_path(c.path)));
+    Component cbase = c;
+    cbase.version = std::nullopt;
+    const auto [pbase, pver] =
+        CompileDb::split_base_version(component_abs_base(cbase));
     (void)pbase;
     by_name[c.name].push_back({base, ver, pver.empty()});
   }

@@ -29,13 +29,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from collections.abc import Sequence
 from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -78,9 +78,11 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- v23: a repository groups one or more components under one logical code base.
 -- A repo can be checked out in several directories (git worktrees / separate
--- clones); each is a `clone` row and `active_clone_id` names the live one. The
--- repository's components store absolute paths under the active clone's root;
--- `repo switch` rebases those paths to another clone. `remote_url` (git origin)
+-- clones); each is a `clone` row and `active_clone_id` names the live one.
+-- v24: a grouped component stores its `path` RELATIVE to the repository's active
+-- clone root (resolved at read time via component_abs_base); `repo switch` then
+-- only repoints `active_clone_id` -- no per-component path rewrite. An ungrouped
+-- component (repository_id NULL) keeps an absolute path. `remote_url` (git origin)
 -- lets two checkouts of the same repo map to one repository.
 CREATE TABLE IF NOT EXISTS repository (
     id              INTEGER PRIMARY KEY,
@@ -101,12 +103,18 @@ CREATE TABLE IF NOT EXISTS clone (
 CREATE TABLE IF NOT EXISTS component (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
-    path    TEXT NOT NULL UNIQUE,         -- base path (no version segment)
+    path    TEXT NOT NULL,                -- base path (no version segment);
+                                          -- v24: RELATIVE to the active clone
+                                          -- root when grouped, else absolute
     kind    TEXT NOT NULL DEFAULT 'repo'
             CHECK (kind IN ('repo', 'external')),
     version TEXT,                         -- v14: nullable; NULL = unversioned
     repository_id INTEGER                 -- v23: -> repository.id; NULL = ungrouped
-            REFERENCES repository(id) ON DELETE SET NULL
+            REFERENCES repository(id) ON DELETE SET NULL,
+    -- v24: path is UNIQUE per repository -- a grouped component stores a
+    -- clone-relative path, so several repos can each carry a '.' root;
+    -- ungrouped rows (repository_id NULL) are de-duplicated by add_component.
+    UNIQUE (repository_id, path)
 );
 
 CREATE TABLE IF NOT EXISTS directory (
@@ -697,6 +705,71 @@ class Storage:
             changed = True
         if "repository" not in tables:
             changed = True
+        # v23 -> v24: `component.path` is now UNIQUE per repository (was global).
+        # Rebuild the table when the old global UNIQUE(path) is still in place so
+        # the clone-relative paths below (multiple '.' roots) do not collide.
+        if "component" in tables:
+            comp_sql_row = self._conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'component'"
+            ).fetchone()
+            if (
+                comp_sql_row is not None
+                and "UNIQUE (repository_id, path)" not in (comp_sql_row[0] or "")
+            ):
+                self._migrate_component_repo_unique()
+                changed = True
+        # v23 -> v24: a grouped component's path becomes RELATIVE to its
+        # repository's active clone root, so `repo switch` only repoints the
+        # active pointer (no per-component rewrite). Convert any component that
+        # is grouped (repository_id set), has a live active clone, stores an
+        # ABSOLUTE path, and sits under that clone -- strip the clone prefix
+        # (`.` when it IS the clone root). Ungrouped/portable/outside-clone
+        # components stay absolute. Idempotent: an already-relative path is
+        # skipped, so this never fires twice. Runs here (the repository/clone
+        # tables already exist on a v23 DB; a fresh/<v23 DB has no grouped
+        # components, so this is a no-op for them).
+        if (
+            "repository" in tables
+            and "clone" in tables
+            and "repository_id" in compcols
+        ):
+            for crow in self._conn.execute(
+                "SELECT id, path, repository_id FROM component "
+                "WHERE repository_id IS NOT NULL"
+            ).fetchall():
+                cpath = crow["path"]
+                if "<" in cpath or "$" in cpath or not os.path.isabs(cpath):
+                    continue  # portable or already relative
+                if _pathx.split_base_version(cpath)[1] is not None:
+                    continue  # version-in-path: keep absolute (see relativize)
+                rrow = self._conn.execute(
+                    "SELECT active_clone_id FROM repository WHERE id = ?",
+                    (crow["repository_id"],),
+                ).fetchone()
+                if rrow is None or rrow["active_clone_id"] is None:
+                    continue
+                clrow = self._conn.execute(
+                    "SELECT path FROM clone WHERE id = ?",
+                    (rrow["active_clone_id"],),
+                ).fetchone()
+                if clrow is None:
+                    continue
+                root = os.path.abspath(
+                    _pathx.resolve_fs_path(clrow["path"])
+                ).rstrip(os.sep)
+                base = os.path.abspath(cpath).rstrip(os.sep)
+                if base == root:
+                    rel = "."
+                elif base.startswith(root + os.sep):
+                    rel = os.path.relpath(base, root)
+                else:
+                    continue  # component outside the active clone -> keep abs
+                self._conn.execute(
+                    "UPDATE component SET path = ? WHERE id = ?",
+                    (rel, crow["id"]),
+                )
+                changed = True
         if "label" not in tables:
             # The schema script (run AFTER migrate) creates the table via
             # CREATE TABLE IF NOT EXISTS; the migration only needs to flip
@@ -850,6 +923,37 @@ class Storage:
         self._conn.commit()
         self._conn.execute("PRAGMA foreign_keys = ON")
 
+    def _migrate_component_repo_unique(self) -> None:
+        """v23 -> v24: rebuild `component` so `path` is UNIQUE per repository
+        (was globally UNIQUE). A grouped component stores a clone-RELATIVE path,
+        so several repositories can each carry a '.' root -- the old global
+        UNIQUE(path) would reject that. Foreign keys are disabled for the swap so
+        dropping the table does not cascade-delete directories (they keep the ids
+        the copied rows carry). The schema script (run right after) is a no-op
+        (CREATE TABLE IF NOT EXISTS). Mirrors _migrate_symbol_kind_to_int.
+        """
+        self._conn.commit()  # close any open txn so the pragma takes effect
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        self._conn.executescript("""
+            CREATE TABLE component_new (
+                id      INTEGER PRIMARY KEY,
+                name    TEXT NOT NULL,
+                path    TEXT NOT NULL,
+                kind    TEXT NOT NULL DEFAULT 'repo'
+                        CHECK (kind IN ('repo', 'external')),
+                version TEXT,
+                repository_id INTEGER
+                        REFERENCES repository(id) ON DELETE SET NULL,
+                UNIQUE (repository_id, path)
+            );
+            INSERT INTO component_new
+                SELECT id, name, path, kind, version, repository_id FROM component;
+            DROP TABLE component;
+            ALTER TABLE component_new RENAME TO component;
+        """)
+        self._conn.commit()
+        self._conn.execute("PRAGMA foreign_keys = ON")
+
     # -- lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
@@ -876,25 +980,52 @@ class Storage:
     ) -> int:
         """Insert a component; idempotent on path. Returns the component id.
 
-        On conflict (same path), updates name and kind; updates version only
-        when the caller supplies a non-None value (COALESCE: a re-import that
-        passes no version does NOT wipe an existing stored version).
+        Idempotent on the exact stored path string: an existing row with that
+        path has its name and kind updated (version only when a non-None value
+        is supplied -- COALESCE). v24: `path` is no longer globally UNIQUE (it
+        is UNIQUE per repository, so grouped components can share a '.' root), so
+        the dedup is done here in code rather than via ON CONFLICT(path). This is
+        a low-level primitive -- callers pass the ABSOLUTE base before grouping;
+        re-resolving an already-relativized component is the caller's job
+        (get_component / component_for_path are clone-aware).
         """
         # Preserve indirected (portable) paths verbatim; absolutize plain paths.
         if "$" not in path and "<" not in path:
             path = os.path.abspath(path)
-        cur = self._conn.execute(
-            "INSERT INTO component (name, path, kind, version) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET "
-            "  name    = excluded.name, "
-            "  kind    = excluded.kind, "
-            "  version = COALESCE(excluded.version, component.version) "
-            "RETURNING id",
-            (name, path, kind, version),
-        )
-        cid = cur.fetchone()["id"]
+        row = self._conn.execute(
+            "SELECT id FROM component WHERE path = ?", (path,)
+        ).fetchone()
+        if row is not None:
+            cid = row["id"]
+            self._conn.execute(
+                "UPDATE component SET name = ?, kind = ?, "
+                "version = COALESCE(?, version) WHERE id = ?",
+                (name, kind, version, cid),
+            )
+        else:
+            cur = self._conn.execute(
+                "INSERT INTO component (name, path, kind, version) "
+                "VALUES (?, ?, ?, ?) RETURNING id",
+                (name, path, kind, version),
+            )
+            cid = cur.fetchone()["id"]
         self._commit()
         return cid
+
+    def update_component_meta(
+        self, component_id: int, name: str, kind: str,
+        version: Optional[str] = None,
+    ) -> None:
+        """Update a component's name/kind in place (version only when a non-None
+        value is supplied -- COALESCE). Used by add-source/import to refresh an
+        EXISTING (already-grouped, possibly clone-relative) component without
+        touching its stored path. Mirrors the add_component upsert metadata."""
+        self._conn.execute(
+            "UPDATE component SET name = ?, kind = ?, "
+            "version = COALESCE(?, version) WHERE id = ?",
+            (name, kind, version, component_id),
+        )
+        self._commit()
 
     def set_component_version(self, name: str, version: Optional[str]) -> bool:
         """Set (or clear when version=None) a component's version by name.
@@ -954,6 +1085,71 @@ class Storage:
             return os.path.normpath(os.path.join(comp.path, comp.version))
         return comp.path
 
+    def _active_clone_root(self, repository_id: Optional[int]) -> Optional[str]:
+        """Resolved absolute path of a repository's active clone, or None when
+        the component is ungrouped / the repository has no live clone."""
+        if repository_id is None:
+            return None
+        repo = self.get_repository_by_id(repository_id)
+        if repo is None or repo.active_clone_id is None:
+            return None
+        clone = self.get_clone_by_id(repo.active_clone_id)
+        if clone is None:
+            return None
+        return os.path.abspath(_pathx.resolve_fs_path(clone.path))
+
+    def component_abs_base(self, comp: "Component") -> str:
+        """Absolute base directory of a component's tree (the effective root).
+
+        v24: a component grouped under a repository stores its `path` RELATIVE to
+        that repository's active clone root; this anchors the (relative)
+        effective root under the resolved clone path. An ungrouped component
+        (repository_id NULL), an absolute path, or a portable ``<label>``/``$VAR``
+        path resolves exactly as before -- clone-agnostic. This is the single
+        choke point every path-reconstruction site routes through."""
+        eff = Storage.effective_root(comp)
+        if (
+            comp.repository_id is not None
+            and not os.path.isabs(comp.path)
+            and "<" not in comp.path
+            and "$" not in comp.path
+        ):
+            root = self._active_clone_root(comp.repository_id)
+            if root is not None:
+                return os.path.abspath(os.path.join(root, eff))
+        return os.path.abspath(_pathx.resolve_fs_path(eff))
+
+    def relativize_component(self, component_id: int, clone_root: str) -> None:
+        """Rewrite a grouped component's stored `path` to be RELATIVE to its
+        repository's active clone root (so `repo switch` repoints one pointer
+        instead of rewriting N rows). The component's CURRENT absolute base is
+        rebased onto clone_root: ``.`` when it IS the clone root, else the
+        relative remainder. A portable ``<label>``/``$VAR`` path, an
+        already-relative path, or a base that does not sit under clone_root is
+        left untouched (stays absolute / portable)."""
+        comp = self.get_component_by_id(component_id)
+        if comp is None:
+            return
+        if "<" in comp.path or "$" in comp.path or not os.path.isabs(comp.path):
+            return
+        if _pathx.split_base_version(comp.path)[1] is not None:
+            # version-in-path representation: the version segment is part of the
+            # absolute path identity (set_component_effective_version rewrites
+            # it in place), so keep it absolute -- relativizing would drop it.
+            return
+        root = os.path.abspath(_pathx.resolve_fs_path(clone_root)).rstrip(os.sep)
+        base = os.path.abspath(comp.path).rstrip(os.sep)
+        if base == root:
+            rel = "."
+        elif base.startswith(root + os.sep):
+            rel = os.path.relpath(base, root)
+        else:
+            return  # component lives outside this clone -> keep it absolute
+        self._conn.execute(
+            "UPDATE component SET path = ? WHERE id = ?", (rel, component_id)
+        )
+        self._commit()
+
     # -- labels (v14) --------------------------------------------------------
 
     def add_label(self, name: str, path: str) -> int:
@@ -1006,10 +1202,10 @@ class Storage:
         """
         by_name: dict[str, list[tuple[str, Optional[str], bool]]] = {}
         for c in self.list_components():
-            eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(c)))
+            eff = self.component_abs_base(c)
             base, ver = _pathx.split_base_version(eff)
             _, path_ver = _pathx.split_base_version(
-                os.path.abspath(_pathx.resolve_fs_path(c.path))
+                self.component_abs_base(replace(c, version=None))
             )
             by_name.setdefault(c.name, []).append((base, ver, path_ver is None))
         out: dict[str, tuple[str, Optional[str], bool]] = {}
@@ -1087,7 +1283,7 @@ class Storage:
         # user registered /src/v8 but the stored base is /src with version=v8).
         for row in self._conn.execute("SELECT * FROM component"):
             comp = _row_to(Component, row)
-            eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(comp)))
+            eff = self.component_abs_base(comp)
             if eff == abs_path:
                 return comp
         return None
@@ -1110,9 +1306,7 @@ class Storage:
         best_root_len = -1
         for row in self._conn.execute("SELECT * FROM component"):
             comp = _row_to(Component, row)
-            root = os.path.abspath(
-                _pathx.resolve_fs_path(Storage.effective_root(comp))
-            ).rstrip(os.sep)
+            root = self.component_abs_base(comp).rstrip(os.sep)
             if abs_path == root or abs_path.startswith(root + os.sep):
                 if len(root) > best_root_len:
                     best = comp
@@ -1353,40 +1547,6 @@ class Storage:
         self._conn.execute("DELETE FROM clone WHERE id = ?", (clone_id,))
         self._commit()
 
-    def rebase_components(
-        self, repository_id: int, old_root: str, new_root: str
-    ) -> int:
-        """Rewrite the absolute-path prefix of a repository's components from
-        old_root to new_root (the `repo switch` rebase). Components whose stored
-        path is portable (`<label>`/`$VAR`) or does not sit under old_root are
-        left untouched. Returns the number of components rewritten.
-
-        Paths are stored relative-to-nothing (absolute), so swapping the clone
-        root is a pure prefix substitution; directories/files are relative to
-        their component and need no change."""
-        old_root = os.path.abspath(old_root).rstrip(os.sep)
-        new_root = os.path.abspath(new_root).rstrip(os.sep)
-        if old_root == new_root:
-            return 0
-        n = 0
-        for comp in self.components_for_repository(repository_id):
-            p = comp.path
-            if "<" in p or "$" in p:
-                continue  # portable path: clone-root agnostic already
-            if p == old_root:
-                new_path = new_root
-            elif p.startswith(old_root + os.sep):
-                new_path = new_root + p[len(old_root):]
-            else:
-                continue
-            self._conn.execute(
-                "UPDATE component SET path = ? WHERE id = ?",
-                (new_path, comp.id),
-            )
-            n += 1
-        self._commit()
-        return n
-
     # -- directories ---------------------------------------------------------
 
     def add_directory(self, component_id: int, path: str) -> int:
@@ -1538,7 +1698,8 @@ class Storage:
     def files(self) -> list[tuple[File, str]]:
         """Every file row with its reconstructed absolute path, sorted by path."""
         rows = self._conn.execute(
-            "SELECT f.*, c.path AS root, c.version AS comp_version, d.path AS rel "
+            "SELECT f.*, c.path AS root, c.version AS comp_version, "
+            "c.repository_id AS comp_repo_id, d.path AS rel "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id "
             "ORDER BY c.path, d.path, f.name"
@@ -1546,11 +1707,10 @@ class Storage:
         out = []
         for row in rows:
             comp_stub = Component(
-                name="", path=row["root"], version=row["comp_version"]
+                name="", path=row["root"], version=row["comp_version"],
+                repository_id=row["comp_repo_id"],
             )
-            eff = os.path.abspath(
-                _pathx.resolve_fs_path(Storage.effective_root(comp_stub))
-            )
+            eff = self.component_abs_base(comp_stub)
             abs_path = (
                 os.path.join(eff, row["rel"], row["name"])
                 if row["rel"]
@@ -1569,7 +1729,8 @@ class Storage:
         """Like files(), with optional filters: component, directory subtree,
         fuzzy file name, and indexed state."""
         sql = (
-            "SELECT f.*, c.path AS root, c.version AS comp_version, d.path AS rel "
+            "SELECT f.*, c.path AS root, c.version AS comp_version, "
+            "c.repository_id AS comp_repo_id, d.path AS rel "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id"
         )
@@ -1591,11 +1752,10 @@ class Storage:
         out = []
         for row in self._conn.execute(sql, args):
             comp_stub = Component(
-                name="", path=row["root"], version=row["comp_version"]
+                name="", path=row["root"], version=row["comp_version"],
+                repository_id=row["comp_repo_id"],
             )
-            eff = os.path.abspath(
-                _pathx.resolve_fs_path(Storage.effective_root(comp_stub))
-            )
+            eff = self.component_abs_base(comp_stub)
             abs_path = (
                 os.path.join(eff, row["rel"], row["name"])
                 if row["rel"]
@@ -1723,16 +1883,20 @@ class Storage:
     def file_abs_path(self, file_id: int) -> Optional[str]:
         """Reconstructed absolute path for a file id (uses effective root)."""
         row = self._conn.execute(
-            "SELECT c.path AS root, c.version AS version, d.path AS rel, f.name AS name "
+            "SELECT c.path AS root, c.version AS version, "
+            "c.repository_id AS comp_repo_id, d.path AS rel, f.name AS name "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id WHERE f.id = ?",
             (file_id,),
         ).fetchone()
         if row is None:
             return None
-        # Reconstruct via the effective root (base + version, resolved).
-        comp_stub = Component(name="", path=row["root"], version=row["version"])
-        eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(comp_stub)))
+        # Reconstruct via the effective root (base + version, clone-resolved).
+        comp_stub = Component(
+            name="", path=row["root"], version=row["version"],
+            repository_id=row["comp_repo_id"],
+        )
+        eff = self.component_abs_base(comp_stub)
         return (
             os.path.join(eff, row["rel"], row["name"])
             if row["rel"]
@@ -1742,14 +1906,18 @@ class Storage:
     def directory_abs_path(self, directory_id: int) -> Optional[str]:
         """Reconstructed absolute path for a directory id (uses effective root)."""
         row = self._conn.execute(
-            "SELECT c.path AS root, c.version AS version, d.path AS rel FROM directory d "
+            "SELECT c.path AS root, c.version AS version, "
+            "c.repository_id AS comp_repo_id, d.path AS rel FROM directory d "
             "JOIN component c ON c.id = d.component_id WHERE d.id = ?",
             (directory_id,),
         ).fetchone()
         if row is None:
             return None
-        comp_stub = Component(name="", path=row["root"], version=row["version"])
-        eff = os.path.abspath(_pathx.resolve_fs_path(Storage.effective_root(comp_stub)))
+        comp_stub = Component(
+            name="", path=row["root"], version=row["version"],
+            repository_id=row["comp_repo_id"],
+        )
+        eff = self.component_abs_base(comp_stub)
         return os.path.join(eff, row["rel"]) if row["rel"] else eff
 
     def _split_path(self, abs_path: str) -> tuple[int, str, str]:
@@ -1758,9 +1926,7 @@ class Storage:
         comp = self.component_for_path(abs_path)
         if comp is None or comp.id is None:
             raise KeyError(f"no component owns {abs_path} (add_component first)")
-        resolved_root = os.path.abspath(
-            _pathx.resolve_fs_path(Storage.effective_root(comp))
-        )
+        resolved_root = self.component_abs_base(comp)
         rel = os.path.relpath(abs_path, resolved_root)
         rel_dir, name = os.path.split(rel)
         if rel_dir == ".":

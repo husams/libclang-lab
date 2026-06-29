@@ -297,10 +297,11 @@ run_script() {
 
   # repo (v23): grouping + switchable clones. parityproj (imported above) is
   # grouped under repository 'parityproj'. Exercise list/show, register a second
-  # clone dir, switch (which rebases parityproj's component paths onto it), and
-  # the not-found / bad-target error paths. Both tools share $WORK, so the
-  # rebased absolute paths and every output line are byte-identical. Run before
-  # the delete block so the golden DB dump reflects the post-switch state.
+  # clone dir, switch (v24: a single active_clone_id repoint -- the stored
+  # clone-relative component path is unchanged, but resolution follows the new
+  # clone), and the not-found / bad-target error paths. Both tools share $WORK,
+  # so the resolved absolute paths and every output line are byte-identical. Run
+  # before the delete block so the golden DB dump reflects the post-switch state.
   mkdir -p "$WORK/altclone"
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo list
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo ls

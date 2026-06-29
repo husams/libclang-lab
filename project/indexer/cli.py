@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime
 
 if __package__ in (None, ""):  # direct execution
@@ -73,7 +74,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.41.0"
+VERSION = "0.42.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -290,7 +291,16 @@ def cmd_add_source(args) -> int:
     name = args.name or (repo_name(path) if use_git else os.path.basename(path))
     base, version = _resolve_version(args, path)
     with Storage(args.index) as db:
-        cid = db.add_component(name, base, kind=args.kind, version=version)
+        # v24: a grouped component stores a clone-relative path, so re-adding the
+        # same source resolves the EXISTING component clone-aware (its stored
+        # path is no longer the absolute base) and refreshes its metadata in
+        # place; only a genuinely new source mints a row.
+        existing = db.get_component(base)
+        if existing is not None and existing.id is not None:
+            cid = existing.id
+            db.update_component_meta(cid, name, args.kind, version)
+        else:
+            cid = db.add_component(name, base, kind=args.kind, version=version)
         # v23: group the component under a repository (same kind). The source
         # directory is its first clone and becomes active.
         repo_name_val = getattr(args, "repo", None) or name
@@ -301,6 +311,9 @@ def cmd_add_source(args) -> int:
         if repo is not None and repo.active_clone_id is None:
             db.set_active_clone(rid, clone_id)
         db.set_component_repository(cid, rid)
+        # v24: store the component path RELATIVE to its clone root so a later
+        # `repo switch` only repoints the active clone (no path rewrite).
+        db.relativize_component(cid, path)
     print(f"component #{cid}: {name} ({args.kind}) at {base}")
     return 0
 
@@ -399,10 +412,13 @@ def cmd_import(args) -> int:
         if args.force:
             existing = db.get_component(root)
             if existing is not None:
+                # Resolved base (stored path is clone-relative for a grouped
+                # component, v24); show the absolute path either way.
+                existing_base = db.component_abs_base(existing)
                 db.delete_component(existing.id)
                 print(
                     f"force: removed existing component #{existing.id} "
-                    f"at {existing.path} (files and indexed symbols)"
+                    f"at {existing_base} (files and indexed symbols)"
                 )
         # The db-dir/git-root component is created LAZILY: only when a source
         # matches no already-registered component. Matching first means an
@@ -466,6 +482,9 @@ def cmd_import(args) -> int:
             attached.add(comp.id)
             if comp.repository_id is None:
                 db.set_component_repository(comp.id, rid)
+            # v24: store each grouped component's path RELATIVE to the clone
+            # root, so `repo switch` repoints one pointer instead of N rows.
+            db.relativize_component(comp.id, root)
         print(f"repository '{repo_name_val}': {len(attached)} component(s)")
     print(f"imported {imported} file(s), skipped {skipped}")
     return 0
@@ -526,7 +545,7 @@ def _lookup_component(db: Storage, name: str | None):
 def _source_root(db: Storage, name: str | None) -> str | None:
     """Component root for --source NAME; raises LookupError on an unknown name."""
     comp = _lookup_component(db, name)
-    return comp.path if comp else None
+    return db.component_abs_base(comp) if comp else None
 
 
 def _index_one(db: Storage, rec: File, path: str, no_graph: bool = False) -> int:
@@ -750,9 +769,9 @@ def cmd_set(args) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         if args.file is not None:
-            ap = resolve_file_arg(args.file, comp.path if comp else None)
+            ap = resolve_file_arg(args.file, db.component_abs_base(comp) if comp else None)
             rec = db.get_file(ap)
-            matches = [(rec.id, ap)] if rec and _under_component(ap, comp) else []
+            matches = [(rec.id, ap)] if rec and _under_component(db, ap, comp) else []
         else:
             matches = [
                 (f.id, ap)
@@ -794,7 +813,7 @@ def _parse_file_target(db: Storage, target: str):
     comp = db.get_component_by_name(comp_name)
     if comp is None:
         raise LookupError(f"no component named {comp_name!r}")
-    resolved_root = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp)))
+    resolved_root = db.component_abs_base(comp)
     abs_path = os.path.normpath(os.path.join(resolved_root, rel.lstrip("/")))
     return comp, abs_path
 
@@ -912,9 +931,7 @@ def cmd_dump_compile_commands(args) -> int:
             # compile_commands.json consumers get real paths for directory+file.
             # The stored (indirected) -I tokens in arguments are kept verbatim.
             if comp is not None:
-                directory = os.path.abspath(
-                    pathx.resolve_fs_path(Storage.effective_root(comp))
-                )
+                directory = db.component_abs_base(comp)
             else:
                 directory = os.path.dirname(ap)
             entries.append(
@@ -965,9 +982,11 @@ def cmd_list_components(args) -> int:
         for c in comps:
             ver = c.version if c.version else "-"
             rep = rnames[c.id]
+            # Show the resolved (clone-anchored) base, not the stored path,
+            # which is relative for a grouped component (v24).
             print(
                 f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  "
-                f"{ver:<{vw}}  {rep:<{rw}}  {c.path}"
+                f"{ver:<{vw}}  {rep:<{rw}}  {db.component_abs_base(c)}"
             )
     print(f"{len(comps)} component(s)")
     return 0 if comps else 1
@@ -1044,7 +1063,7 @@ def cmd_list_symbols(args) -> int:
             return 1
         file_id = None
         if args.file:
-            path = resolve_file_arg(args.file, comp.path if comp else None)
+            path = resolve_file_arg(args.file, db.component_abs_base(comp) if comp else None)
             rec = db.get_file(path)
             if rec is None:
                 print(f"error: not in index database: {path}", file=sys.stderr)
@@ -1136,7 +1155,7 @@ def cmd_show_file(args) -> int:
             rec = db.get_file_by_id(int(ref))
             path = db.file_abs_path(rec.id) if rec and rec.id else None
         else:
-            path = resolve_file_arg(ref, comp.path if comp else None)
+            path = resolve_file_arg(ref, db.component_abs_base(comp) if comp else None)
             rec = db.get_file(path)
         if rec is None or rec.id is None or path is None:
             print(f"error: not in index database: {ref}", file=sys.stderr)
@@ -1223,15 +1242,14 @@ def _selector_str(args) -> str:
     return "<no selector>"
 
 
-def _under_component(abs_path: str | None, comp) -> bool:
-    """True when comp is None, or abs_path lies within the component's effective root."""
+def _under_component(db: Storage, abs_path: str | None, comp) -> bool:
+    """True when comp is None, or abs_path lies within the component's effective
+    root (clone-anchored for a grouped component, v24)."""
     if comp is None:
         return True
     if abs_path is None:
         return False
-    root = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp))).rstrip(
-        os.sep
-    )
+    root = db.component_abs_base(comp).rstrip(os.sep)
     return abs_path == root or abs_path.startswith(root + os.sep)
 
 
@@ -1281,7 +1299,7 @@ def cmd_delete_dir(args) -> int:
         if args.id is not None:
             d = db.get_directory_by_id(args.id)
             matches = (
-                [d] if d and _under_component(db.directory_abs_path(d.id), comp) else []
+                [d] if d and _under_component(db, db.directory_abs_path(d.id), comp) else []
             )
         else:
             target = os.path.abspath(args.path)
@@ -1317,18 +1335,18 @@ def cmd_delete_file(args) -> int:
         if args.id is not None:
             rec = db.get_file_by_id(args.id)
             ap = db.file_abs_path(rec.id) if rec else None
-            if rec and _under_component(ap, comp):
+            if rec and _under_component(db, ap, comp):
                 matches = [(rec.id, ap)]
         elif args.path is not None:
-            ap = resolve_file_arg(args.path, comp.path if comp else None)
+            ap = resolve_file_arg(args.path, db.component_abs_base(comp) if comp else None)
             rec = db.get_file(ap)
-            if rec and _under_component(ap, comp):
+            if rec and _under_component(db, ap, comp):
                 matches = [(rec.id, ap)]
         else:
             matches = [
                 (f.id, ap)
                 for f, ap in db.files()
-                if os.path.basename(ap) == args.name and _under_component(ap, comp)
+                if os.path.basename(ap) == args.name and _under_component(db, ap, comp)
             ]
         if not matches:
             print(f"error: no file matches {_selector_str(args)}", file=sys.stderr)
@@ -1359,8 +1377,8 @@ def cmd_delete_symbol(args) -> int:
             def in_comp(s):
                 here = db.file_abs_path(s.file_id) if s.file_id else None
                 decl = db.file_abs_path(s.decl_file_id) if s.decl_file_id else None
-                return (here is not None and _under_component(here, comp)) or (
-                    decl is not None and _under_component(decl, comp)
+                return (here is not None and _under_component(db, here, comp)) or (
+                    decl is not None and _under_component(db, decl, comp)
                 )
 
             matches = [s for s in matches if in_comp(s)]
@@ -1680,7 +1698,7 @@ def cmd_component_show(args) -> int:
             print(f"error: no component named {args.name!r}", file=sys.stderr)
             return 1
         eff = Storage.effective_root(comp)
-        resolved = os.path.abspath(pathx.resolve_fs_path(eff))
+        resolved = db.component_abs_base(comp)
         version_str = comp.version if comp.version is not None else "(none)"
         fields = [
             ("name", comp.name),
@@ -1770,7 +1788,7 @@ def cmd_repo_show(args) -> int:
             cw = max((len(c.name) for c in comps), default=0)
             print("components:")
             for c in comps:
-                print(f"    {c.id:>4}  {c.name:<{cw}}  {c.path}")
+                print(f"    {c.id:>4}  {c.name:<{cw}}  {db.component_abs_base(c)}")
     return 0
 
 
@@ -1795,10 +1813,12 @@ def cmd_repo_add_clone(args) -> int:
 
 
 def cmd_repo_switch(args) -> int:
-    """cidx repo switch NAME TARGET -- rebase the repo onto another clone.
+    """cidx repo switch NAME TARGET -- point the repo at another clone.
 
-    TARGET matches a registered clone by exact path or by label. Component
-    paths are rewritten from the old active clone's root to the target's."""
+    TARGET matches a registered clone by exact path or by label. v24: grouped
+    component paths are stored RELATIVE to the active clone, so a switch is a
+    single `active_clone_id` update -- no component row is rewritten; every
+    path resolves against the new clone root automatically."""
     with Storage(args.index) as db:
         repo = db.get_repository_by_name(args.name)
         if repo is None:
@@ -1823,12 +1843,9 @@ def cmd_repo_switch(args) -> int:
                 f"warning: clone path {target.path} is not present on disk",
                 file=sys.stderr,
             )
-        old_path = _active_clone_path(db, repo)
-        n = 0
-        if old_path is not None and old_path != target.path:
-            n = db.rebase_components(repo.id, old_path, target.path)
+        ncomp = len(db.components_for_repository(repo.id))
         db.set_active_clone(repo.id, target.id)
-    print(f"switched '{args.name}' to {target.path} ({n} component(s) rebased)")
+    print(f"switched '{args.name}' to {target.path} ({ncomp} component(s))")
     return 0
 
 
@@ -1938,13 +1955,12 @@ def cmd_verify(args) -> int:
 
         c_ok = c_missing = c_vermiss = 0
         for c in components:
-            eff = Storage.effective_root(c)
-            resolved = os.path.abspath(pathx.resolve_fs_path(eff))
+            resolved = db.component_abs_base(c)
             if os.path.isdir(resolved):
                 status = "ok"
                 c_ok += 1
             elif c.version and os.path.isdir(
-                os.path.abspath(pathx.resolve_fs_path(c.path))
+                db.component_abs_base(replace(c, version=None))
             ):
                 status = "VER-MISS"
                 c_vermiss += 1
