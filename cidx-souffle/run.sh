@@ -25,7 +25,7 @@ ln -sf "$SRC_ABS" "$BUILD/index.db"               # symlink — Soufflé reads/w
 echo "── creating views + seed in $SRC_ABS (in place) ──"
 sqlite3 "$SRC_ABS" ".read $HERE/cidx_views.sql"
 # type-agnostic reset of output + seed objects (a prior run may have left views, not tables)
-DROPS="$(sqlite3 "$SRC_ABS" "SELECT 'DROP '||type||' IF EXISTS \"'||name||'\";' FROM sqlite_master WHERE name IN ('subtype','edep','reach','cg_out','cg_in','anc','desc','seed');")"
+DROPS="$(sqlite3 "$SRC_ABS" "SELECT 'DROP '||type||' IF EXISTS \"'||name||'\";' FROM sqlite_master WHERE name IN ('subtype','edep','reach','cg_out','cg_in','seed');")"
 [ -n "$DROPS" ] && sqlite3 "$SRC_ABS" "$DROPS"
 sqlite3 "$SRC_ABS" "CREATE TABLE seed(x TEXT);"
 [ -n "$SEED" ] && sqlite3 "$SRC_ABS" "INSERT INTO seed SELECT name FROM symdisp WHERE name LIKE '%$SEED%';"

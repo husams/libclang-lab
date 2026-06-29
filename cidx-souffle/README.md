@@ -21,8 +21,7 @@ language** lowers to rules like these; a controlled-English **query language** l
 | `cidx_base.dl`   | **reusable prelude** — all types, edge relations, common derived predicates. `#include` it from any reasoning script |
 | `cidx.dl`        | example reasoning script (`#include "cidx_base.dl"` + `.output`s) — copy as a template |
 | `run.sh`         | create views + seed in place → run Soufflé (writes results into the same `index.db`) |
-| `query.sh`       | **per-symbol** front-end for the three canonical questions (reachable / callgraph / classes) |
-| `q_reach.dl` / `q_callgraph.dl` / `q_classes.dl` | **targeted** one-question programs `query.sh` runs so Soufflé computes only that relation |
+| `query.sh`       | **per-symbol** front-end for the three canonical questions — **read-only SQL** (recursive CTEs over the existing `edge`/`entity_edge`), no Soufflé, no writes |
 
 ## Run
 ```bash
@@ -36,8 +35,11 @@ moved or copied. The result tables (`subtype`, `edep`, `reach`) and a `seed` tab
 only rows added to `index.db`; drop them anytime to remove all trace.
 
 ## Three canonical questions (`query.sh`)
-`query.sh` seeds **one exact symbol** and reads back the right relation — the practical
-front-end for the three things you usually want. Names are the annotated names below.
+`query.sh` answers the three things you usually want about one symbol — **without Soufflé**.
+The edges are already in `edge`/`entity_edge`; a SQLite **recursive CTE anchored on the
+symbol** walks the bounded closure directly. It is **read-only**: no `seed` table, no result
+tables, nothing written back (the only DB objects are the read-only name views, created once
+if missing). Names are the annotated names below.
 ```bash
 # 1. methods reachable FROM a method (transitive callees, the calls+ set)
 ./query.sh reachable 'app::exercise_cache()'
@@ -53,26 +55,24 @@ front-end for the three things you usually want. Names are the annotated names b
 Use `-d /path/to/index.db` for a non-default index. An unknown exact name prints LIKE
 candidates so you can find the right annotated spelling.
 
-**Each question runs its own minimal program** (`q_reach.dl` / `q_callgraph.dl` /
-`q_classes.dl`), so Soufflé evaluates and loads the views for *only* that relation — the
-unseeded `edep`/`subtype` full-graph closures are pruned and never paid. `classes` is fully
-**seeded** too (`anc`/`desc` expand only the queried class's neighborhood), so all three
-questions stay fast on a large index. (`run.sh` is the batch path that computes everything.)
+The recursion runs on indexed integer columns (`edge.src_id`/`dst_id`, `kind`) and resolves
+names only at the boundaries, so each query is bounded to the symbol's cone — fast on a large
+index without materializing anything. Edge kinds used: calls = `edge.kind 1`; hierarchy =
+`edge.kind 2` (inherits) ∪ `entity_edge.kind 1,2` (generalizes/implements).
 
-## What it computes
-- **`reach(a, b)`** — **seeded** transitive call reachability (`calls+`) from the symbols in
-  the `seed` table. The full closure over millions of symbols is a space bomb, so it expands
-  only from what you ask about. The core of *what X reaches* / *impact of changing X*.
-- **`cg_out(caller, callee)` / `cg_in(caller, callee)`** — **seeded callgraph EDGES** (not a
-  flattened set like `reach`): every `(caller, callee)` hop in the forward (`cg_out`, callees)
-  or reverse (`cg_in`, callers) cone of the seed. This is what makes the result a renderable
-  graph (DOT/Mermaid); `query.sh callgraph` emits DOT from these.
-- **`subtype(sub, super)`** — GLOBAL transitive class hierarchy (all ancestors of everything),
-  over raw `inherits` **and** design-level `generalizes`/`implements`. Unseeded full closure
-  used by the batch `run.sh`.
-- **`anc(x, ancestor)` / `desc(x, descendant)`** — **seeded** hierarchy: transitive ancestors
-  (up) and descendants (down) of the seeded class only. What `query.sh classes` reads, so it
-  scales without materializing the whole hierarchy.
+## query.sh vs. the Soufflé engine — when to use which
+The three per-symbol questions don't need a Datalog engine: they're single bounded transitive
+closures the DB does itself (above). **Soufflé earns its place for the GLOBAL work** — the
+batch `run.sh` materializes whole-graph relations once, and the eventual DSL needs multi-rule
+reasoning / negation / stratification. So: **`query.sh` (read-only SQL) for targeted lookups,
+Soufflé (`run.sh`) for global materialization and the DSL.**
+
+## What the Soufflé engine computes (`run.sh`, global)
+- **`reach(a, b)`** — **seeded** transitive call reachability (`calls+`) from the `seed` table.
+- **`subtype(sub, super)`** — transitive class hierarchy (all ancestors), over raw `inherits`
+  **and** design-level `generalizes`/`implements`.
+- **`cg_out` / `cg_in`** — seeded callgraph EDGES (forward/reverse cone) kept as a renderable
+  graph.
 - **`edep(a, b)`** — transitive dependency closure over the **entity graph**
   (`uses`/`creates`/`composes`/`aggregates`/`associates`) — architecture-altitude "who
   depends on whom".
