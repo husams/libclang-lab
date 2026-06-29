@@ -60,29 +60,12 @@
 // reachability is SEEDED (write the `seed` table before running) so it never builds the
 // full closure over a 12M-symbol graph.
 
-// one-hop class hierarchy over raw + design-level edges (the small input relation both the
-// global and the seeded closures build on).
-.decl hier(sub:Sym, super:Sym)
-hier(s, p) :- inherits(s, p).
-hier(s, p) :- e_generalizes(s, p).
-hier(s, p) :- e_implements(s, p).
-
-// GLOBAL transitive hierarchy (all ancestors of everything). Unseeded full closure — fine
-// for the batch run.sh, but on a huge index prefer the SEEDED anc/desc below.
+// transitive class hierarchy (all ancestors) over raw + design-level edges — small.
 .decl subtype(sub:Sym, super:Sym)
-subtype(s, p) :- hier(s, p).
+subtype(s, p) :- inherits(s, p).
+subtype(s, p) :- e_generalizes(s, p).
+subtype(s, p) :- e_implements(s, p).
 subtype(s, p) :- subtype(s, k), subtype(k, p).
-
-// SEEDED hierarchy — expands only the queried class's neighborhood (like reach/cg), so it
-// scales on a large index. `query.sh classes` uses these, not the global subtype.
-//   anc(x, a)  = a is a transitive ANCESTOR (super-class) of seed x   (walk up)
-//   desc(x, d) = d is a transitive DESCENDANT (sub-class) of seed x   (walk down)
-.decl anc(x:Sym, ancestor:Sym)
-anc(x, p) :- seed(x), hier(x, p).
-anc(x, p) :- anc(x, k), hier(k, p).
-.decl desc(x:Sym, descendant:Sym)
-desc(x, s) :- seed(x), hier(s, x).
-desc(x, s) :- desc(x, k), hier(s, k).
 
 // design-level dependency closure over the ENTITY graph — also small.
 .decl edep(a:Sym, b:Sym)
