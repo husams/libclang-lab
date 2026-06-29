@@ -79,11 +79,8 @@ DROP VIEW IF EXISTS e_creates;     CREATE VIEW e_creates     AS SELECT ss.name A
 DROP VIEW IF EXISTS e_uses;        CREATE VIEW e_uses        AS SELECT ss.name AS a, ds.name AS b FROM entity_edge e JOIN symdisp ss ON ss.id=e.src_id JOIN symdisp ds ON ds.id=e.dst_id WHERE e.kind=8;
 DROP VIEW IF EXISTS e_destroys;    CREATE VIEW e_destroys    AS SELECT ss.name AS a, ds.name AS b FROM entity_edge e JOIN symdisp ss ON ss.id=e.src_id JOIN symdisp ds ON ds.id=e.dst_id WHERE e.kind=9;
 
--- reset Soufflé output tables + the seed table (idempotent re-run; these + the views are
--- the ONLY things the reasoning layer adds to index.db — drop them anytime to remove all
--- trace). Soufflé writes these as TABLES, so a plain DROP TABLE resets cleanly.
-DROP TABLE IF EXISTS subtype;
-DROP TABLE IF EXISTS edep;
-DROP TABLE IF EXISTS reach;
-DROP TABLE IF EXISTS seed;
-CREATE TABLE seed(x TEXT);
+-- NOTE: resetting the Soufflé output tables (subtype/edep/reach/cg_out/cg_in) + the `seed`
+-- table is done by the runner (run.sh / query.sh), not here, because a prior session may
+-- have left some as VIEWs and `DROP TABLE IF EXISTS` errors on a view (and vice-versa); the
+-- runner issues a type-agnostic `DROP <type> IF EXISTS` read from sqlite_master. This file
+-- is the pure INPUT adapter (the views above) — `.read` it to (re)create the edge views.

@@ -21,6 +21,7 @@ language** lowers to rules like these; a controlled-English **query language** l
 | `cidx_base.dl`   | **reusable prelude** — all types, edge relations, common derived predicates. `#include` it from any reasoning script |
 | `cidx.dl`        | example reasoning script (`#include "cidx_base.dl"` + `.output`s) — copy as a template |
 | `run.sh`         | create views + seed in place → run Soufflé (writes results into the same `index.db`) |
+| `query.sh`       | **per-symbol** front-end for the three canonical questions (reachable / callgraph / classes) |
 
 ## Run
 ```bash
@@ -33,12 +34,35 @@ runs it through a **symlink** in `build/` pointing at the real file — the file
 moved or copied. The result tables (`subtype`, `edep`, `reach`) and a `seed` table are the
 only rows added to `index.db`; drop them anytime to remove all trace.
 
+## Three canonical questions (`query.sh`)
+`query.sh` seeds **one exact symbol** and reads back the right relation — the practical
+front-end for the three things you usually want. Names are the annotated names below.
+```bash
+# 1. methods reachable FROM a method (transitive callees, the calls+ set)
+./query.sh reachable 'app::exercise_cache()'
+
+# 2. generate a callgraph for a function/method — Graphviz DOT (out=callees, in=callers, both)
+./query.sh callgraph 'app::exercise_cache()' out          # what it calls
+./query.sh callgraph 'app::Cache::get(const std::string &)' in   # who calls it (blast radius)
+./query.sh callgraph 'main()' both | dot -Tpng -o cg.png  # render with graphviz
+
+# 3. find classes related to a given class (hierarchy, both directions)
+./query.sh classes 'geo::Shape'         # -> ancestors (super), <- descendants (sub)
+```
+Use `-d /path/to/index.db` for a non-default index. An unknown exact name prints LIKE
+candidates so you can find the right annotated spelling.
+
 ## What it computes
 - **`reach(a, b)`** — **seeded** transitive call reachability (`calls+`) from the symbols in
   the `seed` table. The full closure over millions of symbols is a space bomb, so it expands
-  only from what you ask about. The core of *who calls X* / *impact of changing X*.
+  only from what you ask about. The core of *what X reaches* / *impact of changing X*.
+- **`cg_out(caller, callee)` / `cg_in(caller, callee)`** — **seeded callgraph EDGES** (not a
+  flattened set like `reach`): every `(caller, callee)` hop in the forward (`cg_out`, callees)
+  or reverse (`cg_in`, callers) cone of the seed. This is what makes the result a renderable
+  graph (DOT/Mermaid); `query.sh callgraph` emits DOT from these.
 - **`subtype(sub, super)`** — transitive class hierarchy (all ancestors), over raw `inherits`
-  **and** the design-level `generalizes`/`implements` entity edges.
+  **and** the design-level `generalizes`/`implements` entity edges. Query `WHERE sub='X'` for
+  ancestors, `WHERE super='X'` for subclasses.
 - **`edep(a, b)`** — transitive dependency closure over the **entity graph**
   (`uses`/`creates`/`composes`/`aggregates`/`associates`) — architecture-altitude "who
   depends on whom".
