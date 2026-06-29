@@ -16,8 +16,9 @@ Rule -- per component, grouped by git NAME (mirrors the `import` identity logic)
     `add_repository` is idempotent on name, so every component of the same repo
     -- even across worktrees or different checkout paths -- lands in ONE
     repository, and each distinct checkout root is added as a clone of it.
-  * No `.git` reachable (external libraries, or an index whose source tree is not
-    present locally): the repository name is the component's own name.
+  * No `.git` reachable (system / external include dirs that are not git repos):
+    the component is **left ungrouped** -- we do NOT invent a repository from the
+    component name (that produced hundreds of bogus one-off repositories).
   * Grouping is by NAME only -- never by path -- so the same repo never splits
     into many repositories.
 
@@ -49,36 +50,40 @@ from indexer.storage import Storage
 from indexer.utils import git_remote_url, git_root, repo_name
 
 
-def _clone_root_and_identity(comp) -> tuple[str, str, str | None]:
-    """(clone_root, repository_name, remote_url) for one component.
-
-    Uses the enclosing git checkout (worktree-aware: `git_root` follows a `.git`
-    file, `repo_name`/`git_remote_url` follow gitdir->commondir->shared config);
-    falls back to the component's own root/name when there is no reachable `.git`
-    -- e.g. external libraries or a relocated/portable index."""
+def _git_identity(comp) -> tuple[str, str, str | None] | None:
+    """(git_root, repository_name, remote_url) when the component's path is inside
+    a git checkout (worktree-aware: `git_root` follows a `.git` file,
+    `repo_name`/`git_remote_url` follow gitdir->commondir->shared config), else
+    None -- the component is not part of any git repository."""
     eff = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp)))
     groot = git_root(eff)
-    if groot:
-        return os.path.abspath(groot), repo_name(groot), git_remote_url(groot)
-    return eff, comp.name, None
+    if not groot:
+        return None
+    return os.path.abspath(groot), repo_name(groot), git_remote_url(groot)
 
 
 def backfill_repositories(db: Storage) -> dict:
     """(Re)build the repository/clone layer from the components, deterministically.
 
+    For EACH component, find the **git repository** enclosing its path (worktree-
+    aware) and assign the component to the repository of that git NAME. Grouping
+    is by NAME only -- `add_repository` is idempotent on name -- so components in
+    the same repo (even across worktrees / different checkout paths) land in ONE
+    repository, with each distinct checkout root added as a clone. No path-based
+    bucketing, so a repo never splits into many.
+
+    A component NOT inside any git checkout (system / external include dirs that
+    are not git repos) is **left ungrouped** -- we never invent a repository from
+    a component's name, which is what produced hundreds of bogus repositories.
+
     The repository/clone tables are a pure function of the components, so this
-    REBUILDS them from scratch: it clears any existing grouping first, then for
-    EACH component derives the **git repository name** from its path (worktree-
-    aware) and assigns the component to the repository of that name. Grouping is
-    by NAME only -- `add_repository` is idempotent on name -- so components in
-    the same repo (even across worktrees / different checkout paths) land in one
-    repository, with each distinct checkout root added as a clone of it. No
-    path-based bucketing, so the same repo never splits into many.
+    REBUILDS them from scratch each run (clears existing grouping first):
+    deterministic, re-runnable, and it repairs a previously mis-grouped index.
+    (Clones added manually via `cidx repo add-clone` are regenerated from the
+    component roots; re-add extra worktrees afterward.)
 
-    (Rebuild semantics mean any clones added manually via `cidx repo add-clone`
-    are regenerated from the component roots; re-add extra worktrees afterward.)
-
-    Returns a stats dict: components assigned, resulting repository/clone counts."""
+    Returns a stats dict: components assigned, components left ungrouped, and the
+    resulting repository/clone counts."""
     # Pure rebuild: wipe the derived layer, then re-derive from the components.
     db._conn.execute("UPDATE component SET repository_id = NULL")
     db._conn.execute("DELETE FROM clone")
@@ -86,8 +91,13 @@ def backfill_repositories(db: Storage) -> dict:
     db._commit()
 
     assigned = 0
+    ungrouped = 0
     for comp in db.list_components():
-        clone_root, name, remote = _clone_root_and_identity(comp)
+        ident = _git_identity(comp)
+        if ident is None:
+            ungrouped += 1  # not inside any git repo -> stays ungrouped
+            continue
+        clone_root, name, remote = ident
         # Group by NAME: idempotent on name, so same-named repos reuse one row.
         rid = db.add_repository(name, comp.kind, remote)
         clone_id = db.add_clone(rid, clone_root)
@@ -99,6 +109,7 @@ def backfill_repositories(db: Storage) -> dict:
 
     return {
         "assigned": assigned,
+        "ungrouped": ungrouped,
         "repositories": len(db.list_repositories()),
         "clones": len(db.list_clones()),
     }
@@ -118,10 +129,11 @@ def main(argv: list[str] | None = None) -> int:
     with Storage(path) as db:
         stats = backfill_repositories(db)
     print(
-        f"backfilled {path}: {stats['assigned']} component(s) -> "
+        f"backfilled {path}: {stats['assigned']} component(s) in "
         f"{stats['repositories']} repositor"
         f"{'y' if stats['repositories'] == 1 else 'ies'}, "
-        f"{stats['clones']} clone(s)"
+        f"{stats['clones']} clone(s); "
+        f"{stats['ungrouped']} ungrouped (not in a git repo)"
     )
     return 0
 

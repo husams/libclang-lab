@@ -194,20 +194,21 @@ def test_worktree_resolves_to_main_repo_name_and_remote(tmp_path):
 _LAB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def test_backfill_groups_by_git_name_not_path():
+def test_backfill_groups_by_git_name_and_skips_non_git():
     from scripts.backfill_repositories import backfill_repositories
 
     db = Storage(":memory:")
     try:
-        # Components under the same git repo -- even registered at DIFFERENT
-        # checkout paths -- collapse to ONE repository by git NAME, each path a
-        # clone. An external component with no reachable .git stays on its own.
+        # Two components under the same git repo collapse to ONE repository by
+        # git NAME; a component NOT inside any git repo is left UNGROUPED (no
+        # bogus per-component repository).
         db.add_component("libclang-lab", _LAB_ROOT, "repo")
         db.add_component("proj", os.path.join(_LAB_ROOT, "project"), "repo")
         db.add_component("libfoo", "/opt/libfoo-not-on-disk", "external")
         stats = backfill_repositories(db)
-        assert stats["assigned"] == 3
-        assert stats["repositories"] == 2  # libclang-lab (x2 comps) + libfoo
+        assert stats["assigned"] == 2
+        assert stats["ungrouped"] == 1
+        assert stats["repositories"] == 1  # only the git repo
 
         git_repo = db.get_repository_by_name("libclang-lab")
         assert git_repo is not None
@@ -215,29 +216,43 @@ def test_backfill_groups_by_git_name_not_path():
         assert members == {"libclang-lab", "proj"}
         assert git_repo.remote_url and git_repo.remote_url.endswith(".git")
 
-        ext = db.get_repository_by_name("libfoo")
-        assert ext.kind == "external"
-        assert [c.name for c in db.components_for_repository(ext.id)] == ["libfoo"]
+        # The non-git component is ungrouped, not its own repository.
+        assert db.get_repository_by_name("libfoo") is None
+        libfoo = next(c for c in db.list_components() if c.name == "libfoo")
+        assert libfoo.repository_id is None
 
         # Deterministic rebuild: re-running yields the SAME end state.
         again = backfill_repositories(db)
-        assert again["assigned"] == 3 and again["repositories"] == 2
+        assert again["assigned"] == 2 and again["repositories"] == 1
     finally:
         db.close()
 
 
 def test_backfill_cli_reports_and_exit_codes(tmp_path):
+    # A real git repo so the component is git-rooted; plus a non-git component
+    # that must be left ungrouped.
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.c").write_text("x")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "i")
+
     db_path = str(tmp_path / "index.db")
     db = Storage(db_path)
-    db.add_component("solo", str(tmp_path / "src"), "repo")
+    db.add_component("myrepo", str(repo), "repo")
+    db.add_component("ext", "/opt/not-on-disk", "external")
     db.close()
 
     out = _cidx_script(db_path)
     assert out.returncode == 0, out.stderr
-    assert "1 component(s) -> 1 repository" in out.stdout
+    assert "1 component(s) in 1 repository" in out.stdout
+    assert "1 ungrouped" in out.stdout
     # Deterministic rebuild: second run reports the same.
     out2 = _cidx_script(db_path)
-    assert out2.returncode == 0 and "1 component(s) -> 1 repository" in out2.stdout
+    assert out2.returncode == 0 and "1 component(s) in 1 repository" in out2.stdout
     # Missing DB is an error.
     miss = _cidx_script(str(tmp_path / "nope.db"))
     assert miss.returncode == 1 and "no index database" in miss.stderr
