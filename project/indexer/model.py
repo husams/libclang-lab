@@ -2039,24 +2039,33 @@ def _record_class_kind(conn, sym_id: int) -> ClassKind:
     exactly: method kind=21, field kind=6, ``is_pure``; destructors (kind=25)
     are excluded by the ``kind=21`` filter. A record with no own pure-virtual
     method is CONCRETE; with a pure method it is an INTERFACE when it has no
-    non-pure method and no data field, else ABSTRACT."""
-    usr_sub = "(SELECT usr FROM symbol WHERE id = ?)"
-    pure = conn.execute(
-        f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
-        "AND kind = 21 AND is_pure = 1",
+    non-pure method and no data field, else ABSTRACT.
+
+    One index-backed query (idx_symbol_parent) returns this record's OWN
+    members; the kind/is_pure split is done in Python over the handful of rows.
+    The old form ran three ``COUNT(*) ... AND kind = 21`` queries, but the
+    ``kind = 21`` predicate let SQLite pick idx_symbol_kind -- kind=21 (method)
+    matches roughly a third of EVERY symbol in the index, so each query
+    effectively scanned the whole symbol table. That made .klass /
+    .abstract_class / .interface / .record / .struct O(symbols) (tens of ms per
+    candidate on a multi-million-symbol DB). Selecting on ``parent_usr`` alone
+    forces the selective idx_symbol_parent (only this record's members)."""
+    rows = conn.execute(
+        "SELECT kind, is_pure FROM symbol "
+        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?)",
         (sym_id,),
-    ).fetchone()[0]
+    ).fetchall()
+    pure = non_pure = fields = 0
+    for kind, is_pure in rows:
+        if kind == 21:
+            if is_pure == 1:
+                pure += 1
+            elif is_pure == 0:
+                non_pure += 1
+        elif kind == 6:
+            fields += 1
     if not pure:
         return ClassKind.CONCRETE
-    non_pure = conn.execute(
-        f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
-        "AND kind = 21 AND is_pure = 0",
-        (sym_id,),
-    ).fetchone()[0]
-    fields = conn.execute(
-        f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} AND kind = 6",
-        (sym_id,),
-    ).fetchone()[0]
     return (
         ClassKind.INTERFACE
         if non_pure == 0 and fields == 0

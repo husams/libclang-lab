@@ -945,28 +945,33 @@ class EntityGraph:
         """Classify a record as CONCRETE / ABSTRACT / INTERFACE by inspecting
         its members. Mirrors ``entity_rollup._is_interface`` exactly (method
         kind=21, field kind=6, ``is_pure``; destructors are kind=25, so the
-        ``kind=21`` filters already exclude them). Cached."""
+        ``kind=21`` filters already exclude them). Cached.
+
+        One index-backed query (idx_symbol_parent) returns the record's OWN
+        members; the kind/is_pure split is done in Python. The old three
+        ``COUNT(*) ... AND kind = 21`` queries let SQLite pick idx_symbol_kind
+        (kind=21 matches ~a third of every symbol) over the selective
+        idx_symbol_parent -- effectively a full scan. Selecting on
+        ``parent_usr`` alone forces idx_symbol_parent."""
         if sym_id in self._ckind_cache:
             return self._ckind_cache[sym_id]
-        usr_sub = "(SELECT usr FROM symbol WHERE id = ?)"
-        pure = self._c.execute(
-            f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
-            "AND kind = 21 AND is_pure = 1",
+        rows = self._c.execute(
+            "SELECT kind, is_pure FROM symbol "
+            "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?)",
             (sym_id,),
-        ).fetchone()[0]
+        ).fetchall()
+        pure = non_pure = fields = 0
+        for k, is_pure in rows:
+            if k == 21:
+                if is_pure == 1:
+                    pure += 1
+                elif is_pure == 0:
+                    non_pure += 1
+            elif k == 6:
+                fields += 1
         if not pure:
             kind = ClassKind.CONCRETE
         else:
-            non_pure = self._c.execute(
-                f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
-                "AND kind = 21 AND is_pure = 0",
-                (sym_id,),
-            ).fetchone()[0]
-            fields = self._c.execute(
-                f"SELECT COUNT(*) FROM symbol WHERE parent_usr = {usr_sub} "
-                "AND kind = 6",
-                (sym_id,),
-            ).fetchone()[0]
             kind = (
                 ClassKind.INTERFACE
                 if non_pure == 0 and fields == 0
