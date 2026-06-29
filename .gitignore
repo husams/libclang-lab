@@ -25,7 +25,7 @@ test-repo/
 .claude/*
 !.claude/skills/
 .claude/skills/*
-!.claude/skills/clang-explore/
+!.claude/skills/cidx-query/
 .cache/
 cidx-cpp/.cidx-selfindex/
 cidx-cpp/Testing/
