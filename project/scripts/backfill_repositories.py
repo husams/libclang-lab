@@ -96,7 +96,10 @@ def backfill_repositories(db: Storage) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    # Expand ~ / $VARS ourselves so a literal "~/.cache/..." that the shell did
+    # not expand (quoting, some `uv run` paths) still resolves to the real file.
     path = argv[0] if argv else index_path()
+    path = os.path.expanduser(os.path.expandvars(path))
     if not os.path.exists(path):
         print(f"error: no index database at {path}", file=sys.stderr)
         return 1
