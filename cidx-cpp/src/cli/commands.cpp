@@ -334,7 +334,7 @@ std::string selector_str(const ParsedArgs &args) {
 }
 
 // True when comp is unset, or abs_path lies within the component root.
-bool under_component(const std::optional<std::string> &abs_path,
+bool under_component(Storage &db, const std::optional<std::string> &abs_path,
                      const std::optional<Component> &comp) {
   if (!comp) {
     return true;
@@ -342,7 +342,8 @@ bool under_component(const std::optional<std::string> &abs_path,
   if (!abs_path) {
     return false;
   }
-  std::string root = comp->path;
+  // v24: resolve the (possibly clone-relative) component base.
+  std::string root = db.component_abs_base(*comp);
   while (!root.empty() && root.back() == '/') {
     root.pop_back();
   }
@@ -500,7 +501,17 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     }
   }
   Storage db(ctx.index_path);
-  const int64_t cid = db.add_component(name, path, kind, version_to_store);
+  // v24: a grouped component stores a clone-relative path, so re-adding the same
+  // source resolves the EXISTING component clone-aware (its stored path is no
+  // longer the absolute base) and refreshes its metadata in place; only a
+  // genuinely new source mints a row. Mirrors Python cmd_add_source.
+  int64_t cid;
+  if (const auto existing = db.get_component(path); existing) {
+    cid = existing->id;
+    db.update_component_meta(cid, name, kind, version_to_store);
+  } else {
+    cid = db.add_component(name, path, kind, version_to_store);
+  }
   // v23: group the component under a repository (same kind). The source dir is
   // its first clone and becomes active. Mirrors Python cmd_add_source.
   const std::string repo_name_val = args.repo ? *args.repo : name;
@@ -514,6 +525,9 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     db.set_active_clone(rid, clone_id);
   }
   db.set_component_repository(cid, rid);
+  // v24: store the component path RELATIVE to its clone root so a later
+  // `repo switch` only repoints the active clone (no path rewrite).
+  db.relativize_component(cid, clone_path);
   *ctx.out << "component #" << cid << ": " << name << " (" << kind << ") at "
            << path << "\n";
   return 0;
@@ -653,9 +667,12 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   if (args.force) {
     const std::optional<Component> existing = db.get_component(stored_root);
     if (existing) {
+      // Resolved base (stored path is clone-relative for a grouped component,
+      // v24); show the absolute path either way. Mirrors Python cmd_import.
+      const std::string existing_base = db.component_abs_base(*existing);
       db.delete_component(existing->id);
       *ctx.out << "force: removed existing component #" << existing->id
-               << " at " << stored_root << " (files and indexed symbols)\n";
+               << " at " << existing_base << " (files and indexed symbols)\n";
     }
   }
   // The db-dir/git-root component is created LAZILY: only when a source matches
@@ -733,6 +750,9 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
       if (!comp->repository_id) {
         db.set_component_repository(comp->id, rid);
       }
+      // v24: store each grouped component's path RELATIVE to the clone root,
+      // so `repo switch` repoints one pointer instead of N rows.
+      db.relativize_component(comp->id, root);
     }
     *ctx.out << "repository '" << repo_name_val << "': " << attached.size()
              << " component(s)\n";
@@ -759,7 +779,7 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
       return 1;
     }
     const std::optional<std::string> root =
-        comp ? std::optional<std::string>(comp->path) : std::nullopt;
+        comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt;
     // One Toolchain/Parser per run (S04/S05: memoized, single-threaded D15).
     Toolchain toolchain(log);
     Parser parser(toolchain, log);
@@ -818,11 +838,13 @@ int cmd_list_components(const ParsedArgs &args, Context &ctx) {
   for (const Component &c : comps) {
     const std::string ver = c.version ? *c.version : "-";
     const std::string rep = repo_name_of(c);
-    // f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {rep:<{rw}}  {c.path}"
+    // Show the resolved (clone-anchored) base, not the stored path, which is
+    // relative for a grouped component (v24).
+    // f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {rep:<{rw}}  {base}"
     *ctx.out << fmt::rjust(std::to_string(c.id), 4) << "  "
              << fmt::ljust(c.name, width) << "  " << fmt::ljust(c.kind, 8)
              << "  " << fmt::ljust(ver, vw) << "  " << fmt::ljust(rep, rw)
-             << "  " << c.path << "\n";
+             << "  " << db.component_abs_base(c) << "\n";
   }
   *ctx.out << comps.size() << " component(s)\n";
   return comps.empty() ? 1 : 0;
@@ -936,7 +958,7 @@ int cmd_list_symbols(const ParsedArgs &args, Context &ctx) {
   if (args.file_filter && !args.file_filter->empty()) {
     const std::string path = files::resolve_file_arg(
         *args.file_filter,
-        comp ? std::optional<std::string>(comp->path) : std::nullopt);
+        comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt);
     const std::optional<File> rec = db.get_file(path);
     if (!rec) {
       *ctx.err << "error: not in index database: " << path << "\n";
@@ -1054,7 +1076,7 @@ int cmd_show_file(const ParsedArgs &args, Context &ctx) {
     }
   } else {
     path = files::resolve_file_arg(
-        ref, comp ? std::optional<std::string>(comp->path) : std::nullopt);
+        ref, comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt);
     rec = db.get_file(*path);
   }
   if (!rec || !path) {
@@ -1204,7 +1226,7 @@ int cmd_delete_dir(const ParsedArgs &args, Context &ctx) {
   std::vector<Directory> matches;
   if (args.del_id) {
     if (std::optional<Directory> d = db.get_directory_by_id(*args.del_id)) {
-      if (under_component(db.directory_abs_path(d->id), comp)) {
+      if (under_component(db, db.directory_abs_path(d->id), comp)) {
         matches.push_back(*d);
       }
     }
@@ -1247,23 +1269,23 @@ int cmd_delete_file(const ParsedArgs &args, Context &ctx) {
   if (args.del_id) {
     if (std::optional<File> rec = db.get_file_by_id(*args.del_id)) {
       const std::optional<std::string> ap = db.file_abs_path(rec->id);
-      if (under_component(ap, comp)) {
+      if (under_component(db, ap, comp)) {
         matches.emplace_back(rec->id, ap.value_or(""));
       }
     }
   } else if (args.del_path) {
     const std::string ap = files::resolve_file_arg(
         *args.del_path,
-        comp ? std::optional<std::string>(comp->path) : std::nullopt);
+        comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt);
     if (std::optional<File> rec = db.get_file(ap)) {
-      if (under_component(ap, comp)) {
+      if (under_component(db, ap, comp)) {
         matches.emplace_back(rec->id, ap);
       }
     }
   } else { // name (basename)
     for (const std::pair<File, std::string> &pr : db.list_files()) {
       if (pathutil::basename(pr.second) == *args.name &&
-          under_component(pr.second, comp)) {
+          under_component(db, pr.second, comp)) {
         matches.emplace_back(pr.first.id, pr.second);
       }
     }
@@ -1308,8 +1330,8 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx) {
           s.file_id ? db.file_abs_path(*s.file_id) : std::nullopt;
       const std::optional<std::string> decl =
           s.decl_file_id ? db.file_abs_path(*s.decl_file_id) : std::nullopt;
-      if ((here && under_component(here, comp)) ||
-          (decl && under_component(decl, comp))) {
+      if ((here && under_component(db, here, comp)) ||
+          (decl && under_component(db, decl, comp))) {
         kept.push_back(s);
       }
     }
@@ -1727,7 +1749,7 @@ bool parse_file_target(Storage &db, const std::string &target,
   while (!rel.empty() && rel.front() == '/') {
     rel.erase(rel.begin());
   }
-  abs_path = pathutil::normpath(pathutil::join(comp->path, rel));
+  abs_path = pathutil::normpath(pathutil::join(db.component_abs_base(*comp), rel));
   return true;
 }
 
@@ -1770,9 +1792,9 @@ int cmd_set(const ParsedArgs &args, Context &ctx) {
   if (args.file_filter) {
     const std::string ap = files::resolve_file_arg(
         *args.file_filter,
-        comp ? std::optional<std::string>(comp->path) : std::nullopt);
+        comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt);
     if (std::optional<File> rec = db.get_file(ap)) {
-      if (under_component(ap, comp)) {
+      if (under_component(db, ap, comp)) {
         matches.emplace_back(rec->id, ap);
       }
     }
@@ -1937,10 +1959,8 @@ int cmd_dump_compile_commands(const ParsedArgs &args, Context &ctx) {
     CcEntry e;
     // v14: use effective root (base+version) as the directory field so the
     // emitted compile_commands.json paths are consistent with the stored flags.
-    e.directory = comp
-                      ? pathutil::abspath(pathutil::resolve_fs_path(
-                            Storage::effective_root(*comp)))
-                      : pathutil::split(ap).first;
+    e.directory =
+        comp ? db.component_abs_base(*comp) : pathutil::split(ap).first;
     e.file = ap;
     e.arguments.push_back(f.driver ? *f.driver : "cc");
     for (const std::string &o : *f.compile_options) {
@@ -3020,8 +3040,7 @@ int cmd_component_show(const ParsedArgs &args, Context &ctx) {
   // Byte-identical with Python: f"{key:<14} {value}"
   // Keys: name, kind, "base path", version, "effective root", "resolved root"
   const std::string eff = Storage::effective_root(*comp);
-  const std::string resolved =
-      pathutil::abspath(pathutil::resolve_fs_path(eff));
+  const std::string resolved = db.component_abs_base(*comp);
   auto row = [&](const std::string &key, const std::string &val) {
     *ctx.out << fmt::ljust(key, 14) << " " << val << "\n";
   };
@@ -3144,9 +3163,10 @@ int cmd_repo_show(const ParsedArgs &args, Context &ctx) {
     }
     *ctx.out << "components:\n";
     for (const Component &c : comps) {
-      // f"    {c.id:>4}  {c.name:<{cw}}  {c.path}"
+      // f"    {c.id:>4}  {c.name:<{cw}}  {base}" (resolved, clone-anchored)
       *ctx.out << "    " << fmt::rjust(std::to_string(c.id), 4) << "  "
-               << fmt::ljust(c.name, cw) << "  " << c.path << "\n";
+               << fmt::ljust(c.name, cw) << "  " << db.component_abs_base(c)
+               << "\n";
     }
   }
   return 0;
@@ -3200,14 +3220,12 @@ int cmd_repo_switch(const ParsedArgs &args, Context &ctx) {
     *ctx.err << "warning: clone path " << target->path
              << " is not present on disk\n";
   }
-  const std::optional<std::string> old_path = active_clone_path(db, *repo);
-  int64_t n = 0;
-  if (old_path && *old_path != target->path) {
-    n = db.rebase_components(repo->id, *old_path, target->path);
-  }
+  // v24: grouped component paths are stored RELATIVE to the active clone, so a
+  // switch is a single `active_clone_id` update -- no component row rewrite.
+  const std::size_t ncomp = db.components_for_repository(repo->id).size();
   db.set_active_clone(repo->id, target->id);
-  *ctx.out << "switched '" << name << "' to " << target->path << " (" << n
-           << " component(s) rebased)\n";
+  *ctx.out << "switched '" << name << "' to " << target->path << " (" << ncomp
+           << " component(s))\n";
   return 0;
 }
 
@@ -3265,16 +3283,16 @@ int cmd_verify(const ParsedArgs &args, Context &ctx) {
 
   int c_ok = 0, c_missing = 0, c_vermiss = 0;
   for (const Component &c : components) {
-    const std::string eff = Storage::effective_root(c);
-    const std::string resolved =
-        pathutil::abspath(pathutil::resolve_fs_path(eff));
+    const std::string resolved = db.component_abs_base(c);
     std::string status;
     if (is_directory(resolved)) {
       status = "ok";
       ++c_ok;
-    } else if (c.version &&
-               is_directory(
-                   pathutil::abspath(pathutil::resolve_fs_path(c.path)))) {
+    } else if (c.version && is_directory([&] {
+                 Component base = c;
+                 base.version = std::nullopt;
+                 return db.component_abs_base(base);
+               }())) {
       status = "VER-MISS";
       ++c_vermiss;
     } else {

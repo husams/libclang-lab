@@ -44,19 +44,43 @@ import sys
 # as well as a module (python3 -m scripts.backfill_repositories).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dataclasses import replace
+
 from indexer import pathx
 from indexer.cli import index_path
 from indexer.storage import Storage
 from indexer.utils import git_remote_url, git_root, repo_name
 
 
-def _git_identity(comp) -> tuple[str, str, str | None] | None:
-    """(git_root, repository_name, remote_url) when the component's path is inside
-    a git checkout (worktree-aware: `git_root` follows a `.git` file,
-    `repo_name`/`git_remote_url` follow gitdir->commondir->shared config), else
-    None -- the component is not part of any git repository."""
-    eff = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp)))
-    groot = git_root(eff)
+def _relativize_to_clone(
+    db: Storage, component_id: int, abs_base: str, clone_root: str
+) -> None:
+    """Store a component's `path` RELATIVE to clone_root (`.` when it IS the
+    clone root). `abs_base` is the component's resolved absolute base captured
+    before the grouping was wiped; a base that does not sit under clone_root is
+    left untouched (stays absolute)."""
+    if pathx.split_base_version(abs_base)[1] is not None:
+        return  # version-in-path: keep absolute (mirrors relativize_component)
+    root = os.path.abspath(clone_root).rstrip(os.sep)
+    base = os.path.abspath(abs_base).rstrip(os.sep)
+    if base == root:
+        rel = "."
+    elif base.startswith(root + os.sep):
+        rel = os.path.relpath(base, root)
+    else:
+        return
+    db._conn.execute(
+        "UPDATE component SET path = ? WHERE id = ?", (rel, component_id)
+    )
+    db._commit()
+
+
+def _git_identity(abs_base: str) -> tuple[str, str, str | None] | None:
+    """(git_root, repository_name, remote_url) when `abs_base` (the component's
+    resolved absolute root) is inside a git checkout (worktree-aware: `git_root`
+    follows a `.git` file, `repo_name`/`git_remote_url` follow
+    gitdir->commondir->shared config), else None -- not part of any git repo."""
+    groot = git_root(abs_base)
     if not groot:
         return None
     return os.path.abspath(groot), repo_name(groot), git_remote_url(groot)
@@ -84,6 +108,15 @@ def backfill_repositories(db: Storage) -> dict:
 
     Returns a stats dict: components assigned, components left ungrouped, and the
     resulting repository/clone counts."""
+    # Resolve every component's ABSOLUTE base (the path column, version aside)
+    # BEFORE wiping the grouping: a grouped component's stored path is RELATIVE
+    # to its (current) active clone (v24), so component_abs_base must be read
+    # while that grouping still stands.
+    abs_bases = {
+        c.id: db.component_abs_base(replace(c, version=None))
+        for c in db.list_components()
+    }
+
     # Pure rebuild: wipe the derived layer, then re-derive from the components.
     db._conn.execute("UPDATE component SET repository_id = NULL")
     db._conn.execute("DELETE FROM clone")
@@ -93,7 +126,7 @@ def backfill_repositories(db: Storage) -> dict:
     assigned = 0
     ungrouped = 0
     for comp in db.list_components():
-        ident = _git_identity(comp)
+        ident = _git_identity(abs_bases[comp.id])
         if ident is None:
             ungrouped += 1  # not inside any git repo -> stays ungrouped
             continue
@@ -105,6 +138,13 @@ def backfill_repositories(db: Storage) -> dict:
         if repo is not None and repo.active_clone_id is None:
             db.set_active_clone(rid, clone_id)
         db.set_component_repository(comp.id, rid)
+        # v24: store the component path relative to its git-root clone, so a
+        # later `repo switch` repoints one pointer. The component's path may
+        # already be relative from a prior backfill -- relativize_component is a
+        # no-op then. It needs the component's CURRENT absolute base, which the
+        # wipe above made unresolvable (repository_id is now NULL), so rebase
+        # the captured absolute base by hand.
+        _relativize_to_clone(db, comp.id, abs_bases[comp.id], clone_root)
         assigned += 1
 
     return {

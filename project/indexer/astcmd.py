@@ -114,12 +114,9 @@ def resolve_target(args) -> tuple[Target | None, int]:
                 if comp is None:
                     print(f"error: no component named {comp_name!r}", file=sys.stderr)
                     return None, 1
-                from .pathx import resolve_fs_path  # noqa: PLC0415
-                from .storage import Storage as _St  # noqa: PLC0415
-
                 abs_path = os.path.normpath(
                     os.path.join(
-                        os.path.abspath(resolve_fs_path(_St.effective_root(comp))),
+                        db.component_abs_base(comp),
                         rel.lstrip("/"),
                     )
                 )

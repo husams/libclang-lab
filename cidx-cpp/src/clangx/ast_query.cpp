@@ -456,7 +456,7 @@ resolve_target(const cli::ParsedArgs &args, cli::Context &ctx) {
           return {std::nullopt, 1};
         }
         const std::string abs_path =
-            pathutil::normpath(pathutil::join(comp->path, rel));
+            pathutil::normpath(pathutil::join(db.component_abs_base(*comp), rel));
         auto rec = db.get_file(abs_path);
         if (!rec) {
           *ctx.err << "error: not in index database: " << abs_path << "\n";
