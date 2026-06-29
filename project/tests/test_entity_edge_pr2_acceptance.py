@@ -296,26 +296,26 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 
 
 def test_python_version_is_0390():
-    """Python VERSION must be 0.40.0 (cidx pch build --from-corpus shared-header survey)."""
+    """Python VERSION must be 0.40.1 (index-backed _record_class_kind fast-path)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.40.0", (
-        f"Python VERSION is '{version}'; expected '0.40.0'. "
-        "Bump VERSION to 0.40.0 in cli.py (cidx pch build --from-corpus shared-header survey)."
+    assert version == "0.40.1", (
+        f"Python VERSION is '{version}'; expected '0.40.1'. "
+        "Bump VERSION to 0.40.1 in cli.py (index-backed _record_class_kind fast-path)."
     )
 
 
 def test_cpp_version_is_0390():
-    """C++ kVersion must be 0.40.0 (cidx pch build --from-corpus shared-header survey)."""
+    """C++ kVersion must be 0.40.1 (index-backed _record_class_kind fast-path)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.40.0", (
-        f"C++ kVersion is '{version}'; expected '0.40.0'. "
-        "Bump kVersion to 0.40.0 in args.hpp (cidx pch build --from-corpus shared-header survey)."
+    assert version == "0.40.1", (
+        f"C++ kVersion is '{version}'; expected '0.40.1'. "
+        "Bump kVersion to 0.40.1 in args.hpp (index-backed _record_class_kind fast-path)."
     )
 
 
