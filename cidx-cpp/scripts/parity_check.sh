@@ -295,6 +295,25 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands nosuchcomp
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands -h
 
+  # repo (v23): grouping + switchable clones. parityproj (imported above) is
+  # grouped under repository 'parityproj'. Exercise list/show, register a second
+  # clone dir, switch (which rebases parityproj's component paths onto it), and
+  # the not-found / bad-target error paths. Both tools share $WORK, so the
+  # rebased absolute paths and every output line are byte-identical. Run before
+  # the delete block so the golden DB dump reflects the post-switch state.
+  mkdir -p "$WORK/altclone"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo ls
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo show parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo show nosuchrepo
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo add-clone parityproj "$WORK/altclone" --label alt
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo add-clone nosuchrepo /tmp/x
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo switch parityproj bogusclone
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo switch parityproj alt
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo show parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo -h
+
   # delete subcommand: help, nested-choice errors, per-leaf help, the
   # required-mutex / mutex / bad-int / 0-match error paths, dry-run previews,
   # then REAL deletes exercising cascade + orphan-symbol purge. Placed last so

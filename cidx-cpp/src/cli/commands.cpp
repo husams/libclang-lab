@@ -475,16 +475,19 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     return 1;
   }
   const bool use_git = kind == "repo" && !args.no_git;
+  std::optional<std::string> git_root_opt;
   if (use_git) {
-    std::optional<std::string> root = repo::git_root(path);
-    if (root) {
-      path = *root;
+    git_root_opt = repo::git_root(path);
+    if (git_root_opt) {
+      path = *git_root_opt;
     }
   }
   const std::string name =
       args.name
           ? *args.name
           : (use_git ? repo::repo_name(path) : pathutil::basename(path));
+  // v23: the (pre-version-split) source/repo dir is the repository's clone path.
+  const std::string clone_path = path;
   // v14: version auto-detection (split_base_version) then explicit override.
   std::optional<std::string> version_to_store;
   if (args.version_str) {
@@ -498,6 +501,19 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
   }
   Storage db(ctx.index_path);
   const int64_t cid = db.add_component(name, path, kind, version_to_store);
+  // v23: group the component under a repository (same kind). The source dir is
+  // its first clone and becomes active. Mirrors Python cmd_add_source.
+  const std::string repo_name_val = args.repo ? *args.repo : name;
+  std::optional<std::string> remote_url =
+      git_root_opt ? repo::git_remote_url(*git_root_opt)
+                   : std::optional<std::string>{};
+  const int64_t rid = db.add_repository(repo_name_val, kind, remote_url);
+  const int64_t clone_id = db.add_clone(rid, clone_path);
+  const std::optional<Repository> repo = db.get_repository_by_id(rid);
+  if (repo && !repo->active_clone_id) {
+    db.set_active_clone(rid, clone_id);
+  }
+  db.set_component_repository(cid, rid);
   *ctx.out << "component #" << cid << ": " << name << " (" << kind << ") at "
            << path << "\n";
   return 0;
@@ -691,6 +707,36 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
     }
     txn.commit(); // R2: explicit commit so a COMMIT failure is not swallowed
   }
+  // v23: group the imported components under a repository. Identity = --repo if
+  // given, else the git/dir-derived name; remote_url (git checkout) lets two
+  // worktrees map to one repository. The checkout dir (`root`) is registered as
+  // a clone and made active when the repository has none. Mirrors Python.
+  {
+    const std::string repo_name_val = args.repo ? *args.repo : name;
+    std::optional<std::string> remote_url =
+        groot ? repo::git_remote_url(*groot)
+              : std::optional<std::string>{};
+    const int64_t rid = db.add_repository(repo_name_val, "repo", remote_url);
+    const int64_t clone_id = db.add_clone(rid, root);
+    const std::optional<Repository> repo = db.get_repository_by_id(rid);
+    if (repo && !repo->active_clone_id) {
+      db.set_active_clone(rid, clone_id);
+    }
+    std::set<int64_t> attached;
+    for (const CompileCommand &cmd : commands) {
+      const std::optional<Component> comp =
+          db.component_for_path(source_path(cmd));
+      if (!comp || attached.count(comp->id)) {
+        continue;
+      }
+      attached.insert(comp->id);
+      if (!comp->repository_id) {
+        db.set_component_repository(comp->id, rid);
+      }
+    }
+    *ctx.out << "repository '" << repo_name_val << "': " << attached.size()
+             << " component(s)\n";
+  }
   *ctx.out << "imported " << imported << " file(s), skipped " << skipped
            << "\n";
   return 0;
@@ -745,20 +791,38 @@ int cmd_list_components(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path);
   const std::vector<Component> comps =
       db.list_components(args.pattern, args.kind);
+  // v23: repository_id -> repository name, "-" when ungrouped.
+  std::map<int64_t, std::string> repos;
+  for (const Repository &r : db.list_repositories()) {
+    repos[r.id] = r.name;
+  }
+  auto repo_name_of = [&](const Component &c) -> std::string {
+    if (c.repository_id) {
+      const auto it = repos.find(*c.repository_id);
+      if (it != repos.end()) {
+        return it->second;
+      }
+    }
+    return "-";
+  };
   std::size_t width = 0;
   std::size_t vw = 1;
+  std::size_t rw = 1;
   for (const Component &c : comps) {
     width = std::max(width, c.name.size());
     if (c.version) {
       vw = std::max(vw, c.version->size());
     }
+    rw = std::max(rw, repo_name_of(c).size());
   }
   for (const Component &c : comps) {
     const std::string ver = c.version ? *c.version : "-";
-    // f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {c.path}"
+    const std::string rep = repo_name_of(c);
+    // f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {rep:<{rw}}  {c.path}"
     *ctx.out << fmt::rjust(std::to_string(c.id), 4) << "  "
              << fmt::ljust(c.name, width) << "  " << fmt::ljust(c.kind, 8)
-             << "  " << fmt::ljust(ver, vw) << "  " << c.path << "\n";
+             << "  " << fmt::ljust(ver, vw) << "  " << fmt::ljust(rep, rw)
+             << "  " << c.path << "\n";
   }
   *ctx.out << comps.size() << " component(s)\n";
   return comps.empty() ? 1 : 0;
@@ -2992,6 +3056,186 @@ int cmd_component_set_version(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// -- repo list / show / add-clone / switch / rm (v23) ----------------------
+
+namespace {
+// Resolved path of a repository's active clone, or nullopt.
+std::optional<std::string> active_clone_path(Storage &db,
+                                             const Repository &repo) {
+  if (!repo.active_clone_id) {
+    return std::nullopt;
+  }
+  const std::optional<Clone> cl = db.get_clone_by_id(*repo.active_clone_id);
+  if (!cl) {
+    return std::nullopt;
+  }
+  return cl->path;
+}
+} // namespace
+
+int cmd_repo_list(const ParsedArgs &args, Context &ctx) {
+  Storage db(ctx.index_path);
+  const std::vector<Repository> repos = db.list_repositories(args.pattern,
+                                                             args.kind);
+  std::size_t width = 0;
+  for (const Repository &r : repos) {
+    width = std::max(width, r.name.size());
+  }
+  for (const Repository &r : repos) {
+    const std::size_t ncomp = db.components_for_repository(r.id).size();
+    const std::size_t nclone = db.list_clones(r.id).size();
+    const std::optional<std::string> ap = active_clone_path(db, r);
+    const std::string active = ap ? *ap : "-";
+    // f"{r.id:>4}  {r.name:<{width}}  {r.kind:<8}  "
+    // f"{ncomp} component(s)  {nclone} clone(s)  {active}"
+    *ctx.out << fmt::rjust(std::to_string(r.id), 4) << "  "
+             << fmt::ljust(r.name, width) << "  " << fmt::ljust(r.kind, 8)
+             << "  " << ncomp << " component(s)  " << nclone << " clone(s)  "
+             << active << "\n";
+  }
+  *ctx.out << repos.size() << " repositories\n";
+  return repos.empty() ? 1 : 0;
+}
+
+int cmd_repo_show(const ParsedArgs &args, Context &ctx) {
+  const std::string name = args.name ? *args.name : std::string();
+  Storage db(ctx.index_path);
+  const std::optional<Repository> repo = db.get_repository_by_name(name);
+  if (!repo) {
+    *ctx.err << "error: no repository named '" << name << "'\n";
+    return 1;
+  }
+  const std::vector<Clone> clones = db.list_clones(repo->id);
+  const std::vector<Component> comps = db.components_for_repository(repo->id);
+  const std::string remote = repo->remote_url ? *repo->remote_url : "(none)";
+  const std::optional<std::string> ap = active_clone_path(db, *repo);
+  const std::string active = ap ? *ap : "(none)";
+  auto row = [&](const std::string &key, const std::string &val) {
+    *ctx.out << fmt::ljust(key, 14) << " " << val << "\n";
+  };
+  row("name", repo->name);
+  row("kind", repo->kind);
+  row("remote", remote);
+  row("active clone", active);
+  row("clones", std::to_string(clones.size()));
+  row("components", std::to_string(comps.size()));
+  if (!clones.empty()) {
+    std::size_t lw = 1;
+    for (const Clone &c : clones) {
+      if (c.label) {
+        lw = std::max(lw, c.label->size());
+      }
+    }
+    *ctx.out << "clones:\n";
+    for (const Clone &c : clones) {
+      const std::string mark =
+          (repo->active_clone_id && c.id == *repo->active_clone_id) ? "*"
+                                                                    : " ";
+      const std::string lbl = c.label ? *c.label : "-";
+      // f"  {mark} {c.id:>4}  {lbl:<{lw}}  {c.path}"
+      *ctx.out << "  " << mark << " " << fmt::rjust(std::to_string(c.id), 4)
+               << "  " << fmt::ljust(lbl, lw) << "  " << c.path << "\n";
+    }
+  }
+  if (!comps.empty()) {
+    std::size_t cw = 0;
+    for (const Component &c : comps) {
+      cw = std::max(cw, c.name.size());
+    }
+    *ctx.out << "components:\n";
+    for (const Component &c : comps) {
+      // f"    {c.id:>4}  {c.name:<{cw}}  {c.path}"
+      *ctx.out << "    " << fmt::rjust(std::to_string(c.id), 4) << "  "
+               << fmt::ljust(c.name, cw) << "  " << c.path << "\n";
+    }
+  }
+  return 0;
+}
+
+int cmd_repo_add_clone(const ParsedArgs &args, Context &ctx) {
+  const std::string name = args.name ? *args.name : std::string();
+  Storage db(ctx.index_path);
+  const std::optional<Repository> repo = db.get_repository_by_name(name);
+  if (!repo) {
+    *ctx.err << "error: no repository named '" << name << "'\n";
+    return 1;
+  }
+  if (!is_directory(pathutil::abspath(args.path))) {
+    *ctx.err << "warning: " << args.path
+             << " is not a directory (registered anyway)\n";
+  }
+  const int64_t clone_id = db.add_clone(repo->id, args.path, args.repo_label);
+  if (!repo->active_clone_id) {
+    db.set_active_clone(repo->id, clone_id);
+  }
+  const std::optional<Clone> cl = db.get_clone_by_id(clone_id);
+  *ctx.out << "clone #" << clone_id << ": " << (cl ? cl->path : std::string())
+           << " added to '" << name << "'\n";
+  return 0;
+}
+
+int cmd_repo_switch(const ParsedArgs &args, Context &ctx) {
+  const std::string name = args.name ? *args.name : std::string();
+  Storage db(ctx.index_path);
+  const std::optional<Repository> repo = db.get_repository_by_name(name);
+  if (!repo) {
+    *ctx.err << "error: no repository named '" << name << "'\n";
+    return 1;
+  }
+  const std::vector<Clone> clones = db.list_clones(repo->id);
+  const std::string want = pathutil::abspath(args.target);
+  std::optional<Clone> target;
+  for (const Clone &c : clones) {
+    if (c.path == want || (c.label && *c.label == args.target)) {
+      target = c;
+      break;
+    }
+  }
+  if (!target) {
+    *ctx.err << "error: '" << args.target << "' is not a clone of '" << name
+             << "' (add it with 'cidx repo add-clone')\n";
+    return 1;
+  }
+  if (!is_directory(target->path)) {
+    *ctx.err << "warning: clone path " << target->path
+             << " is not present on disk\n";
+  }
+  const std::optional<std::string> old_path = active_clone_path(db, *repo);
+  int64_t n = 0;
+  if (old_path && *old_path != target->path) {
+    n = db.rebase_components(repo->id, *old_path, target->path);
+  }
+  db.set_active_clone(repo->id, target->id);
+  *ctx.out << "switched '" << name << "' to " << target->path << " (" << n
+           << " component(s) rebased)\n";
+  return 0;
+}
+
+int cmd_repo_rm(const ParsedArgs &args, Context &ctx) {
+  const std::string name = args.name ? *args.name : std::string();
+  Storage db(ctx.index_path);
+  const std::optional<Repository> repo = db.get_repository_by_name(name);
+  if (!repo) {
+    *ctx.err << "error: no repository named '" << name << "'\n";
+    return 1;
+  }
+  const std::vector<Component> comps = db.components_for_repository(repo->id);
+  if (args.delete_components) {
+    for (const Component &c : comps) {
+      db.delete_component(c.id);
+    }
+  }
+  db.delete_repository(repo->id);
+  if (args.delete_components) {
+    *ctx.out << "removed repository '" << name << "' and " << comps.size()
+             << " component(s)\n";
+  } else {
+    *ctx.out << "removed repository '" << name << "'; " << comps.size()
+             << " component(s) detached\n";
+  }
+  return 0;
+}
+
 int cmd_verify(const ParsedArgs &args, Context &ctx) {
   // Byte-identical with Python cmd_verify (cli.py):
   //   component  {status:<8}  {name}  {resolved}
@@ -3268,6 +3512,13 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "component") {
     if (args.what == "show") return cmd_component_show(args, ctx);
     return cmd_component_set_version(args, ctx);
+  }
+  if (args.command == "repo") {
+    if (args.what == "show") return cmd_repo_show(args, ctx);
+    if (args.what == "add-clone") return cmd_repo_add_clone(args, ctx);
+    if (args.what == "switch") return cmd_repo_switch(args, ctx);
+    if (args.what == "rm") return cmd_repo_rm(args, ctx);
+    return cmd_repo_list(args, ctx); // list (and its `ls` alias)
   }
   if (args.command == "verify") {
     return cmd_verify(args, ctx);

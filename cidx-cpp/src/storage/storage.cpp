@@ -38,13 +38,34 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+-- v23: a repository groups one or more components under one logical code base.
+-- A repo can be checked out in several directories (git worktrees / separate
+-- clones); each is a `clone` row and `active_clone_id` names the live one.
+CREATE TABLE IF NOT EXISTS repository (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT NOT NULL UNIQUE,
+    kind            TEXT NOT NULL DEFAULT 'repo'
+                    CHECK (kind IN ('repo', 'external')),
+    remote_url      TEXT,                 -- git origin URL when known
+    active_clone_id INTEGER               -- -> clone.id (no FK: circular w/ clone)
+);
+
+CREATE TABLE IF NOT EXISTS clone (
+    id            INTEGER PRIMARY KEY,
+    repository_id INTEGER NOT NULL REFERENCES repository(id) ON DELETE CASCADE,
+    path          TEXT NOT NULL UNIQUE,   -- absolute checkout/worktree root
+    label         TEXT                    -- optional human label (branch/worktree)
+);
+
 CREATE TABLE IF NOT EXISTS component (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
     path    TEXT NOT NULL UNIQUE,         -- base path (no version segment)
     kind    TEXT NOT NULL DEFAULT 'repo'
             CHECK (kind IN ('repo', 'external')),
-    version TEXT                          -- v14: nullable; NULL = unversioned
+    version TEXT,                         -- v14: nullable; NULL = unversioned
+    repository_id INTEGER                 -- v23: -> repository.id; NULL = ungrouped
+            REFERENCES repository(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS directory (
@@ -307,7 +328,7 @@ CREATE TABLE IF NOT EXISTS entity_node (
     kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '22');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '23');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -384,7 +405,11 @@ constexpr std::array<std::string_view, 21> kSymbolInsertCols = {
 // migrated DBs (ALTER TABLE appends; positional decode in symbol_from must match).
 // v14: version appended at end (append-at-end discipline so migrated DBs
 // whose ALTER added the column last decode positionally).
-constexpr char kComponentCols[] = "id, name, path, kind, version";
+constexpr char kComponentCols[] =
+    "id, name, path, kind, version, repository_id";
+constexpr char kRepositoryCols[] =
+    "id, name, kind, remote_url, active_clone_id";
+constexpr char kCloneCols[] = "id, repository_id, path, label";
 constexpr char kDirectoryCols[] = "id, component_id, path";
 constexpr char kFileCols[] =
     "id, directory_id, name, mtime, md5, compile_options, driver, indexed, "
@@ -452,6 +477,27 @@ Component component_from(const SqliteStmt &st) {
   c.kind = st.col_text(3);
   // v14: version at column 4 (appended last; nullopt when NULL)
   c.version = opt_text(st, 4);
+  // v23: repository_id at column 5 (SELECT * order; nullopt when NULL/ungrouped)
+  c.repository_id = opt_int64(st, 5);
+  return c;
+}
+
+Repository repository_from(const SqliteStmt &st) {
+  Repository r;
+  r.id = st.col_int64(0);
+  r.name = st.col_text(1);
+  r.kind = st.col_text(2);
+  r.remote_url = opt_text(st, 3);
+  r.active_clone_id = opt_int64(st, 4);
+  return r;
+}
+
+Clone clone_from(const SqliteStmt &st) {
+  Clone c;
+  c.id = st.col_int64(0);
+  c.repository_id = st.col_int64(1);
+  c.path = st.col_text(2);
+  c.label = opt_text(st, 3);
   return c;
 }
 
@@ -854,6 +900,20 @@ void Storage::migrate() {
   if (!has_table("label")) {
     changed = true; // table will be created by the schema script
   }
+  // v22 -> v23: repository + clone tables and component.repository_id. The two
+  // tables are created by the schema script (CREATE TABLE IF NOT EXISTS); only
+  // the new component column needs an ALTER. No backfill -- existing components
+  // stay ungrouped (repository_id NULL) until a re-import / `cidx repo` command.
+  if (has_table("component")) {
+    const auto ccols2 = table_columns("component");
+    if (!has_col(ccols2, "repository_id")) {
+      db_.exec("ALTER TABLE component ADD COLUMN repository_id INTEGER");
+      changed = true;
+    }
+  }
+  if (!has_table("repository")) {
+    changed = true; // table will be created by the schema script
+  }
   // v14 -> v15: per-file parse diagnostics. Created by the schema script
   // (CREATE TABLE IF NOT EXISTS); no backfill -- a reindex repopulates it.
   if (!has_table("diagnostic")) {
@@ -1240,6 +1300,248 @@ Storage::list_components(const std::optional<std::string> &name,
     out.push_back(component_from(st));
   }
   return out;
+}
+
+void Storage::set_component_repository(
+    int64_t component_id, const std::optional<int64_t> &repository_id) {
+  auto st = db_.prepare("UPDATE component SET repository_id = ? WHERE id = ?");
+  if (repository_id) {
+    st.bind(1, *repository_id);
+  } else {
+    st.bind_null(1);
+  }
+  st.bind(2, component_id);
+  st.step_done();
+}
+
+std::vector<Component>
+Storage::components_for_repository(int64_t repository_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
+                        " FROM component WHERE repository_id = ? "
+                        "ORDER BY name, path");
+  st.bind(1, repository_id);
+  std::vector<Component> out;
+  while (st.step()) {
+    out.push_back(component_from(st));
+  }
+  return out;
+}
+
+// -- repositories / clones (v23)
+// -----------------------------------------------------------------
+
+int64_t Storage::add_repository(const std::string &name,
+                                const std::string &kind,
+                                const std::optional<std::string> &remote_url) {
+  auto st = db_.prepare(
+      "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
+      "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
+      "remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+      "RETURNING id");
+  st.bind(1, std::string_view(name));
+  st.bind(2, std::string_view(kind));
+  bind_opt(st, 3, remote_url);
+  if (!st.step()) {
+    throw StorageError("repository upsert returned no id");
+  }
+  const int64_t rid = st.col_int64(0);
+  st.step_done();
+  return rid;
+}
+
+std::optional<Repository>
+Storage::get_repository_by_name(const std::string &name) {
+  auto st = db_.prepare(std::string("SELECT ") + kRepositoryCols +
+                        " FROM repository WHERE name = ?");
+  st.bind(1, std::string_view(name));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return repository_from(st);
+}
+
+std::optional<Repository> Storage::get_repository_by_id(int64_t repository_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kRepositoryCols +
+                        " FROM repository WHERE id = ?");
+  st.bind(1, repository_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return repository_from(st);
+}
+
+std::optional<Repository>
+Storage::get_repository_by_remote(const std::string &remote_url) {
+  auto st = db_.prepare(std::string("SELECT ") + kRepositoryCols +
+                        " FROM repository WHERE remote_url = ? "
+                        "ORDER BY id LIMIT 1");
+  st.bind(1, std::string_view(remote_url));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return repository_from(st);
+}
+
+std::vector<Repository>
+Storage::list_repositories(const std::optional<std::string> &name,
+                           const std::optional<std::string> &kind) {
+  std::string sql =
+      std::string("SELECT ") + kRepositoryCols + " FROM repository";
+  std::vector<std::string> where;
+  std::vector<SqlValue> args;
+  if (name && !name->empty()) {
+    where.push_back("name LIKE ? ESCAPE '\\'");
+    args.emplace_back(fuzzy_like(*name));
+  }
+  if (kind) {
+    where.push_back("kind = ?");
+    args.emplace_back(*kind);
+  }
+  if (!where.empty()) {
+    sql += " WHERE " + join_strings(where, " AND ");
+  }
+  sql += " ORDER BY name";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Repository> out;
+  while (st.step()) {
+    out.push_back(repository_from(st));
+  }
+  return out;
+}
+
+void Storage::set_active_clone(int64_t repository_id,
+                               const std::optional<int64_t> &clone_id) {
+  auto st =
+      db_.prepare("UPDATE repository SET active_clone_id = ? WHERE id = ?");
+  if (clone_id) {
+    st.bind(1, *clone_id);
+  } else {
+    st.bind_null(1);
+  }
+  st.bind(2, repository_id);
+  st.step_done();
+}
+
+void Storage::delete_repository(int64_t repository_id) {
+  auto st = db_.prepare("DELETE FROM repository WHERE id = ?");
+  st.bind(1, repository_id);
+  st.step_done();
+}
+
+int64_t Storage::add_clone(int64_t repository_id, const std::string &path,
+                           const std::optional<std::string> &label) {
+  // Mirror Python: absolutize plain paths; preserve portable ($/<) verbatim.
+  const std::string abs =
+      (path.find('$') == std::string::npos &&
+       path.find('<') == std::string::npos)
+          ? pathutil::abspath(path)
+          : path;
+  auto st = db_.prepare(
+      "INSERT INTO clone (repository_id, path, label) VALUES (?, ?, ?) "
+      "ON CONFLICT(path) DO UPDATE SET repository_id = excluded.repository_id, "
+      "label = COALESCE(excluded.label, clone.label) RETURNING id");
+  st.bind(1, repository_id);
+  st.bind(2, std::string_view(abs));
+  bind_opt(st, 3, label);
+  if (!st.step()) {
+    throw StorageError("clone upsert returned no id");
+  }
+  const int64_t cid = st.col_int64(0);
+  st.step_done();
+  return cid;
+}
+
+std::optional<Clone> Storage::get_clone_by_id(int64_t clone_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kCloneCols +
+                        " FROM clone WHERE id = ?");
+  st.bind(1, clone_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return clone_from(st);
+}
+
+std::optional<Clone> Storage::get_clone_by_path(const std::string &path) {
+  const std::string abs =
+      (path.find('$') == std::string::npos &&
+       path.find('<') == std::string::npos)
+          ? pathutil::abspath(path)
+          : path;
+  auto st = db_.prepare(std::string("SELECT ") + kCloneCols +
+                        " FROM clone WHERE path = ?");
+  st.bind(1, std::string_view(abs));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return clone_from(st);
+}
+
+std::vector<Clone>
+Storage::list_clones(const std::optional<int64_t> &repository_id) {
+  std::string sql = std::string("SELECT ") + kCloneCols + " FROM clone";
+  if (repository_id) {
+    sql += " WHERE repository_id = ?";
+  }
+  sql += " ORDER BY id";
+  auto st = db_.prepare(sql);
+  if (repository_id) {
+    st.bind(1, *repository_id);
+  }
+  std::vector<Clone> out;
+  while (st.step()) {
+    out.push_back(clone_from(st));
+  }
+  return out;
+}
+
+void Storage::delete_clone(int64_t clone_id) {
+  auto clr = db_.prepare("UPDATE repository SET active_clone_id = NULL "
+                         "WHERE active_clone_id = ?");
+  clr.bind(1, clone_id);
+  clr.step_done();
+  auto del = db_.prepare("DELETE FROM clone WHERE id = ?");
+  del.bind(1, clone_id);
+  del.step_done();
+}
+
+int64_t Storage::rebase_components(int64_t repository_id,
+                                   const std::string &old_root,
+                                   const std::string &new_root) {
+  std::string oldr = pathutil::abspath(old_root);
+  std::string newr = pathutil::abspath(new_root);
+  while (!oldr.empty() && oldr.back() == '/') {
+    oldr.pop_back();
+  }
+  while (!newr.empty() && newr.back() == '/') {
+    newr.pop_back();
+  }
+  if (oldr == newr) {
+    return 0;
+  }
+  int64_t n = 0;
+  for (const Component &comp : components_for_repository(repository_id)) {
+    const std::string &p = comp.path;
+    if (p.find('<') != std::string::npos || p.find('$') != std::string::npos) {
+      continue; // portable path: clone-root agnostic already
+    }
+    std::string new_path;
+    if (p == oldr) {
+      new_path = newr;
+    } else if (p.starts_with(oldr + "/")) {
+      new_path = newr + p.substr(oldr.size());
+    } else {
+      continue;
+    }
+    auto upd = db_.prepare("UPDATE component SET path = ? WHERE id = ?");
+    upd.bind(1, std::string_view(new_path));
+    upd.bind(2, comp.id);
+    upd.step_done();
+    ++n;
+  }
+  return n;
 }
 
 // -- directories

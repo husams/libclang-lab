@@ -45,6 +45,7 @@ if __package__ in (None, ""):  # direct execution
         NoIndexError,
     )
     from indexer.utils import (  # noqa: E402
+        git_remote_url,
         git_root,
         index_status,
         md5_of,
@@ -56,7 +57,14 @@ else:
     from . import astcmd, compiledb, pathx
     from .clang import ClangParseError, index_source
     from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
-    from .utils import git_root, index_status, md5_of, repo_name, resolve_file_arg
+    from .utils import (
+        git_remote_url,
+        git_root,
+        index_status,
+        md5_of,
+        repo_name,
+        resolve_file_arg,
+    )
 
 CACHE_ENV = "INDEXER_CACHE"
 DEFAULT_CACHE = "~/.cache/cidx"
@@ -65,7 +73,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.40.2"
+VERSION = "0.41.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -283,6 +291,16 @@ def cmd_add_source(args) -> int:
     base, version = _resolve_version(args, path)
     with Storage(args.index) as db:
         cid = db.add_component(name, base, kind=args.kind, version=version)
+        # v23: group the component under a repository (same kind). The source
+        # directory is its first clone and becomes active.
+        repo_name_val = getattr(args, "repo", None) or name
+        remote_url = git_remote_url(root) if root else None
+        rid = db.add_repository(repo_name_val, args.kind, remote_url)
+        clone_id = db.add_clone(rid, path)
+        repo = db.get_repository_by_id(rid)
+        if repo is not None and repo.active_clone_id is None:
+            db.set_active_clone(rid, clone_id)
+        db.set_component_repository(cid, rid)
     print(f"component #{cid}: {name} ({args.kind}) at {base}")
     return 0
 
@@ -428,6 +446,27 @@ def cmd_import(args) -> int:
                     driver=compiledb.driver(cmd),
                 )
                 imported += 1
+        # v23: group the imported components under a repository. Identity =
+        # --repo if given, else the git/dir-derived name; remote_url (when the
+        # root is a git checkout) lets two worktrees map to one repository. The
+        # checkout directory (`root`) is registered as a clone and made active
+        # when the repository has none yet; `repo switch` repoints it later.
+        repo_name_val = getattr(args, "repo", None) or name
+        remote_url = git_remote_url(groot) if groot else None
+        rid = db.add_repository(repo_name_val, "repo", remote_url)
+        clone_id = db.add_clone(rid, root)
+        repo = db.get_repository_by_id(rid)
+        if repo is not None and repo.active_clone_id is None:
+            db.set_active_clone(rid, clone_id)
+        attached: set[int] = set()
+        for cmd in commands:
+            comp = db.component_for_path(compiledb.source_path(cmd))
+            if comp is None or comp.id in attached:
+                continue
+            attached.add(comp.id)
+            if comp.repository_id is None:
+                db.set_component_repository(comp.id, rid)
+        print(f"repository '{repo_name_val}': {len(attached)} component(s)")
     print(f"imported {imported} file(s), skipped {skipped}")
     return 0
 
@@ -918,11 +957,18 @@ def cmd_search(args) -> int:
 def cmd_list_components(args) -> int:
     with Storage(args.index) as db:
         comps = db.list_components(name=args.pattern, kind=args.kind)
+        repos = {r.id: r.name for r in db.list_repositories()}
         width = max((len(c.name) for c in comps), default=0)
         vw = max((len(c.version) for c in comps if c.version), default=1)
+        rnames = {c.id: repos.get(c.repository_id) or "-" for c in comps}
+        rw = max((len(v) for v in rnames.values()), default=1)
         for c in comps:
             ver = c.version if c.version else "-"
-            print(f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  {ver:<{vw}}  {c.path}")
+            rep = rnames[c.id]
+            print(
+                f"{c.id:>4}  {c.name:<{width}}  {c.kind:<8}  "
+                f"{ver:<{vw}}  {rep:<{rw}}  {c.path}"
+            )
     print(f"{len(comps)} component(s)")
     return 0 if comps else 1
 
@@ -1665,6 +1711,151 @@ def cmd_component_set_version(args) -> int:
     return 0
 
 
+# -- repo list / show / add-clone / switch / rm (v23) ------------------------
+
+
+def _active_clone_path(db: Storage, repo) -> str | None:
+    """Resolved path of a repository's active clone, or None."""
+    if repo.active_clone_id is None:
+        return None
+    cl = db.get_clone_by_id(repo.active_clone_id)
+    return cl.path if cl is not None else None
+
+
+def cmd_repo_list(args) -> int:
+    """cidx repo list -- one line per repository with component/clone counts."""
+    with Storage(args.index) as db:
+        repos = db.list_repositories(name=args.pattern, kind=args.kind)
+        width = max((len(r.name) for r in repos), default=0)
+        for r in repos:
+            ncomp = len(db.components_for_repository(r.id))
+            nclone = len(db.list_clones(r.id))
+            active = _active_clone_path(db, r) or "-"
+            print(
+                f"{r.id:>4}  {r.name:<{width}}  {r.kind:<8}  "
+                f"{ncomp} component(s)  {nclone} clone(s)  {active}"
+            )
+    print(f"{len(repos)} repositories")
+    return 0 if repos else 1
+
+
+def cmd_repo_show(args) -> int:
+    """cidx repo show NAME -- repository detail, its clones and components."""
+    with Storage(args.index) as db:
+        repo = db.get_repository_by_name(args.name)
+        if repo is None:
+            print(f"error: no repository named '{args.name}'", file=sys.stderr)
+            return 1
+        clones = db.list_clones(repo.id)
+        comps = db.components_for_repository(repo.id)
+        remote = repo.remote_url if repo.remote_url else "(none)"
+        active = _active_clone_path(db, repo) or "(none)"
+        for key, value in (
+            ("name", repo.name),
+            ("kind", repo.kind),
+            ("remote", remote),
+            ("active clone", active),
+            ("clones", str(len(clones))),
+            ("components", str(len(comps))),
+        ):
+            print(f"{key:<14} {value}")
+        if clones:
+            lw = max((len(c.label) for c in clones if c.label), default=1)
+            print("clones:")
+            for c in clones:
+                mark = "*" if c.id == repo.active_clone_id else " "
+                lbl = c.label if c.label else "-"
+                print(f"  {mark} {c.id:>4}  {lbl:<{lw}}  {c.path}")
+        if comps:
+            cw = max((len(c.name) for c in comps), default=0)
+            print("components:")
+            for c in comps:
+                print(f"    {c.id:>4}  {c.name:<{cw}}  {c.path}")
+    return 0
+
+
+def cmd_repo_add_clone(args) -> int:
+    """cidx repo add-clone NAME PATH [--label L] -- register a checkout dir."""
+    with Storage(args.index) as db:
+        repo = db.get_repository_by_name(args.name)
+        if repo is None:
+            print(f"error: no repository named '{args.name}'", file=sys.stderr)
+            return 1
+        if not os.path.isdir(os.path.abspath(args.path)):
+            print(
+                f"warning: {args.path} is not a directory (registered anyway)",
+                file=sys.stderr,
+            )
+        clone_id = db.add_clone(repo.id, args.path, label=args.label)
+        if repo.active_clone_id is None:
+            db.set_active_clone(repo.id, clone_id)
+        cl = db.get_clone_by_id(clone_id)
+    print(f"clone #{clone_id}: {cl.path} added to '{args.name}'")
+    return 0
+
+
+def cmd_repo_switch(args) -> int:
+    """cidx repo switch NAME TARGET -- rebase the repo onto another clone.
+
+    TARGET matches a registered clone by exact path or by label. Component
+    paths are rewritten from the old active clone's root to the target's."""
+    with Storage(args.index) as db:
+        repo = db.get_repository_by_name(args.name)
+        if repo is None:
+            print(f"error: no repository named '{args.name}'", file=sys.stderr)
+            return 1
+        clones = db.list_clones(repo.id)
+        target = None
+        want = os.path.abspath(args.target)
+        for c in clones:
+            if c.path == want or c.label == args.target:
+                target = c
+                break
+        if target is None:
+            print(
+                f"error: '{args.target}' is not a clone of '{args.name}' "
+                f"(add it with 'cidx repo add-clone')",
+                file=sys.stderr,
+            )
+            return 1
+        if not os.path.isdir(target.path):
+            print(
+                f"warning: clone path {target.path} is not present on disk",
+                file=sys.stderr,
+            )
+        old_path = _active_clone_path(db, repo)
+        n = 0
+        if old_path is not None and old_path != target.path:
+            n = db.rebase_components(repo.id, old_path, target.path)
+        db.set_active_clone(repo.id, target.id)
+    print(f"switched '{args.name}' to {target.path} ({n} component(s) rebased)")
+    return 0
+
+
+def cmd_repo_rm(args) -> int:
+    """cidx repo rm NAME [--delete-components] -- remove a repository."""
+    with Storage(args.index) as db:
+        repo = db.get_repository_by_name(args.name)
+        if repo is None:
+            print(f"error: no repository named '{args.name}'", file=sys.stderr)
+            return 1
+        comps = db.components_for_repository(repo.id)
+        if args.delete_components:
+            for c in comps:
+                db.delete_component(c.id)
+        db.delete_repository(repo.id)
+    if args.delete_components:
+        print(
+            f"removed repository '{args.name}' and {len(comps)} component(s)"
+        )
+    else:
+        print(
+            f"removed repository '{args.name}'; "
+            f"{len(comps)} component(s) detached"
+        )
+    return 0
+
+
 # -- label add / rm / list / resolve -----------------------------------------
 
 
@@ -1808,6 +1999,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("add-source", help="register a component")
     p.add_argument("--path", required=True, help="repo root or library header dir")
     p.add_argument("--name", help="component name (default: from .git/config)")
+    p.add_argument(
+        "--repo", help="repository name to group under (default: component name)"
+    )
     p.add_argument("--kind", choices=("repo", "external"), default="repo")
     p.add_argument(
         "--no-git",
@@ -1834,6 +2028,11 @@ def main(argv=None) -> int:
         help="compile_commands.json (or the directory holding it)",
     )
     p.add_argument("--name", help="component name override")
+    p.add_argument(
+        "--repo",
+        help="repository name to group the imported components under "
+        "(default: the git/dir-derived name)",
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -2005,6 +2204,52 @@ def main(argv=None) -> int:
     )
     _db_arg(q)
     q.set_defaults(fn=cmd_component_set_version)
+
+    # -- repo: list / show / add-clone / switch / rm (v23) --------------------
+    p = sub.add_parser(
+        "repo", help="group components into repositories; switch clones"
+    )
+    rsub = p.add_subparsers(dest="repo_action", required=True)
+
+    q = rsub.add_parser("list", help="list repositories", aliases=["ls"])
+    q.add_argument(
+        "pattern", nargs="?", default=None, help="fuzzy-filter by repository name"
+    )
+    q.add_argument(
+        "--kind", choices=("repo", "external"), help="filter by repository kind"
+    )
+    _db_arg(q)
+    q.set_defaults(fn=cmd_repo_list)
+
+    q = rsub.add_parser("show", help="show a repository's clones and components")
+    q.add_argument("name", metavar="NAME", help="repository name")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_repo_show)
+
+    q = rsub.add_parser("add-clone", help="register another checkout directory")
+    q.add_argument("name", metavar="NAME", help="repository name")
+    q.add_argument("path", metavar="PATH", help="checkout/worktree directory")
+    q.add_argument("--label", help="optional label (e.g. branch/worktree name)")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_repo_add_clone)
+
+    q = rsub.add_parser(
+        "switch", help="rebase the repository onto another clone (by path/label)"
+    )
+    q.add_argument("name", metavar="NAME", help="repository name")
+    q.add_argument("target", metavar="TARGET", help="clone path or label")
+    _db_arg(q)
+    q.set_defaults(fn=cmd_repo_switch)
+
+    q = rsub.add_parser("rm", help="remove a repository")
+    q.add_argument("name", metavar="NAME", help="repository name")
+    q.add_argument(
+        "--delete-components",
+        action="store_true",
+        help="also delete the grouped components and their indexed symbols",
+    )
+    _db_arg(q)
+    q.set_defaults(fn=cmd_repo_rm)
 
     # -- label: add / rm / list / resolve -------------------------------------
     p = sub.add_parser("label", help="manage include/arg label registry")

@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 22;
+constexpr int kSchemaVersion = 23;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -102,6 +102,45 @@ public:
   // Stored effective root: version ? normpath(join(path, version)) : path.
   // NOT resolved (may contain $VAR). Static so callers can use it anywhere.
   static std::string effective_root(const Component &comp);
+
+  // v23: attach (or, with nullopt, detach) a component to a repository.
+  void set_component_repository(int64_t component_id,
+                                const std::optional<int64_t> &repository_id);
+  // Components grouped under a repository, ordered by name, path.
+  std::vector<Component> components_for_repository(int64_t repository_id);
+
+  // -- repositories / clones (v23) -------------------------------------------
+  // Insert a repository; idempotent on name. remote_url updated only when a
+  // non-null value is supplied (COALESCE). Returns the repository id.
+  int64_t add_repository(const std::string &name,
+                         const std::string &kind = "repo",
+                         const std::optional<std::string> &remote_url =
+                             std::nullopt);
+  std::optional<Repository> get_repository_by_name(const std::string &name);
+  std::optional<Repository> get_repository_by_id(int64_t repository_id);
+  std::optional<Repository>
+  get_repository_by_remote(const std::string &remote_url);
+  std::vector<Repository>
+  list_repositories(const std::optional<std::string> &name = std::nullopt,
+                    const std::optional<std::string> &kind = std::nullopt);
+  void set_active_clone(int64_t repository_id,
+                        const std::optional<int64_t> &clone_id);
+  // Remove a repository (clones cascade; components detach via SET NULL).
+  void delete_repository(int64_t repository_id);
+  // Register a checkout/worktree dir; idempotent on path. Returns clone id.
+  int64_t add_clone(int64_t repository_id, const std::string &path,
+                    const std::optional<std::string> &label = std::nullopt);
+  std::optional<Clone> get_clone_by_id(int64_t clone_id);
+  std::optional<Clone> get_clone_by_path(const std::string &path);
+  std::vector<Clone>
+  list_clones(const std::optional<int64_t> &repository_id = std::nullopt);
+  // Remove a clone; clears the repository's active pointer if it pointed here.
+  void delete_clone(int64_t clone_id);
+  // Rewrite the absolute-path prefix of a repository's components from
+  // old_root to new_root (`repo switch` rebase). Skips portable (`<`/`$`) and
+  // outside-root paths. Returns the number of components rewritten.
+  int64_t rebase_components(int64_t repository_id, const std::string &old_root,
+                            const std::string &new_root);
 
   // -- directories -----------------------------------------------------------
   int64_t add_directory(int64_t component_id, const std::string &path);

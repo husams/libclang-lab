@@ -322,7 +322,8 @@ struct GoldFixture {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,repo,"
+    "label,"
     "verify,"
     "set,"
     "file,"
@@ -395,7 +396,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, migrate, add-source, import, realias, index, resolve, "
-            "pch, component, label, verify, set, file, dump-compile-commands, "
+            "pch, component, repo, label, verify, set, file, "
+            "dump-compile-commands, "
             "search, "
             "show, "
             "list, ls, delete, graph, ast)\n");
@@ -835,7 +837,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.40.1");
+  CHECK(std::string(cli::kVersion) == "0.41.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -860,6 +862,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "positional arguments:\n"
           "  "
           "{init,migrate,add-source,import,realias,index,resolve,pch,component,"
+          "repo,"
           "label,verify,"
           "set,file,"
           "dump-compile-commands,search,show,list,ls,delete,graph,ast}"
@@ -879,6 +882,8 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "speed up\n"
           "                        indexing\n"
           "    component           inspect or modify a component\n"
+          "    repo                group components into repositories; switch "
+          "clones\n"
           "    label               manage include/arg label registry\n"
           "    verify              check that component roots and files exist on "
           "disk\n"
@@ -1414,12 +1419,12 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   // $ python3 -m indexer list components
   CmdResult r = run_cli({"list", "components"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      -  {ROOT}\n1 component(s)\n"));
+  CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer ls components   (alias, same output)
   r = run_cli({"ls", "components"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      -  {ROOT}\n1 component(s)\n"));
+  CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer list components --kind external   (0 rows, exit 1)
   r = run_cli({"list", "components", "--kind", "external"}, g.cache);
@@ -1429,7 +1434,7 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   // $ python3 -m indexer list components gld   (char-in-order fuzzy)
   r = run_cli({"list", "components", "gld"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      -  {ROOT}\n1 component(s)\n"));
+  CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 }
 
 TEST_CASE("list dirs: table + unknown component error") {
@@ -1992,6 +1997,7 @@ TEST_SUITE("clang") {
     CHECK(r.rc == 0);
     CHECK(r.out == "component #1: proj at " + t +
                        "/proj\n"
+                       "repository 'proj': 1 component(s)\n"
                        "imported 2 file(s), skipped 1\n");
     CHECK(r.err == "  skip (outside any component): " + t + "/other/c.c\n");
 
@@ -2039,6 +2045,7 @@ TEST_SUITE("clang") {
     CHECK(r.rc == 0);
     CHECK(r.out == "component #1: widget at " + t +
                        "/proj\n"
+                       "repository 'widget': 1 component(s)\n"
                        "imported 1 file(s), skipped 0\n");
     CHECK(r.err.empty());
   }

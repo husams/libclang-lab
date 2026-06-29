@@ -23,21 +23,21 @@ namespace {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,verify,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,repo,label,verify,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,label,verify,set,file,"
+    "{init,migrate,add-source,import,realias,index,resolve,pch,component,repo,label,verify,set,file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
     "...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,migrate,add-source,import,realias,index,resolve,pch,component,label,verify,set,"
+    "  {init,migrate,add-source,import,realias,index,resolve,pch,component,repo,label,verify,set,"
     "file,"
     "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
     "    init                create a blank index database\n"
@@ -53,6 +53,7 @@ const char kTopHelp[] =
     "    pch                 build & cache one shared system/C++ PCH to speed up\n"
     "                        indexing\n"
     "    component           inspect or modify a component\n"
+    "    repo                group components into repositories; switch clones\n"
     "    label               manage include/arg label registry\n"
     "    verify              check that component roots and files exist on "
     "disk\n"
@@ -1108,6 +1109,96 @@ const char kComponentSetVersionHelp[] =
     "  -h, --help  show this help message and exit\n"
     "  --db PATH   operate on this index DB (default: the standard index)\n";
 
+// repo help texts (v23) — byte-identical with Python argparse output.
+const char kRepoUsage[] =
+    "usage: cidx repo [-h] {list,ls,show,add-clone,switch,rm} ...\n";
+
+const char kRepoHelp[] =
+    "usage: cidx repo [-h] {list,ls,show,add-clone,switch,rm} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {list,ls,show,add-clone,switch,rm}\n"
+    "    list (ls)           list repositories\n"
+    "    show                show a repository's clones and components\n"
+    "    add-clone           register another checkout directory\n"
+    "    switch              rebase the repository onto another clone (by\n"
+    "                        path/label)\n"
+    "    rm                  remove a repository\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kRepoListUsage[] =
+    "usage: cidx repo list [-h] [--kind {repo,external}] [--db PATH] "
+    "[pattern]\n";
+const char kRepoListHelp[] =
+    "usage: cidx repo list [-h] [--kind {repo,external}] [--db PATH] "
+    "[pattern]\n"
+    "\n"
+    "positional arguments:\n"
+    "  pattern               fuzzy-filter by repository name\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --kind {repo,external}\n"
+    "                        filter by repository kind\n"
+    "  --db PATH             index database (default: the standard cache "
+    "index)\n";
+
+const char kRepoShowUsage[] = "usage: cidx repo show [-h] [--db PATH] NAME\n";
+const char kRepoShowHelp[] =
+    "usage: cidx repo show [-h] [--db PATH] NAME\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME        repository name\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
+
+const char kRepoAddCloneUsage[] =
+    "usage: cidx repo add-clone [-h] [--label LABEL] [--db PATH] NAME PATH\n";
+const char kRepoAddCloneHelp[] =
+    "usage: cidx repo add-clone [-h] [--label LABEL] [--db PATH] NAME PATH\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME           repository name\n"
+    "  PATH           checkout/worktree directory\n"
+    "\n"
+    "options:\n"
+    "  -h, --help     show this help message and exit\n"
+    "  --label LABEL  optional label (e.g. branch/worktree name)\n"
+    "  --db PATH      index database (default: the standard cache index)\n";
+
+const char kRepoSwitchUsage[] =
+    "usage: cidx repo switch [-h] [--db PATH] NAME TARGET\n";
+const char kRepoSwitchHelp[] =
+    "usage: cidx repo switch [-h] [--db PATH] NAME TARGET\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME        repository name\n"
+    "  TARGET      clone path or label\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
+
+const char kRepoRmUsage[] =
+    "usage: cidx repo rm [-h] [--delete-components] [--db PATH] NAME\n";
+const char kRepoRmHelp[] =
+    "usage: cidx repo rm [-h] [--delete-components] [--db PATH] NAME\n"
+    "\n"
+    "positional arguments:\n"
+    "  NAME                 repository name\n"
+    "\n"
+    "options:\n"
+    "  -h, --help           show this help message and exit\n"
+    "  --delete-components  also delete the grouped components and their "
+    "indexed\n"
+    "                       symbols\n"
+    "  --db PATH            index database (default: the standard cache "
+    "index)\n";
+
 const char kLabelUsage[] =
     "usage: cidx label [-h] {add,rm,list,resolve} ...\n";
 
@@ -1205,10 +1296,12 @@ const std::vector<std::string> kSymbolKinds = {
 const std::vector<std::string> kCommands = {
     "init",      "migrate",    "add-source",            "import",
     "realias",   "index",      "resolve",               "pch",
-    "component", "label",      "verify",                "set",
-    "file",      "dump-compile-commands",               "search",
+    "component", "repo",       "label",                 "verify",
+    "set",       "file",       "dump-compile-commands", "search",
     "show",      "list",       "ls",                    "delete",
     "graph",     "ast"};
+const std::vector<std::string> kRepoWhats = {"list", "ls", "show", "add-clone",
+                                             "switch", "rm"};
 const std::vector<std::string> kGraphWhats = {
     "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
     "dispatch"};
@@ -1680,6 +1773,7 @@ const Spec kAddSourceSpec = {
     {
         {"--path", '\0', ValueKind::kString, "--path", nullptr, 0},
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
+        {"--repo", '\0', ValueKind::kString, "--repo", nullptr, 0},
         {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
         {"--no-git", '\0', ValueKind::kNone, "--no-git", nullptr, 0},
         // v14: portable-paths
@@ -1699,6 +1793,7 @@ const Spec kImportSpec = {
     {
         {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
+        {"--repo", '\0', ValueKind::kString, "--repo", nullptr, 0},
         {"--force", '\0', ValueKind::kNone, "--force", nullptr, 0},
         // v0.6.0: aliasing
         {"--no-alias", '\0', ValueKind::kNone, "--no-alias", nullptr, 0},
@@ -2225,6 +2320,72 @@ const Spec kComponentSetVersionSpec = {
     {"NAME"},
 };
 
+// -- repo leaf specs (v23) ---------------------------------------------------
+
+const Spec kRepoListSpec = {
+    "cidx repo list",
+    kRepoListUsage,
+    kRepoListHelp,
+    {
+        {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"pattern"}, // optional (not in required set)
+    false,
+    {},
+};
+
+const Spec kRepoShowSpec = {
+    "cidx repo show",
+    kRepoShowUsage,
+    kRepoShowHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
+const Spec kRepoAddCloneSpec = {
+    "cidx repo add-clone",
+    kRepoAddCloneUsage,
+    kRepoAddCloneHelp,
+    {
+        {"--label", '\0', ValueKind::kString, "--label", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "PATH"},
+    false,
+    {"NAME", "PATH"},
+};
+
+const Spec kRepoSwitchSpec = {
+    "cidx repo switch",
+    kRepoSwitchUsage,
+    kRepoSwitchHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "TARGET"},
+    false,
+    {"NAME", "TARGET"},
+};
+
+const Spec kRepoRmSpec = {
+    "cidx repo rm",
+    kRepoRmUsage,
+    kRepoRmHelp,
+    {
+        {"--delete-components", '\0', ValueKind::kNone, "--delete-components",
+         nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
 // -- label leaf specs (v14) --------------------------------------------------
 
 const std::vector<std::string> kLabelWhats = {"add", "rm", "list", "resolve"};
@@ -2341,6 +2502,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     }
     pa.path = st.values["--path"];
     pa.name = opt_value(st, "--name");
+    pa.repo = opt_value(st, "--repo");
     pa.kind = opt_value(st, "--kind");
     if (!pa.kind) {
       pa.kind = "repo"; // argparse default
@@ -2356,6 +2518,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     }
     pa.db = st.values["--db"];
     pa.name = opt_value(st, "--name");
+    pa.repo = opt_value(st, "--repo");
     pa.force = st.flags.count("--force") != 0;
     pa.no_alias = st.flags.count("--no-alias") != 0;
   } else if (pa.command == "realias") {
@@ -2893,6 +3056,71 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       } else if (!st.rest.empty()) {
         pa.version_str = st.rest[0];
       }
+      pa.index_db = opt_value(st, "--db");
+    }
+  } else if (pa.command == "repo") {
+    // -- repo sub-command (v23) ------------------------------------------------
+    CommandScan what = scan_command(argv, i, extras);
+    if (what.help) {
+      pa.help_text = kRepoHelp;
+      return pa;
+    }
+    if (!what.command) {
+      fail(kRepoUsage, "cidx repo",
+           "the following arguments are required: what");
+    }
+    if (!contains(kRepoWhats, *what.command)) {
+      fail(kRepoUsage, "cidx repo",
+           "argument what: invalid choice: '" + *what.command +
+               "' (choose from " + join(kRepoWhats, ", ") + ")");
+    }
+    pa.what = *what.command;
+    if (pa.what == "list" || pa.what == "ls") {
+      ParseState st = parse_leaf(kRepoListSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kRepoListHelp;
+        return pa;
+      }
+      if (!st.positionals.empty()) {
+        pa.pattern = st.positionals[0];
+      }
+      pa.kind = opt_value(st, "--kind");
+      pa.index_db = opt_value(st, "--db");
+    } else if (pa.what == "show") {
+      ParseState st = parse_leaf(kRepoShowSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kRepoShowHelp;
+        return pa;
+      }
+      pa.name = st.positionals[0];
+      pa.index_db = opt_value(st, "--db");
+    } else if (pa.what == "add-clone") {
+      ParseState st = parse_leaf(kRepoAddCloneSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kRepoAddCloneHelp;
+        return pa;
+      }
+      pa.name = st.positionals[0];
+      pa.path = st.positionals[1];
+      pa.repo_label = opt_value(st, "--label");
+      pa.index_db = opt_value(st, "--db");
+    } else if (pa.what == "switch") {
+      ParseState st = parse_leaf(kRepoSwitchSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kRepoSwitchHelp;
+        return pa;
+      }
+      pa.name = st.positionals[0];
+      pa.target = st.positionals[1];
+      pa.index_db = opt_value(st, "--db");
+    } else { // rm
+      ParseState st = parse_leaf(kRepoRmSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kRepoRmHelp;
+        return pa;
+      }
+      pa.name = st.positionals[0];
+      pa.delete_components = st.flags.count("--delete-components") != 0;
       pa.index_db = opt_value(st, "--db");
     }
   } else if (pa.command == "label") {
