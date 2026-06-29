@@ -794,13 +794,6 @@ void Storage::migrate() {
       c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
     if (kind_type != "INTEGER") {
-      int64_t nrows = 0;
-      {
-        auto cs = db_.prepare("SELECT COUNT(*) FROM symbol");
-        if (cs.step()) {
-          nrows = cs.col_int64(0);
-        }
-      }
       migrate_symbol_kind_to_int();
       changed = true;
     }
@@ -3490,11 +3483,8 @@ void Storage::materialise_entity_edges() {
   {
     auto txn = transaction();
     db_.exec("DELETE FROM entity_edge");
-    const auto run = [&](const char *name, void (*fn)(cidx::SqliteDb &)) {
-      fn(db_);
-      auto c = db_.prepare("SELECT COUNT(*) FROM entity_edge");
-      const int64_t n = c.step() ? c.col_int64(0) : 0;
-    };
+    const auto run = [&]([[maybe_unused]] const char *name,
+                         void (*fn)(cidx::SqliteDb &)) { fn(db_); };
     run("inheritance", cpp_materialise_inheritance);
     run("specializes", cpp_materialise_specializes);
     run("instantiates", cpp_materialise_instantiates);
