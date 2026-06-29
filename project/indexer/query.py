@@ -536,6 +536,7 @@ class GraphQuery:
         self._owns_conn = True
         self._file_cache: Optional[dict[int, tuple[str, Optional[str]]]] = None
         self._resolved: Optional[bool] = None
+        self._entity_nodes_ready: Optional[bool] = None
         if require_edges:
             self.require_edges()
 
@@ -551,6 +552,7 @@ class GraphQuery:
         self._owns_conn = False
         self._file_cache = None
         self._resolved = None
+        self._entity_nodes_ready = None
         return self
 
     # -- lifecycle ----------------------------------------------------------- #
@@ -811,6 +813,59 @@ class GraphQuery:
             self._sym(r)
             for r in self._c.execute(sql, [*uniq, *uniq, limit])
         ]
+
+    def entity_nodes_ready(self) -> bool:
+        """True once the materialized ``entity_node`` classification table holds
+        at least one row (populated by ``resolve`` / the v22 backfill). Cached.
+
+        The single-query record selectors (``records_by_name``) use it to decide
+        whether the fast ``entity_node`` JOIN is usable, or whether they must
+        fall back to per-record classification on a not-yet-materialized index."""
+        if self._entity_nodes_ready is None:
+            row = self._c.execute("SELECT 1 FROM entity_node LIMIT 1").fetchone()
+            self._entity_nodes_ready = row is not None
+        return self._entity_nodes_ready
+
+    def records_by_name(
+        self,
+        *names: str,
+        symbol_kinds: Iterable[str],
+        entity_kinds: Iterable[int],
+        limit: int = 200,
+    ) -> list[Sym]:
+        """Records named in ``names`` whose C++ keyword (``symbol.kind``:
+        ``"class"`` / ``"struct"`` / ``"union"``) AND materialized design type
+        (``entity_node.kind`` ids: 1 class, 2 abstract_class, 3 interface,
+        4 union) both match -- in ONE indexed query.
+
+        Replaces "name lookup, then a per-candidate ``class_kind`` query": the
+        JOIN onto ``entity_node`` (PK = ``symbol.id``) reads the abstractness
+        classification that ``resolve`` already materialized, so
+        ``CodeBase.klass`` / ``struct`` / ``record`` / ``interface`` /
+        ``abstract_class`` are a single point lookup instead of N+1 queries.
+        Exact/index-backed on ``idx_symbol_qual`` / ``idx_symbol_spelling``;
+        shortest-name-first, same ordering as ``by_qual_or_spelling``."""
+        uniq = list(dict.fromkeys(n for n in names if n))
+        skids = [SYMBOL_KIND_IDS[k] for k in symbol_kinds if k in SYMBOL_KIND_IDS]
+        eks = list(entity_kinds)
+        if not uniq or not skids or not eks:
+            return []
+        nph = ",".join("?" * len(uniq))
+        skph = ",".join("?" * len(skids))
+        ekph = ",".join("?" * len(eks))
+        sql = (
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            "JOIN entity_node en ON en.id = s.id "
+            f"WHERE (s.qual_name IN ({nph}) OR s.spelling IN ({nph})) "
+            f"AND s.kind IN ({skph}) AND en.kind IN ({ekph}) "
+            # exclude template instantiations (Box<int>, stored under the
+            # template's own spelling) -- mirrors model._is_instance.
+            "AND s.is_instantiation = 0 "
+            "ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)), "
+            "COALESCE(s.qual_name, s.spelling) LIMIT ?"
+        )
+        args = [*uniq, *uniq, *skids, *eks, limit]
+        return [self._sym(r) for r in self._c.execute(sql, args)]
 
     def symbols_in_file(self, path_substr: str, limit: int = 500) -> list[Sym]:
         """Symbols whose definition file path contains `path_substr`. Useful to
