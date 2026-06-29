@@ -543,6 +543,44 @@ class CodeBase:
     def _records(
         self, name: str, kinds: "set[str]", *, class_kinds=None
     ) -> "list[Record]":
+        """Records named ``name`` of the given C++ keyword ``kinds`` (class /
+        struct / union) and -- when ``class_kinds`` is given -- the given
+        abstractness (CONCRETE / ABSTRACT / INTERFACE).
+
+        Fast path: ONE indexed ``entity_node`` JOIN (``records_by_name``) reads
+        the abstractness ``resolve`` already materialized, so there is no
+        per-candidate ``class_kind`` query. Falls back to per-record
+        classification only for a fuzzy / suffix name the exact JOIN cannot
+        answer, or an index whose ``entity_node`` table is not yet
+        materialized."""
+        ekinds = (
+            sorted({i for ck in class_kinds for i in _CLASSKIND_ENTITY_IDS[ck]})
+            if class_kinds is not None
+            else None
+        )
+        tail = _unqualify(name)
+        if ekinds is not None and self.graph.entity_nodes_ready():
+            syms = self.graph.records_by_name(
+                name, tail, symbol_kinds=kinds, entity_kinds=ekinds
+            )
+            seen: dict[int, Record] = {}
+            for e in self._wrap_all(syms):
+                if isinstance(e, Record) and _name_matches(name, e):
+                    seen.setdefault(e.id, e)
+            hits = list(seen.values())
+            # A bare name is fully answered by the exact JOIN; only a qualified
+            # / suffix name with no exact hit needs the fuzzy fallback below.
+            if hits or name == tail:
+                return hits
+        return self._records_classify(name, kinds, class_kinds=class_kinds)
+
+    def _records_classify(
+        self, name: str, kinds: "set[str]", *, class_kinds=None
+    ) -> "list[Record]":
+        """Fallback record selector: generate candidates via ``_lookup`` and
+        classify each with ``class_kind``. Used when the materialized
+        ``entity_node`` JOIN cannot answer -- a fuzzy / suffix name, or an
+        unmaterialized index."""
         out: list[Record] = []
         for e in self._lookup(name):
             if not isinstance(e, Record) or isinstance(e, ClassTemplate):
@@ -578,28 +616,18 @@ class CodeBase:
         """Pure interface records named ``name`` -- all own methods pure-virtual
         and no data members (``ClassKind.INTERFACE``).  Mutually exclusive with
         :meth:`klass` and :meth:`abstract_class`."""
-        return [
-            e
-            for e in self._lookup(name)
-            if isinstance(e, Record)
-            and not isinstance(e, ClassTemplate)
-            and not _is_instance(e)
-            and e.is_interface
-        ]
+        return self._records(
+            name, {"class", "struct", "union"}, class_kinds={ClassKind.INTERFACE}
+        )
 
     def abstract_class(self, name: str) -> "list[Record]":
         """Abstract (but not pure-interface) records named ``name`` -- have a
         pure-virtual method yet carry state or a concrete method
         (``ClassKind.ABSTRACT``).  Mutually exclusive with :meth:`klass` and
         :meth:`interface`."""
-        return [
-            e
-            for e in self._lookup(name)
-            if isinstance(e, Record)
-            and not isinstance(e, ClassTemplate)
-            and not _is_instance(e)
-            and e.class_kind is ClassKind.ABSTRACT
-        ]
+        return self._records(
+            name, {"class", "struct", "union"}, class_kinds={ClassKind.ABSTRACT}
+        )
 
     def class_template(self, name: str) -> "list[ClassTemplate]":
         """Primary class templates named ``name`` (e.g. ``Box<T>``)."""
@@ -2030,6 +2058,17 @@ def _base_type_name(spelling: str) -> str:
 # --------------------------------------------------------------------------- #
 # Typed-selector support: class-kind, signature parsing, type/name matching
 # --------------------------------------------------------------------------- #
+
+
+#: ClassKind -> the ``entity_node.kind`` ids (storage.entity_kind seed) that
+#: realize it: a CONCRETE record is a plain class/struct (1) or a union (4);
+#: ABSTRACT is abstract_class (2); INTERFACE is interface (3). Lets the record
+#: selectors push the abstractness filter straight into the entity_node JOIN.
+_CLASSKIND_ENTITY_IDS: "dict[ClassKind, tuple[int, ...]]" = {
+    ClassKind.CONCRETE: (1, 4),
+    ClassKind.ABSTRACT: (2,),
+    ClassKind.INTERFACE: (3,),
+}
 
 
 def _record_class_kind(conn, record_usr: str) -> ClassKind:
