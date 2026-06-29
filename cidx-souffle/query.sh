@@ -29,12 +29,17 @@ ESC="${SYM//\'/\'\'}"   # SQL-escape single quotes
 
 reset_outputs() {  # type-agnostic drop of output + seed objects (may be table OR view)
   local drops
-  drops="$(sqlite3 "$DB_ABS" "SELECT 'DROP '||type||' IF EXISTS \"'||name||'\";' FROM sqlite_master WHERE name IN ('subtype','edep','reach','cg_out','cg_in','seed');")"
+  drops="$(sqlite3 "$DB_ABS" "SELECT 'DROP '||type||' IF EXISTS \"'||name||'\";' FROM sqlite_master WHERE name IN ('subtype','edep','reach','cg_out','cg_in','anc','desc','seed');")"
   [ -n "$drops" ] && sqlite3 "$DB_ABS" "$drops"
   sqlite3 "$DB_ABS" "CREATE TABLE seed(x TEXT);"
 }
 
-run_engine() {  # build views, seed EXACTLY this symbol, run the full engine in place
+run_engine() {  # $1 = targeted .dl — build views, seed EXACTLY this symbol, run in place.
+                # Each question runs its OWN minimal program so Soufflé computes (and reads
+                # the views for) only the relation asked — NOT the unseeded edep/subtype
+                # full-graph closure. That is what keeps `classes`/`callgraph` fast on a
+                # large index (the all-in-one cidx.dl pays edep every time; run.sh uses it).
+  local prog="${1:-cidx.dl}"
   mkdir -p "$BUILD"; ln -sf "$DB_ABS" "$BUILD/index.db"
   sqlite3 "$DB_ABS" ".read $HERE/cidx_views.sql"
   reset_outputs
@@ -46,7 +51,7 @@ run_engine() {  # build views, seed EXACTLY this symbol, run the full engine in 
     sqlite3 "$DB_ABS" "SELECT '  '||name FROM symdisp WHERE name LIKE '%$ESC%' LIMIT 15;" >&2
     exit 3
   fi
-  ( cd "$BUILD" && souffle "$HERE/cidx.dl" ) >/dev/null
+  ( cd "$BUILD" && souffle "$HERE/$prog" ) >/dev/null
 }
 
 emit_dot() {  # $1 = source table (cg_out|cg_in); reads a|b edges, writes Graphviz DOT
@@ -62,12 +67,12 @@ emit_dot() {  # $1 = source table (cg_out|cg_in); reads a|b edges, writes Graphv
 
 case "$CMD" in
   reachable)
-    run_engine
+    run_engine q_reach.dl
     echo "# methods reachable from: $SYM  (transitive calls)" >&2
     sqlite3 "$DB_ABS" "SELECT DISTINCT b FROM reach ORDER BY b;"
     ;;
   callgraph)
-    run_engine
+    run_engine q_callgraph.dl
     case "$DIR" in
       out)  emit_dot cg_out ;;
       in)   emit_dot cg_in ;;
@@ -85,11 +90,11 @@ case "$CMD" in
     esac
     ;;
   classes)
-    run_engine
+    run_engine q_classes.dl
     echo "# ancestors (super-classes) of: $SYM"
-    sqlite3 "$DB_ABS" "SELECT '  -> '||super FROM subtype WHERE sub='$ESC' ORDER BY super;"
+    sqlite3 "$DB_ABS" "SELECT '  -> '||ancestor FROM anc ORDER BY ancestor;"
     echo "# descendants (sub-classes) of: $SYM"
-    sqlite3 "$DB_ABS" "SELECT '  <- '||sub FROM subtype WHERE super='$ESC' ORDER BY sub;"
+    sqlite3 "$DB_ABS" "SELECT '  <- '||descendant FROM desc ORDER BY descendant;"
     ;;
   *) echo "error: unknown command '$CMD' (use reachable|callgraph|classes)" >&2; exit 2 ;;
 esac

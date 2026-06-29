@@ -1,0 +1,4 @@
+// q_reach.dl — seeded forward reachability only. cg/edep/subtype pruned.
+// Used by `query.sh reachable`.
+#include "cidx_base.dl"
+.output reach(IO=sqlite, dbname="index.db")
