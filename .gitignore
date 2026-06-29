@@ -21,7 +21,11 @@ wheels/
 test-repo/
 
 # Generated indexes, caches, and agent/CI scratch
-.claude/
+# (ignore .claude/ scratch but keep committed project skills under .claude/skills/)
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/clang-explore/
 .cache/
 cidx-cpp/.cidx-selfindex/
 cidx-cpp/Testing/
