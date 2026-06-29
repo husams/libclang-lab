@@ -1651,7 +1651,7 @@ class Record(Entity):
         :meth:`CodeBase.interface` selectors filter on.  This is orthogonal to
         the inheritance-aware :attr:`is_abstract` heuristic below (which also
         considers pure methods inherited but not overridden)."""
-        return _record_class_kind(self._cb.graph._c, self.sym.id)
+        return _record_class_kind(self._cb.graph._c, self.sym.usr)
 
     @property
     def is_interface(self) -> bool:
@@ -2032,8 +2032,13 @@ def _base_type_name(spelling: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _record_class_kind(conn, sym_id: int) -> ClassKind:
+def _record_class_kind(conn, record_usr: str) -> ClassKind:
     """Classify a record CONCRETE / ABSTRACT / INTERFACE by its OWN members.
+
+    ``record_usr`` is the record's own USR -- its members are exactly the
+    symbols whose ``parent_usr`` equals it. The caller already holds it
+    (``self.sym.usr``), so it is passed straight in: the query binds it
+    directly (``WHERE parent_usr = ?``), no nested ``SELECT usr ... WHERE id``.
 
     Mirrors ``entity_rollup._is_interface`` / ``entity_graph._class_kind``
     exactly: method kind=21, field kind=6, ``is_pure``; destructors (kind=25)
@@ -2051,9 +2056,8 @@ def _record_class_kind(conn, sym_id: int) -> ClassKind:
     candidate on a multi-million-symbol DB). Selecting on ``parent_usr`` alone
     forces the selective idx_symbol_parent (only this record's members)."""
     rows = conn.execute(
-        "SELECT kind, is_pure FROM symbol "
-        "WHERE parent_usr = (SELECT usr FROM symbol WHERE id = ?)",
-        (sym_id,),
+        "SELECT kind, is_pure FROM symbol WHERE parent_usr = ?",
+        (record_usr,),
     ).fetchall()
     pure = non_pure = fields = 0
     for kind, is_pure in rows:
