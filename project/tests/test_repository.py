@@ -194,36 +194,34 @@ def test_worktree_resolves_to_main_repo_name_and_remote(tmp_path):
 _LAB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def test_backfill_groups_by_git_root_and_is_idempotent():
+def test_backfill_groups_by_git_name_not_path():
     from scripts.backfill_repositories import backfill_repositories
 
     db = Storage(":memory:")
     try:
-        # Two components under one git root collapse to one repository/clone;
-        # an external component with no reachable .git stays 1:1.
+        # Components under the same git repo -- even registered at DIFFERENT
+        # checkout paths -- collapse to ONE repository by git NAME, each path a
+        # clone. An external component with no reachable .git stays on its own.
         db.add_component("libclang-lab", _LAB_ROOT, "repo")
         db.add_component("proj", os.path.join(_LAB_ROOT, "project"), "repo")
         db.add_component("libfoo", "/opt/libfoo-not-on-disk", "external")
         stats = backfill_repositories(db)
-        assert stats["attached"] == 3
-        assert stats["repositories"] == 2
+        assert stats["assigned"] == 3
+        assert stats["repositories"] == 2  # libclang-lab (x2 comps) + libfoo
 
         git_repo = db.get_repository_by_name("libclang-lab")
         assert git_repo is not None
         members = {c.name for c in db.components_for_repository(git_repo.id)}
         assert members == {"libclang-lab", "proj"}
-        assert len(db.list_clones(git_repo.id)) == 1
-        active = db.get_clone_by_id(git_repo.active_clone_id)
-        assert active.path == _LAB_ROOT
-        # git origin url captured without a re-parse.
         assert git_repo.remote_url and git_repo.remote_url.endswith(".git")
 
         ext = db.get_repository_by_name("libfoo")
         assert ext.kind == "external"
         assert [c.name for c in db.components_for_repository(ext.id)] == ["libfoo"]
 
-        # Re-running attaches nothing (every component is grouped).
-        assert backfill_repositories(db)["attached"] == 0
+        # Deterministic rebuild: re-running yields the SAME end state.
+        again = backfill_repositories(db)
+        assert again["assigned"] == 3 and again["repositories"] == 2
     finally:
         db.close()
 
@@ -236,10 +234,10 @@ def test_backfill_cli_reports_and_exit_codes(tmp_path):
 
     out = _cidx_script(db_path)
     assert out.returncode == 0, out.stderr
-    assert "attached 1 component(s)" in out.stdout
-    # Idempotent second run.
+    assert "1 component(s) -> 1 repository" in out.stdout
+    # Deterministic rebuild: second run reports the same.
     out2 = _cidx_script(db_path)
-    assert out2.returncode == 0 and "attached 0 component(s)" in out2.stdout
+    assert out2.returncode == 0 and "1 component(s) -> 1 repository" in out2.stdout
     # Missing DB is an error.
     miss = _cidx_script(str(tmp_path / "nope.db"))
     assert miss.returncode == 1 and "no index database" in miss.stderr

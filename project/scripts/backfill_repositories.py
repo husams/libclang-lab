@@ -8,22 +8,24 @@ without populating the new layer. This script fills that layer in **without a
 re-index / re-import**: it derives repositories purely from the component rows
 already in the database (plus a best-effort read of each component's `.git`).
 
-Grouping rule (mirrors the `import`/`add-source` identity logic):
+Rule -- per component, grouped by git NAME (mirrors the `import` identity logic):
 
-  * Resolve each ungrouped component's effective root to an absolute path.
-  * If a git checkout encloses it (a `.git` dir/file is found by walking up) AND
-    the path exists on disk, the **git root** is the clone root and the
-    repository name/remote come from `.git` (origin-URL basename, else dir name).
-    Components sharing one git root collapse into ONE repository with ONE clone.
-  * Otherwise the component's own root is the clone root and the repository name
-    is the component name (1:1 -- typical for external libraries or for an index
-    whose source tree is no longer present locally).
-  * `add_repository` is idempotent on name, so two checkouts of a same-named repo
-    naturally become one repository with two clones.
+  * For EACH component, take its path and find the enclosing git repo's **name**
+    (worktree-aware: `git_root` follows a `.git` file, and the name/remote come
+    from the shared config via gitdir->commondir). That name IS the repository;
+    `add_repository` is idempotent on name, so every component of the same repo
+    -- even across worktrees or different checkout paths -- lands in ONE
+    repository, and each distinct checkout root is added as a clone of it.
+  * No `.git` reachable (external libraries, or an index whose source tree is not
+    present locally): the repository name is the component's own name.
+  * Grouping is by NAME only -- never by path -- so the same repo never splits
+    into many repositories.
 
-The first clone registered for a repository becomes its active clone. The script
-is **idempotent**: components already attached to a repository are skipped, and
-re-running it attaches only what is still ungrouped.
+The repository/clone tables are a pure function of the components, so the script
+**rebuilds them from scratch** every run (clears the existing grouping first):
+deterministic and safe to re-run, and it FIXES a previously mis-grouped index.
+(Clones added manually via `cidx repo add-clone` are regenerated from component
+roots -- re-add extra worktrees afterward.)
 
 Usage:
     python3 -m scripts.backfill_repositories [INDEX_DB]
@@ -50,45 +52,53 @@ from indexer.utils import git_remote_url, git_root, repo_name
 def _clone_root_and_identity(comp) -> tuple[str, str, str | None]:
     """(clone_root, repository_name, remote_url) for one component.
 
-    Prefers the enclosing git checkout (so sub-components of one repo group
-    together); falls back to the component's own root when there is no reachable
-    `.git` -- e.g. external libraries or a relocated/portable index."""
+    Uses the enclosing git checkout (worktree-aware: `git_root` follows a `.git`
+    file, `repo_name`/`git_remote_url` follow gitdir->commondir->shared config);
+    falls back to the component's own root/name when there is no reachable `.git`
+    -- e.g. external libraries or a relocated/portable index."""
     eff = os.path.abspath(pathx.resolve_fs_path(Storage.effective_root(comp)))
-    groot = git_root(eff) if os.path.exists(eff) else None
+    groot = git_root(eff)
     if groot:
         return os.path.abspath(groot), repo_name(groot), git_remote_url(groot)
     return eff, comp.name, None
 
 
 def backfill_repositories(db: Storage) -> dict:
-    """Populate repositories/clones from the existing components. Idempotent.
+    """(Re)build the repository/clone layer from the components, deterministically.
 
-    Returns a stats dict: attached components, and the resulting repository and
-    clone counts."""
-    # Map an absolute clone root -> repository id, seeded with any clones that
-    # already exist so a re-run reuses them instead of duplicating.
-    root_to_repo: dict[str, int] = {}
-    for cl in db.list_clones():
-        root_to_repo.setdefault(os.path.abspath(cl.path), cl.repository_id)
+    The repository/clone tables are a pure function of the components, so this
+    REBUILDS them from scratch: it clears any existing grouping first, then for
+    EACH component derives the **git repository name** from its path (worktree-
+    aware) and assigns the component to the repository of that name. Grouping is
+    by NAME only -- `add_repository` is idempotent on name -- so components in
+    the same repo (even across worktrees / different checkout paths) land in one
+    repository, with each distinct checkout root added as a clone of it. No
+    path-based bucketing, so the same repo never splits into many.
 
-    attached = 0
+    (Rebuild semantics mean any clones added manually via `cidx repo add-clone`
+    are regenerated from the component roots; re-add extra worktrees afterward.)
+
+    Returns a stats dict: components assigned, resulting repository/clone counts."""
+    # Pure rebuild: wipe the derived layer, then re-derive from the components.
+    db._conn.execute("UPDATE component SET repository_id = NULL")
+    db._conn.execute("DELETE FROM clone")
+    db._conn.execute("DELETE FROM repository")
+    db._commit()
+
+    assigned = 0
     for comp in db.list_components():
-        if comp.repository_id is not None:
-            continue  # already grouped
         clone_root, name, remote = _clone_root_and_identity(comp)
-        rid = root_to_repo.get(clone_root)
-        if rid is None:
-            rid = db.add_repository(name, comp.kind, remote)
-            clone_id = db.add_clone(rid, clone_root)
-            repo = db.get_repository_by_id(rid)
-            if repo is not None and repo.active_clone_id is None:
-                db.set_active_clone(rid, clone_id)
-            root_to_repo[clone_root] = rid
+        # Group by NAME: idempotent on name, so same-named repos reuse one row.
+        rid = db.add_repository(name, comp.kind, remote)
+        clone_id = db.add_clone(rid, clone_root)
+        repo = db.get_repository_by_id(rid)
+        if repo is not None and repo.active_clone_id is None:
+            db.set_active_clone(rid, clone_id)
         db.set_component_repository(comp.id, rid)
-        attached += 1
+        assigned += 1
 
     return {
-        "attached": attached,
+        "assigned": assigned,
         "repositories": len(db.list_repositories()),
         "clones": len(db.list_clones()),
     }
@@ -104,13 +114,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no index database at {path}", file=sys.stderr)
         return 1
     # Opening through Storage applies the v23 schema migration first (adds the
-    # repository/clone tables + component.repository_id), then we populate them.
+    # repository/clone tables + component.repository_id), then we rebuild them.
     with Storage(path) as db:
-        before = sum(1 for c in db.list_components() if c.repository_id is None)
         stats = backfill_repositories(db)
     print(
-        f"backfilled {path}: attached {stats['attached']} component(s) "
-        f"({before} were ungrouped) -> {stats['repositories']} repositor"
+        f"backfilled {path}: {stats['assigned']} component(s) -> "
+        f"{stats['repositories']} repositor"
         f"{'y' if stats['repositories'] == 1 else 'ies'}, "
         f"{stats['clones']} clone(s)"
     )
