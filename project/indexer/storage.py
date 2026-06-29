@@ -2,6 +2,9 @@
 
 Schema (all stdlib sqlite3, no dependencies):
 
+    repository  a logical code base (git repo / external lib) grouping >=1
+                components; may have several `clone` checkout dirs, one active
+    clone       one checkout/worktree directory of a repository (switchable)
     component   one indexed code base (a git repo) or an external library
     directory   a directory, path relative to its component root
     file        a source/header file inside a directory; tracks indexing state
@@ -32,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -73,13 +76,37 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+-- v23: a repository groups one or more components under one logical code base.
+-- A repo can be checked out in several directories (git worktrees / separate
+-- clones); each is a `clone` row and `active_clone_id` names the live one. The
+-- repository's components store absolute paths under the active clone's root;
+-- `repo switch` rebases those paths to another clone. `remote_url` (git origin)
+-- lets two checkouts of the same repo map to one repository.
+CREATE TABLE IF NOT EXISTS repository (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT NOT NULL UNIQUE,
+    kind            TEXT NOT NULL DEFAULT 'repo'
+                    CHECK (kind IN ('repo', 'external')),
+    remote_url      TEXT,                 -- git origin URL when known
+    active_clone_id INTEGER               -- -> clone.id (no FK: circular w/ clone)
+);
+
+CREATE TABLE IF NOT EXISTS clone (
+    id            INTEGER PRIMARY KEY,
+    repository_id INTEGER NOT NULL REFERENCES repository(id) ON DELETE CASCADE,
+    path          TEXT NOT NULL UNIQUE,   -- absolute checkout/worktree root
+    label         TEXT                    -- optional human label (branch/worktree)
+);
+
 CREATE TABLE IF NOT EXISTS component (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
     path    TEXT NOT NULL UNIQUE,         -- base path (no version segment)
     kind    TEXT NOT NULL DEFAULT 'repo'
             CHECK (kind IN ('repo', 'external')),
-    version TEXT                          -- v14: nullable; NULL = unversioned
+    version TEXT,                         -- v14: nullable; NULL = unversioned
+    repository_id INTEGER                 -- v23: -> repository.id; NULL = ungrouped
+            REFERENCES repository(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS directory (
@@ -362,6 +389,28 @@ class Component:
     kind: str = "repo"
     id: Optional[int] = None
     version: Optional[str] = None  # v14: nullable; NULL = unversioned
+    repository_id: Optional[int] = None  # v23: owning repository; NULL = ungrouped
+
+
+@dataclass
+class Repository:
+    """v23: a logical code base grouping >=1 components, with switchable clones."""
+
+    name: str
+    kind: str = "repo"
+    remote_url: Optional[str] = None
+    active_clone_id: Optional[int] = None
+    id: Optional[int] = None
+
+
+@dataclass
+class Clone:
+    """v23: one checkout/worktree directory of a repository."""
+
+    repository_id: int
+    path: str
+    label: Optional[str] = None
+    id: Optional[int] = None
 
 
 @dataclass
@@ -634,6 +683,19 @@ class Storage:
         if "component" in tables and "version" not in compcols:
             self._conn.execute("ALTER TABLE component ADD COLUMN version TEXT")
             # No backfill -- existing components get version = NULL.
+            changed = True
+        # v22 -> v23: repository + clone tables and component.repository_id.
+        # The two tables are created by the schema script (CREATE TABLE IF NOT
+        # EXISTS, run after _migrate); only the new component column needs an
+        # ALTER here. No backfill -- existing components stay ungrouped
+        # (repository_id NULL) until a re-import or a `cidx repo` command
+        # attaches them.
+        if "component" in tables and "repository_id" not in compcols:
+            self._conn.execute(
+                "ALTER TABLE component ADD COLUMN repository_id INTEGER"
+            )
+            changed = True
+        if "repository" not in tables:
             changed = True
         if "label" not in tables:
             # The schema script (run AFTER migrate) creates the table via
@@ -1134,6 +1196,196 @@ class Storage:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY name, path"
         return [_row_to(Component, r) for r in self._conn.execute(sql, args)]
+
+    def set_component_repository(
+        self, component_id: int, repository_id: Optional[int]
+    ) -> None:
+        """Attach (or, with None, detach) a component to a repository."""
+        self._conn.execute(
+            "UPDATE component SET repository_id = ? WHERE id = ?",
+            (repository_id, component_id),
+        )
+        self._commit()
+
+    def components_for_repository(self, repository_id: int) -> list[Component]:
+        """All components grouped under a repository, ordered by name, path."""
+        return [
+            _row_to(Component, r)
+            for r in self._conn.execute(
+                "SELECT * FROM component WHERE repository_id = ? "
+                "ORDER BY name, path",
+                (repository_id,),
+            )
+        ]
+
+    # -- repositories / clones (v23) -----------------------------------------
+
+    def add_repository(
+        self, name: str, kind: str = "repo", remote_url: Optional[str] = None
+    ) -> int:
+        """Insert a repository; idempotent on name. Returns the repository id.
+
+        On conflict (same name) updates kind, and updates remote_url only when a
+        non-None value is supplied (COALESCE: a re-import that cannot determine a
+        remote does NOT wipe a stored one)."""
+        cur = self._conn.execute(
+            "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET "
+            "  kind       = excluded.kind, "
+            "  remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+            "RETURNING id",
+            (name, kind, remote_url),
+        )
+        rid = cur.fetchone()["id"]
+        self._commit()
+        return rid
+
+    def get_repository_by_name(self, name: str) -> Optional["Repository"]:
+        row = self._conn.execute(
+            "SELECT * FROM repository WHERE name = ?", (name,)
+        ).fetchone()
+        return _row_to(Repository, row)
+
+    def get_repository_by_id(self, repository_id: int) -> Optional["Repository"]:
+        row = self._conn.execute(
+            "SELECT * FROM repository WHERE id = ?", (repository_id,)
+        ).fetchone()
+        return _row_to(Repository, row)
+
+    def get_repository_by_remote(self, remote_url: str) -> Optional["Repository"]:
+        """First repository whose remote_url matches (clone-identity lookup)."""
+        row = self._conn.execute(
+            "SELECT * FROM repository WHERE remote_url = ? ORDER BY id LIMIT 1",
+            (remote_url,),
+        ).fetchone()
+        return _row_to(Repository, row)
+
+    def list_repositories(
+        self, name: Optional[str] = None, kind: Optional[str] = None
+    ) -> list["Repository"]:
+        """All repositories, optionally fuzzy-filtered by name and/or kind."""
+        sql = "SELECT * FROM repository"
+        where, args = [], []
+        if name:
+            where.append(r"name LIKE ? ESCAPE '\'")
+            args.append(self._fuzzy_like(name))
+        if kind is not None:
+            where.append("kind = ?")
+            args.append(kind)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY name"
+        return [_row_to(Repository, r) for r in self._conn.execute(sql, args)]
+
+    def set_active_clone(
+        self, repository_id: int, clone_id: Optional[int]
+    ) -> None:
+        """Point a repository at its live clone (or None to clear)."""
+        self._conn.execute(
+            "UPDATE repository SET active_clone_id = ? WHERE id = ?",
+            (clone_id, repository_id),
+        )
+        self._commit()
+
+    def delete_repository(self, repository_id: int) -> None:
+        """Remove a repository. Clones cascade (ON DELETE CASCADE); components
+        are detached (repository_id ON DELETE SET NULL) but otherwise untouched
+        -- their symbols survive. Use delete_component to discard those."""
+        self._conn.execute(
+            "DELETE FROM repository WHERE id = ?", (repository_id,)
+        )
+        self._commit()
+
+    def add_clone(
+        self, repository_id: int, path: str, label: Optional[str] = None
+    ) -> int:
+        """Register a checkout/worktree directory for a repository; idempotent
+        on path. Plain (non-portable) paths are absolutized. Returns clone id."""
+        if "$" not in path and "<" not in path:
+            path = os.path.abspath(path)
+        cur = self._conn.execute(
+            "INSERT INTO clone (repository_id, path, label) VALUES (?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET "
+            "  repository_id = excluded.repository_id, "
+            "  label         = COALESCE(excluded.label, clone.label) "
+            "RETURNING id",
+            (repository_id, path, label),
+        )
+        cid = cur.fetchone()["id"]
+        self._commit()
+        return cid
+
+    def get_clone_by_id(self, clone_id: int) -> Optional["Clone"]:
+        row = self._conn.execute(
+            "SELECT * FROM clone WHERE id = ?", (clone_id,)
+        ).fetchone()
+        return _row_to(Clone, row)
+
+    def get_clone_by_path(self, path: str) -> Optional["Clone"]:
+        if "$" not in path and "<" not in path:
+            path = os.path.abspath(path)
+        row = self._conn.execute(
+            "SELECT * FROM clone WHERE path = ?", (path,)
+        ).fetchone()
+        return _row_to(Clone, row)
+
+    def list_clones(
+        self, repository_id: Optional[int] = None
+    ) -> list["Clone"]:
+        """Clones, optionally scoped to one repository, ordered by id."""
+        if repository_id is None:
+            rows = self._conn.execute("SELECT * FROM clone ORDER BY id")
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM clone WHERE repository_id = ? ORDER BY id",
+                (repository_id,),
+            )
+        return [_row_to(Clone, r) for r in rows]
+
+    def delete_clone(self, clone_id: int) -> None:
+        """Remove a clone. If it was the repository's active clone, the active
+        pointer is cleared first (it is a plain int, no FK to drive it)."""
+        self._conn.execute(
+            "UPDATE repository SET active_clone_id = NULL "
+            "WHERE active_clone_id = ?",
+            (clone_id,),
+        )
+        self._conn.execute("DELETE FROM clone WHERE id = ?", (clone_id,))
+        self._commit()
+
+    def rebase_components(
+        self, repository_id: int, old_root: str, new_root: str
+    ) -> int:
+        """Rewrite the absolute-path prefix of a repository's components from
+        old_root to new_root (the `repo switch` rebase). Components whose stored
+        path is portable (`<label>`/`$VAR`) or does not sit under old_root are
+        left untouched. Returns the number of components rewritten.
+
+        Paths are stored relative-to-nothing (absolute), so swapping the clone
+        root is a pure prefix substitution; directories/files are relative to
+        their component and need no change."""
+        old_root = os.path.abspath(old_root).rstrip(os.sep)
+        new_root = os.path.abspath(new_root).rstrip(os.sep)
+        if old_root == new_root:
+            return 0
+        n = 0
+        for comp in self.components_for_repository(repository_id):
+            p = comp.path
+            if "<" in p or "$" in p:
+                continue  # portable path: clone-root agnostic already
+            if p == old_root:
+                new_path = new_root
+            elif p.startswith(old_root + os.sep):
+                new_path = new_root + p[len(old_root):]
+            else:
+                continue
+            self._conn.execute(
+                "UPDATE component SET path = ? WHERE id = ?",
+                (new_path, comp.id),
+            )
+            n += 1
+        self._commit()
+        return n
 
     # -- directories ---------------------------------------------------------
 

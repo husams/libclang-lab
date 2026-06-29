@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.40.1";
+inline constexpr const char *kVersion = "0.41.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -104,6 +104,14 @@ struct ParsedArgs {
 
   // -- aliasing (v0.6.0) fields ----------------------------------------------
   bool no_alias = false; // import --no-alias (skip alias_options encoding)
+
+  // -- repository / clone (v23) fields ---------------------------------------
+  // repo subcommand (list|show|add-clone|switch|rm) is carried in `what`; the
+  // repository NAME in `name`; add-clone PATH in `path`; switch TARGET in
+  // `target`; list name filter in `pattern`; list kind filter in `kind`.
+  std::optional<std::string> repo;       // import/add-source --repo (group name)
+  std::optional<std::string> repo_label; // repo add-clone --label
+  bool delete_components = false;         // repo rm --delete-components
 
   // -- pch sub-command fields (cidx pch build|status|clear, v0.17.0) ----------
   // build|status|clear is carried in `what`; --db in index_db; --force in force.

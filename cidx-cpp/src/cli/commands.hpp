@@ -66,6 +66,13 @@ int cmd_label_rm(const ParsedArgs &args, Context &ctx);
 int cmd_label_list(const ParsedArgs &args, Context &ctx);
 int cmd_label_resolve(const ParsedArgs &args, Context &ctx);
 
+// repository / clone commands (v23): repo list/show/add-clone/switch/rm
+int cmd_repo_list(const ParsedArgs &args, Context &ctx);
+int cmd_repo_show(const ParsedArgs &args, Context &ctx);
+int cmd_repo_add_clone(const ParsedArgs &args, Context &ctx);
+int cmd_repo_switch(const ParsedArgs &args, Context &ctx);
+int cmd_repo_rm(const ParsedArgs &args, Context &ctx);
+
 // verify: check that component roots (incl. version) and files exist on disk.
 int cmd_verify(const ParsedArgs &args, Context &ctx);
 

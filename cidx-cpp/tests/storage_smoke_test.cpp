@@ -401,14 +401,16 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
       tables.insert(st.col_text(0));
     }
   }
-  // v14 adds label; v15 adds diagnostic; v17 adds entity_edge + entity_edge_kind
+  // v14 adds label; v15 adds diagnostic; v17 adds entity_edge + entity_edge_kind;
+  // v23 adds repository + clone
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "symbol_kind",
                                         "edge_kind", "edge", "edge_site",
                                         "template_param", "template_arg",
                                         "call_arg", "label", "diagnostic",
                                         "entity_edge_kind", "entity_edge",
-                                        "entity_kind", "entity_node"});
+                                        "entity_kind", "entity_node",
+                                        "repository", "clone"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -420,9 +422,10 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
     return out;
   };
   CHECK(cols("meta") == std::vector<std::string>{"key", "value"});
-  // v14 adds the version column to component
+  // v14 adds the version column to component; v23 adds repository_id
   CHECK(cols("component") ==
-        std::vector<std::string>{"id", "name", "path", "kind", "version"});
+        std::vector<std::string>{"id", "name", "path", "kind", "version",
+                                 "repository_id"});
   CHECK(cols("directory") ==
         std::vector<std::string>{"id", "component_id", "path"});
   CHECK(cols("file") == std::vector<std::string>{"id", "directory_id", "name",

@@ -87,12 +87,12 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_22():
-    """SCHEMA_VERSION must be 22 after the v20→v21 NULL-safe identity index."""
+def test_schema_version_is_23():
+    """SCHEMA_VERSION must be 23 after the v22→v23 repository/clone tables."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 22, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 22. "
-        "storage.py:35 SCHEMA_VERSION must be bumped to 21 (entity_edge identity index)."
+    assert storage.SCHEMA_VERSION == 23, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 23. "
+        "storage.py SCHEMA_VERSION must be bumped to 23 (repository + clone tables)."
     )
 
 
@@ -295,39 +295,39 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0390():
-    """Python VERSION must be 0.40.1 (index-backed _record_class_kind fast-path)."""
+def test_python_version_is_0410():
+    """Python VERSION must be 0.41.0 (v23 repository/clone tables)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.40.1", (
-        f"Python VERSION is '{version}'; expected '0.40.1'. "
-        "Bump VERSION to 0.40.1 in cli.py (index-backed _record_class_kind fast-path)."
+    assert version == "0.41.0", (
+        f"Python VERSION is '{version}'; expected '0.41.0'. "
+        "Bump VERSION to 0.41.0 in cli.py (repository + clone tables)."
     )
 
 
-def test_cpp_version_is_0390():
-    """C++ kVersion must be 0.40.1 (index-backed _record_class_kind fast-path)."""
+def test_cpp_version_is_0410():
+    """C++ kVersion must be 0.41.0 (v23 repository/clone tables)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.40.1", (
-        f"C++ kVersion is '{version}'; expected '0.40.1'. "
-        "Bump kVersion to 0.40.1 in args.hpp (index-backed _record_class_kind fast-path)."
+    assert version == "0.41.0", (
+        f"C++ kVersion is '{version}'; expected '0.41.0'. "
+        "Bump kVersion to 0.41.0 in args.hpp (repository + clone tables)."
     )
 
 
-def test_cpp_schema_version_is_22():
-    """C++ kSchemaVersion must be 22 after the v20->v21 NULL-safe identity index."""
+def test_cpp_schema_version_is_23():
+    """C++ kSchemaVersion must be 23 after the v22->v23 repository/clone tables."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 22, (
-        f"C++ kSchemaVersion is {version}; expected 22. "
-        "Bump kSchemaVersion 20 -> 21 in storage.hpp (entity_edge identity index)."
+    assert version == 23, (
+        f"C++ kSchemaVersion is {version}; expected 23. "
+        "Bump kSchemaVersion 22 -> 23 in storage.hpp (repository + clone tables)."
     )
 
 

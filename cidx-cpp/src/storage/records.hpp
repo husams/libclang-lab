@@ -17,6 +17,24 @@ struct Component {
   std::string path; // base path (no version segment)
   std::string kind; // 'repo' | 'external'
   std::optional<std::string> version; // v14: nullable; NULL = unversioned
+  std::optional<int64_t> repository_id; // v23: owning repository; NULL = ungrouped
+};
+
+// v23: a logical code base grouping >=1 components, with switchable clones.
+struct Repository {
+  int64_t id = -1;
+  std::string name;
+  std::string kind; // 'repo' | 'external'
+  std::optional<std::string> remote_url;     // git origin URL when known
+  std::optional<int64_t> active_clone_id;    // -> clone.id; NULL if none yet
+};
+
+// v23: one checkout/worktree directory of a repository.
+struct Clone {
+  int64_t id = -1;
+  int64_t repository_id = -1;
+  std::string path; // absolute checkout/worktree root
+  std::optional<std::string> label;
 };
 
 // v14: label registry row
