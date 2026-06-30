@@ -30,7 +30,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass, field, fields, replace
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any, Optional
 
 from indexer import pathx as _pathx
@@ -392,6 +392,17 @@ INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSI
 
 @dataclass
 class Component:
+    """A row in the ``component`` table -- and, once a ``Storage`` accessor hands
+    it back, a *smart path* over that row.
+
+    Like the storage-layer :class:`File`, a Component returned by
+    :meth:`Storage.get_component` / :meth:`Storage.get_component_by_id` /
+    :meth:`Storage.get_component_by_name` / :meth:`Storage.list_components` /
+    :meth:`Storage.components_for_repository` / :meth:`Storage.component_for_path`
+    is *bound* to its Storage (``_storage``), which lets it reconstruct its
+    :attr:`abspath`, reach its owning :attr:`repo`, and stream the
+    :meth:`directories` and :meth:`files` beneath it -- all as lazy generators."""
+
     name: str
     path: str
     kind: str = "repo"
@@ -399,16 +410,107 @@ class Component:
     version: Optional[str] = None  # v14: nullable; NULL = unversioned
     repository_id: Optional[int] = None  # v23: owning repository; NULL = ungrouped
 
+    _storage: "Optional[Storage]" = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def _bound(self) -> "Storage":
+        if self._storage is None:
+            raise RuntimeError(
+                "Component is not bound to a Storage; obtain it from "
+                "Storage.get_component()/get_component_by_id()/list_components()"
+            )
+        return self._storage
+
+    @property
+    def abspath(self) -> str:
+        """Absolute base directory of this component's tree (effective root,
+        clone-resolved). The directory the ``path``/``version`` columns name."""
+        return self._bound().component_abs_base(self)
+
+    @property
+    def repo(self) -> "Optional[Repository]":
+        """The owning :class:`Repository` (v23 grouping), or ``None`` when this
+        component is ungrouped (``repository_id`` is NULL)."""
+        if self.repository_id is None:
+            return None
+        return self._bound().get_repository_by_id(self.repository_id)
+
+    def directories(self, name: Optional[str] = None) -> "Iterator[Directory]":
+        """Lazily yield every :class:`Directory` under this component, each bound
+        to the same Storage, ordered by relative path. ``name`` fuzzy-filters on
+        the relative directory path (e.g. ``"src"``)."""
+        store = self._bound()
+        if self.id is None:
+            return
+        for d, _comp_name in store.list_directories(
+            component_id=self.id, name=name
+        ):
+            d._storage = store
+            yield d
+
+    def files(self, name: Optional[str] = None) -> "Iterator[File]":
+        """Lazily yield every :class:`File` in this component (across all its
+        directories), each bound to the same Storage, ordered by path. ``name``
+        fuzzy-filters on the file name -- e.g. ``comp.files("sample.hpp")``
+        yields every file whose name matches ``sample.hpp``."""
+        store = self._bound()
+        if self.id is None:
+            return
+        for f, _abspath in store.list_files(component_id=self.id, name=name):
+            yield f
+
 
 @dataclass
 class Repository:
-    """v23: a logical code base grouping >=1 components, with switchable clones."""
+    """v23: a logical code base grouping >=1 components, with switchable clones.
+
+    Once a ``Storage`` accessor hands it back (``get_repository_by_*`` /
+    ``list_repositories``) it is bound to that Storage and acts as a *smart
+    path*: :attr:`path` is its active clone root, and :meth:`components` /
+    :meth:`files` stream what lives under it as lazy generators."""
 
     name: str
     kind: str = "repo"
     remote_url: Optional[str] = None
     active_clone_id: Optional[int] = None
     id: Optional[int] = None
+
+    _storage: "Optional[Storage]" = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def _bound(self) -> "Storage":
+        if self._storage is None:
+            raise RuntimeError(
+                "Repository is not bound to a Storage; obtain it from "
+                "Storage.get_repository_by_id()/get_repository_by_name()/"
+                "list_repositories()"
+            )
+        return self._storage
+
+    @property
+    def path(self) -> Optional[str]:
+        """Absolute path of the repository's active clone root, or ``None`` when
+        no clone is live (``active_clone_id`` is NULL)."""
+        return self._bound()._active_clone_root(self.id)
+
+    def components(self, name: Optional[str] = None) -> "Iterator[Component]":
+        """Lazily yield every :class:`Component` grouped under this repository,
+        each bound to the same Storage, ordered by name, path. ``name``
+        fuzzy-filters on the component name."""
+        store = self._bound()
+        if self.id is None:
+            return
+        for comp in store.components_for_repository(self.id, name=name):
+            yield comp
+
+    def files(self, name: Optional[str] = None) -> "Iterator[File]":
+        """Lazily yield every :class:`File` across all of this repository's
+        components, each bound to the same Storage. ``name`` fuzzy-filters on the
+        file name -- e.g. ``repo.files("sample.hpp")``."""
+        for comp in self.components():
+            yield from comp.files(name=name)
 
 
 @dataclass
@@ -423,9 +525,55 @@ class Clone:
 
 @dataclass
 class Directory:
+    """A row in the ``directory`` table -- and, once a ``Storage`` accessor hands
+    it back, a *smart path* over that row.
+
+    Bound by :meth:`Storage.get_directory` / :meth:`Storage.get_directory_by_id`
+    / :meth:`Storage.list_directories`; :attr:`abspath` reconstructs its absolute
+    path and :meth:`files` streams the files it directly holds."""
+
     component_id: int
     path: str
     id: Optional[int] = None
+
+    _storage: "Optional[Storage]" = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def _bound(self) -> "Storage":
+        if self._storage is None:
+            raise RuntimeError(
+                "Directory is not bound to a Storage; obtain it from "
+                "Storage.get_directory()/get_directory_by_id()/list_directories()"
+            )
+        return self._storage
+
+    @property
+    def name(self) -> str:
+        """The directory's own name (the last path segment); ``""`` for the
+        component root (whose relative ``path`` is empty)."""
+        return os.path.basename(self.path) if self.path else ""
+
+    @property
+    def abspath(self) -> str:
+        """Reconstructed absolute path of this directory (effective root +
+        relative path, clone-resolved)."""
+        store = self._bound()
+        p = store.directory_abs_path(self.id) if self.id is not None else None
+        if p is None:
+            raise RuntimeError(
+                f"cannot reconstruct abspath for directory {self.path!r}"
+            )
+        return p
+
+    def files(self, name: Optional[str] = None) -> "Iterator[File]":
+        """Lazily yield the :class:`File` rows held *directly* in this directory
+        (not its subtree), each bound to the same Storage, ordered by name.
+        ``name`` fuzzy-filters on the file name -- e.g. ``d.files("sample.hpp")``."""
+        store = self._bound()
+        if self.id is None:
+            return
+        yield from store.files_in_directory(self.id, name=name)
 
 
 @dataclass
@@ -1511,7 +1659,7 @@ class Storage:
         row = self._conn.execute(
             "SELECT * FROM component WHERE name = ?", (name,)
         ).fetchone()
-        return _row_to(Component, row)
+        return self._bind_component(_row_to(Component, row))
 
     def get_component(self, path: str) -> Optional[Component]:
         """Look up a component by root path.
@@ -1525,21 +1673,21 @@ class Storage:
             "SELECT * FROM component WHERE path = ?", (abs_path,)
         ).fetchone()
         if row is not None:
-            return _row_to(Component, row)
+            return self._bind_component(_row_to(Component, row))
         # Fallback: match effective root (handles the version-split case where the
         # user registered /src/v8 but the stored base is /src with version=v8).
         for row in self._conn.execute("SELECT * FROM component"):
             comp = _row_to(Component, row)
             eff = self.component_abs_base(comp)
             if eff == abs_path:
-                return comp
+                return self._bind_component(comp)
         return None
 
     def get_component_by_id(self, component_id: int) -> Optional[Component]:
         row = self._conn.execute(
             "SELECT * FROM component WHERE id = ?", (component_id,)
         ).fetchone()
-        return _row_to(Component, row)
+        return self._bind_component(_row_to(Component, row))
 
     def component_for_path(self, abs_path: str) -> Optional[Component]:
         """Longest-prefix match: which component owns this absolute path?
@@ -1558,7 +1706,7 @@ class Storage:
                 if len(root) > best_root_len:
                     best = comp
                     best_root_len = len(root)
-        return best
+        return self._bind_component(best)
 
     def delete_component(self, component_id: int) -> None:
         """Remove a component and everything derived from it.
@@ -1636,7 +1784,23 @@ class Storage:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY name, path"
-        return [_row_to(Component, r) for r in self._conn.execute(sql, args)]
+        return [self._bound_component(r) for r in self._conn.execute(sql, args)]
+
+    def _bound_component(self, row: sqlite3.Row) -> Component:
+        """Hydrate a non-NULL component row and bind it (list-accessor helper)."""
+        c = _row_to(Component, row)
+        c._storage = self
+        return c
+
+    def _bound_repository(self, row: sqlite3.Row) -> "Repository":
+        r = _row_to(Repository, row)
+        r._storage = self
+        return r
+
+    def _bound_directory(self, row: sqlite3.Row) -> Directory:
+        d = _row_to(Directory, row)
+        d._storage = self
+        return d
 
     def set_component_repository(
         self, component_id: int, repository_id: Optional[int]
@@ -1648,16 +1812,18 @@ class Storage:
         )
         self._commit()
 
-    def components_for_repository(self, repository_id: int) -> list[Component]:
-        """All components grouped under a repository, ordered by name, path."""
-        return [
-            _row_to(Component, r)
-            for r in self._conn.execute(
-                "SELECT * FROM component WHERE repository_id = ? "
-                "ORDER BY name, path",
-                (repository_id,),
-            )
-        ]
+    def components_for_repository(
+        self, repository_id: int, name: Optional[str] = None
+    ) -> list[Component]:
+        """All components grouped under a repository, ordered by name, path,
+        optionally fuzzy-filtered by component name. Bound to this Storage."""
+        sql = "SELECT * FROM component WHERE repository_id = ?"
+        args: list = [repository_id]
+        if name:
+            sql += r" AND name LIKE ? ESCAPE '\'"
+            args.append(self._fuzzy_like(name))
+        sql += " ORDER BY name, path"
+        return [self._bound_component(r) for r in self._conn.execute(sql, args)]
 
     # -- repositories / clones (v23) -----------------------------------------
 
@@ -1685,13 +1851,13 @@ class Storage:
         row = self._conn.execute(
             "SELECT * FROM repository WHERE name = ?", (name,)
         ).fetchone()
-        return _row_to(Repository, row)
+        return self._bind_repository(_row_to(Repository, row))
 
     def get_repository_by_id(self, repository_id: int) -> Optional["Repository"]:
         row = self._conn.execute(
             "SELECT * FROM repository WHERE id = ?", (repository_id,)
         ).fetchone()
-        return _row_to(Repository, row)
+        return self._bind_repository(_row_to(Repository, row))
 
     def get_repository_by_remote(self, remote_url: str) -> Optional["Repository"]:
         """First repository whose remote_url matches (clone-identity lookup)."""
@@ -1699,7 +1865,7 @@ class Storage:
             "SELECT * FROM repository WHERE remote_url = ? ORDER BY id LIMIT 1",
             (remote_url,),
         ).fetchone()
-        return _row_to(Repository, row)
+        return self._bind_repository(_row_to(Repository, row))
 
     def list_repositories(
         self, name: Optional[str] = None, kind: Optional[str] = None
@@ -1716,7 +1882,7 @@ class Storage:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY name"
-        return [_row_to(Repository, r) for r in self._conn.execute(sql, args)]
+        return [self._bound_repository(r) for r in self._conn.execute(sql, args)]
 
     def set_active_clone(
         self, repository_id: int, clone_id: Optional[int]
@@ -1816,7 +1982,7 @@ class Storage:
             "SELECT * FROM directory WHERE component_id = ? AND path = ?",
             (component_id, os.path.normpath(path) if path not in ("", ".") else ""),
         ).fetchone()
-        return _row_to(Directory, row)
+        return self._bind_directory(_row_to(Directory, row))
 
     def list_directories(
         self, component_id: Optional[int] = None, name: Optional[str] = None
@@ -1838,7 +2004,7 @@ class Storage:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY c.name, d.path"
         return [
-            (_row_to(Directory, r), r["comp_name"])
+            (self._bound_directory(r), r["comp_name"])
             for r in self._conn.execute(sql, args)
         ]
 
@@ -1846,7 +2012,7 @@ class Storage:
         row = self._conn.execute(
             "SELECT * FROM directory WHERE id = ?", (directory_id,)
         ).fetchone()
-        return _row_to(Directory, row)
+        return self._bind_directory(_row_to(Directory, row))
 
     @staticmethod
     def _dir_scope_sql(dir_path: str, args: list) -> str:
@@ -1922,6 +2088,62 @@ class Storage:
             compile_options=compile_options,
             driver=driver,
         )
+
+    def _bind_component(self, c: Optional[Component]) -> Optional[Component]:
+        """Bind a freshly-read Component to this Storage so its smart-path
+        methods (abspath/repo/directories/files) work."""
+        if c is not None:
+            c._storage = self
+        return c
+
+    def _bind_repository(
+        self, r: "Optional[Repository]"
+    ) -> "Optional[Repository]":
+        """Bind a freshly-read Repository to this Storage so its smart-path
+        methods (path/components/files) work."""
+        if r is not None:
+            r._storage = self
+        return r
+
+    def _bind_directory(self, d: Optional[Directory]) -> Optional[Directory]:
+        """Bind a freshly-read Directory to this Storage so its smart-path
+        methods (name/abspath/files) work."""
+        if d is not None:
+            d._storage = self
+        return d
+
+    def files_in_directory(
+        self, directory_id: int, name: Optional[str] = None
+    ) -> list[File]:
+        """Bound File rows held DIRECTLY in one directory (not its subtree),
+        ordered by name and optionally fuzzy-filtered by file name. The
+        Directory.files() smart-path backs onto this."""
+        sql = (
+            "SELECT f.*, c.path AS root, c.version AS comp_version, "
+            "c.repository_id AS comp_repo_id, d.path AS rel "
+            "FROM file f JOIN directory d ON d.id = f.directory_id "
+            "JOIN component c ON c.id = d.component_id "
+            "WHERE f.directory_id = ?"
+        )
+        args: list = [directory_id]
+        if name:
+            sql += r" AND f.name LIKE ? ESCAPE '\'"
+            args.append(self._fuzzy_like(name))
+        sql += " ORDER BY f.name"
+        out = []
+        for row in self._conn.execute(sql, args):
+            comp_stub = Component(
+                name="", path=row["root"], version=row["comp_version"],
+                repository_id=row["comp_repo_id"],
+            )
+            eff = self.component_abs_base(comp_stub)
+            abs_path = (
+                os.path.join(eff, row["rel"], row["name"])
+                if row["rel"]
+                else os.path.join(eff, row["name"])
+            )
+            out.append(self._bind_file(_row_to(File, row), abs_path))
+        return out
 
     def _bind_file(
         self, f: Optional[File], abspath: Optional[str] = None
