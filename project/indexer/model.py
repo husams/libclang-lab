@@ -147,7 +147,7 @@ class Location:
         }
 
     def __repr__(self) -> str:
-        return f"Location({self.loc})"
+        return f"Location(path={self.path!r}, line={self.line}, col={self.col})"
 
 
 @dataclass(frozen=True)
