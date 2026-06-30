@@ -1,0 +1,22 @@
+// MINIMAL per-TU artifact — only what cannot be reconstructed at Stage-2 merge.
+// Dropped vs the lossless version: qual_name/display_name (rebuilt from parent
+// chain), type_info, decl_path, decl_loc; linkage+access packed into flags;
+// edge count (recomputed by rollup), base_access/is_virtual kept in 1 byte.
+namespace cidx.min;
+
+table Header { artifact_version:uint16; tu_file_id:uint32; }
+struct Loc { file_ref:uint32; line:uint32; col:uint32; }
+
+// flags bits: 0 is_def, 1 is_pure, 2 is_static, 3 is_instantiation,
+//             4 is_named_instance, 5-7 linkage(0-7), 8-9 access(0-3)
+struct Symbol { name_ref:uint32; usr_ref:uint32; parent_ref:uint32; kind:uint16; flags:uint16; loc:Loc; }
+struct Edge   { src_local:uint32; dst_local:uint32; kind:uint8; extra:uint8; }  // extra = base_access|is_virtual for inherits
+
+table Artifact {
+  header:Header;
+  string_pool:[string];
+  symbols:[Symbol];
+  edges:[Edge];
+  includes:[uint32];
+}
+root_type Artifact;
