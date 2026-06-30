@@ -119,6 +119,206 @@ def open_query(
 # --------------------------------------------------------------------------- #
 
 
+class File:
+    """A source file in (or referenced by) the index -- a *smart path*.
+
+    ``Sym.file`` is a ``File`` (or ``None`` for a stub). It is the absolute path
+    PLUS a back-reference to the read-only :class:`GraphQuery`, so a caller can go
+    straight from a symbol to the file's owning ``component`` / ``repo``, its
+    ``compile_options``, a ``source()`` slice, or the parsed ``tu()`` / ``walk()``
+    AST -- without re-deriving any of it.
+
+    It behaves like its path string so existing callers stay unchanged: it is
+    ``os.PathLike`` (``os.path.basename(sym.file)`` works), stringifies to the
+    path, and compares equal to a plain ``str`` of the same path
+    (``sym.file == "/usr/include/.../foo.h"``). Heavy collaborators
+    (``Storage`` / ``astcache`` / ``astcmd`` / ``compiledb``) are imported lazily
+    inside the methods that need them.
+    """
+
+    __slots__ = (
+        "path",
+        "external",
+        "_q",
+        "_component_name",
+        "_store",
+        "_row",
+        "_row_loaded",
+    )
+
+    def __init__(
+        self,
+        path: str,
+        query: "GraphQuery",
+        *,
+        external: bool = False,
+        component_name: Optional[str] = None,
+    ):
+        self.path = path
+        self.external = external  # raw path in an UNREGISTERED file (no component)
+        self._q = query
+        self._component_name = component_name  # cheap name (no Storage round-trip)
+        self._store = None  # lazily-wrapped read-only Storage view
+        self._row = None  # cached file row (None once loaded = unregistered)
+        self._row_loaded = False
+
+    # -- identity / path-like ------------------------------------------------ #
+
+    @property
+    def name(self) -> str:
+        """Basename of the path (e.g. ``shapes.c``)."""
+        return os.path.basename(self.path)
+
+    def __fspath__(self) -> str:
+        return self.path
+
+    def __str__(self) -> str:
+        return self.path
+
+    def __repr__(self) -> str:
+        tag = " external" if self.external else ""
+        return f"File({self.name!r}{tag})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, File):
+            return self.path == other.path
+        if isinstance(other, str):
+            return self.path == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.path)
+
+    # -- DB-backed metadata -------------------------------------------------- #
+
+    def _storage(self):
+        """A read-only :class:`indexer.storage.Storage` over the SAME connection
+        the :class:`GraphQuery` holds -- no new connection, no migration."""
+        if self._store is None:
+            from indexer.storage import Storage
+
+            self._store = Storage.from_connection(self._q._c, self._q.db_path)
+        return self._store
+
+    def _file_row(self):
+        """The ``file`` table row for this path, or ``None`` (unregistered)."""
+        if not self._row_loaded:
+            self._row = self._storage().get_file(self.path)
+            self._row_loaded = True
+        return self._row
+
+    @property
+    def component(self):
+        """The owning :class:`indexer.storage.Component`, or ``None`` for an
+        unregistered (system/stdlib) file."""
+        if self.external:
+            return None
+        return self._storage().component_for_path(self.path)
+
+    @property
+    def repo(self):
+        """The owning :class:`indexer.storage.Repository` (v23 grouping), or
+        ``None`` when the file's component is ungrouped/unregistered."""
+        comp = self.component
+        if comp is None or comp.repository_id is None:
+            return None
+        return self._storage().get_repository_by_id(comp.repository_id)
+
+    @property
+    def compile_options(self) -> Optional[list[str]]:
+        """The stored (already-stripped) parse args for this file's TU, or
+        ``None`` if the file is not a registered TU."""
+        row = self._file_row()
+        return row.compile_options if row is not None else None
+
+    @property
+    def driver(self) -> Optional[str]:
+        """argv[0] of the original compile command, or ``None``."""
+        row = self._file_row()
+        return row.driver if row is not None else None
+
+    # -- source text --------------------------------------------------------- #
+
+    def source(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        *,
+        encoding: str = "utf-8",
+    ) -> str:
+        """The on-disk text between ``start`` and ``end``, each a 1-based
+        ``(line, col)`` tuple (clang convention). ``end`` is inclusive of the
+        character at ``end[1]``. Raises ``OSError`` if the file is unreadable."""
+        sl, sc = start
+        el, ec = end
+        if sl < 1 or el < sl or (el == sl and ec < sc):
+            raise ValueError(f"invalid range {start}..{end}")
+        with open(self.path, "r", encoding=encoding) as fh:
+            lines = fh.readlines()
+        if sl > len(lines):
+            return ""
+        el = min(el, len(lines))
+        if sl == el:
+            return lines[sl - 1][sc - 1 : ec]
+        out = [lines[sl - 1][sc - 1 :]]
+        out.extend(lines[sl : el - 1])
+        out.append(lines[el - 1][:ec])
+        return "".join(out)
+
+    # -- AST ----------------------------------------------------------------- #
+
+    def _target(self):
+        """An :class:`indexer.astcmd.Target` for this file -- resolved flags +
+        driver, ready for :func:`indexer.astcache.load_or_parse`."""
+        from indexer import compiledb
+        from indexer.astcmd import Target
+
+        opts = compiledb.resolve_options(
+            compiledb.sanitize(self.compile_options or []),
+            self._storage().get_alias,
+        )
+        return Target(abspath=self.path, flags=opts, driver=self.driver)
+
+    def tu(self, cache: bool = True):
+        """Parse (or load from the on-disk AST cache when ``cache`` is True) and
+        return the ``clang.cindex.TranslationUnit`` for this file. Returns
+        ``None`` only if the parse itself fails."""
+        from indexer import astcache
+
+        return astcache.load_or_parse(self._target(), use_cache=cache)
+
+    def walk(self, cache: bool = True):
+        """Generator over EVERY cursor in this file's AST (pre-order), so a caller
+        can traverse the tree without juggling the raw TU. ``cache`` is forwarded
+        to :meth:`tu`. Yields nothing if the parse fails."""
+        tu = self.tu(cache=cache)
+        if tu is None:
+            return
+
+        def _walk(cursor):
+            yield cursor
+            for child in cursor.get_children():
+                yield from _walk(child)
+
+        for child in tu.cursor.get_children():
+            yield from _walk(child)
+
+    def symbols(self, limit: int = 500) -> "list[Sym]":
+        """The indexed symbols declared in this file (low-level ``Sym`` values)."""
+        return self._q.symbols_in_file(self.path, limit=limit)
+
+    # -- deferred ------------------------------------------------------------ #
+
+    def index(self, force: bool = False):
+        """Re-index this file. Deferred: the query layer is strictly read-only
+        (``?mode=ro``); indexing needs a writable path that is designed
+        separately. Use ``cidx index <path>`` for now."""
+        raise NotImplementedError(
+            "File.index() is not available from the read-only query layer; "
+            "run `cidx index <path>` (optionally after re-import) instead."
+        )
+
+
 @dataclass(frozen=True)
 class Sym:
     """A symbol (declaration/definition). `name` is the qualified name."""
@@ -135,7 +335,7 @@ class Sym:
     parent_usr: Optional[str]
     resolved: bool
     component: Optional[str]
-    file: Optional[str]  # abs path of best-known location, or None (stub)
+    file: Optional[File]  # best-known location as a File (smart path), None=stub
     line: Optional[int]
     col: Optional[int]
     external: bool = False  # `file` is a raw path in an UNREGISTERED file
@@ -150,7 +350,7 @@ class Sym:
     def loc(self) -> str:
         if not self.file:
             return "<no-location>"
-        base = os.path.basename(self.file)
+        base = self.file.name
         return f"{base}:{self.line}" if self.line else base
 
     @property
@@ -175,7 +375,7 @@ class Sym:
             "qual_name": self.name,
             "kind": self.kind,
             "type_info": self.type_info,
-            "file": self.file,
+            "file": self.file.path if self.file else None,
             "line": self.line,
             "col": self.col,
             "is_definition": self.is_definition,
@@ -619,6 +819,22 @@ class GraphQuery:
             self._file_cache = cache
         return self._file_cache
 
+    def make_file(
+        self,
+        path: Optional[str],
+        *,
+        external: bool = False,
+        component_name: Optional[str] = None,
+    ) -> "Optional[File]":
+        """Wrap an absolute path into a :class:`File` bound to this query, or
+        ``None`` for a falsy path. The single construction choke point so every
+        ``Sym.file`` / ``Location.file`` carries the same DB-aware handle."""
+        if not path:
+            return None
+        return File(
+            path, self, external=external, component_name=component_name
+        )
+
     def _sym(self, r: sqlite3.Row) -> Sym:
         files = self._files()
         fid, line, col = r["file_id"], r["line"], r["col"]
@@ -648,7 +864,7 @@ class GraphQuery:
             parent_usr=r["parent_usr"],
             resolved=bool(r["resolved"]),
             component=comp,
-            file=path,
+            file=self.make_file(path, external=external, component_name=comp),
             line=line,
             col=col,
             external=external,

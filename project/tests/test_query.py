@@ -60,7 +60,7 @@ def test_symbols_in_file(g):
 
 def test_sym_carries_grounding(g):
     s = g.get("c:@F@helper")
-    assert s.file is not None and s.file.endswith("lib.c")
+    assert s.file is not None and s.file.path.endswith("lib.c")
     assert s.line == 20
     assert s.loc == "lib.c:20"
 
