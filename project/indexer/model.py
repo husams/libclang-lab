@@ -54,6 +54,7 @@ from .query import (
     CallerWithContext,
     DispatchSite,
     Edge,
+    File,
     GraphQuery,
     Selection,
     Site,
@@ -111,23 +112,35 @@ _TYPE_DECL_KINDS = frozenset(
 
 @dataclass(frozen=True)
 class Location:
-    """A resolved source position (file + line + col)."""
+    """A resolved source position (file + line + col).
 
-    file: Optional[str]
+    ``file`` is a :class:`indexer.query.File` (a smart path) -- ``.path`` is the
+    absolute path, ``.loc`` keeps the compact ``basename:line`` display, and the
+    File's component/repo/source/AST accessors are reachable straight from here.
+    """
+
+    file: Optional[File]
     line: Optional[int]
     col: Optional[int]
+
+    @property
+    def path(self) -> Optional[str]:
+        """The absolute path of this location's file, or ``None``."""
+        return self.file.path if self.file else None
 
     @property
     def loc(self) -> str:
         if not self.file:
             return "<no-location>"
-        import os
-
-        base = os.path.basename(self.file)
+        base = self.file.name
         return f"{base}:{self.line}" if self.line else base
 
     def to_dict(self) -> dict:
-        return {"file": self.file, "line": self.line, "col": self.col}
+        return {
+            "file": self.file.path if self.file else None,
+            "line": self.line,
+            "col": self.col,
+        }
 
     def __repr__(self) -> str:
         return f"Location({self.loc})"
@@ -748,6 +761,20 @@ class Entity:
     def _locations(self):
         return self._cb.graph.def_decl_locations(self.sym)
 
+    def _loc(self, site) -> Location:
+        """Wrap a ``(abs_path, line, col)`` tuple into a :class:`Location` whose
+        ``file`` is a DB-aware :class:`File` bound to this codebase's graph."""
+        path, line, col = site
+        return Location(self._cb.graph.make_file(path), line, col)
+
+    @property
+    def file(self) -> Optional[File]:
+        """The :class:`indexer.query.File` of this entity's best-known location
+        (definition, else declaration), or ``None`` for a stub. The smart-path
+        handle: ``.path`` / ``.component`` / ``.repo`` / ``.compile_options`` /
+        ``.source(...)`` / ``.tu()`` / ``.walk()``."""
+        return self.sym.file
+
     @property
     def location(self) -> Location:
         """Best-known location (definition, else declaration)."""
@@ -757,7 +784,7 @@ class Entity:
     def definition(self) -> Optional[Location]:
         """Where the entity is defined, or None if only declared."""
         defn, _ = self._locations()
-        return Location(*defn) if defn else None
+        return self._loc(defn) if defn else None
 
     @property
     def declaration(self) -> Optional[Location]:
@@ -769,7 +796,7 @@ class Entity:
             return None
         if defn is not None and decl == defn:
             return None
-        return Location(*decl)
+        return self._loc(decl)
 
     # -- references ---------------------------------------------------------- #
 

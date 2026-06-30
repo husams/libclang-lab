@@ -507,6 +507,26 @@ class Storage:
     to batch commits (row-at-a-time autocommit is the classic 100x slowdown).
     """
 
+    @classmethod
+    def from_connection(
+        cls, conn: sqlite3.Connection, path: str = "<connection>"
+    ) -> "Storage":
+        """Wrap an already-open sqlite3 connection WITHOUT migrating or writing.
+
+        Mirrors :meth:`indexer.query.GraphQuery.from_connection`: bypasses
+        ``__init__`` (no ``_migrate`` / schema / backfill / commit) so a strictly
+        read-only handle -- e.g. the one a :class:`indexer.query.File` borrows from
+        a ``?mode=ro`` ``GraphQuery`` -- can reuse the read accessors
+        (``component_for_path`` / ``get_file`` / ``get_repository_by_id`` /
+        ``component_abs_base`` / ``get_alias``) with no side effects. Does not take
+        ownership of the connection (the caller closes it)."""
+        self = cls.__new__(cls)
+        conn.row_factory = sqlite3.Row
+        self._conn = conn
+        self._in_txn = False
+        self._needs_entity_node_backfill = False
+        return self
+
     def __init__(self, path: str = ":memory:"):
         if path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

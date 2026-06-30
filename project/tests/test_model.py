@@ -360,7 +360,7 @@ def test_distinct_decl_and_def(tmp_path):
         assert isinstance(fn, Function)
         assert fn.definition == Location(os.path.join(repo, "m.c"), 40, 1)
         decl = fn.declaration
-        assert decl is not None and decl.line == 3 and decl.file.endswith("m.h")
+        assert decl is not None and decl.line == 3 and decl.path.endswith("m.h")
         # signature parsed from type_info
         assert fn.return_type.spelling == "int"
         assert [a.spelling for a in fn.arguments] == ["int", "int"]
