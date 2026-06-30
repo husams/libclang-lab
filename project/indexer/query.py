@@ -144,6 +144,8 @@ class File:
         "_store",
         "_row",
         "_row_loaded",
+        "_tu",
+        "_tu_loaded",
     )
 
     def __init__(
@@ -161,6 +163,8 @@ class File:
         self._store = None  # lazily-wrapped read-only Storage view
         self._row = None  # cached file row (None once loaded = unregistered)
         self._row_loaded = False
+        self._tu = None  # memoized TranslationUnit (parsed/loaded once)
+        self._tu_loaded = False
 
     # -- identity / path-like ------------------------------------------------ #
 
@@ -280,17 +284,28 @@ class File:
         return Target(abspath=self.path, flags=opts, driver=self.driver)
 
     def tu(self, cache: bool = True):
-        """Parse (or load from the on-disk AST cache when ``cache`` is True) and
-        return the ``clang.cindex.TranslationUnit`` for this file. Returns
-        ``None`` only if the parse itself fails."""
+        """The file's ``clang.cindex.TranslationUnit``, **memoized on this File**.
+
+        The first call parses (or, when ``cache`` is True, loads the on-disk
+        ``.ast``, writing it on a miss) and stores the TU; later calls return the
+        SAME object with no disk or parse cost -- so ``f.tu()`` then ``f.walk()``
+        is one parse, not two. Pass ``cache=False`` to force a fresh parse from
+        source (e.g. after the file changed on disk); that result replaces the
+        memo. Returns ``None`` only if the parse itself fails (not memoized)."""
+        if cache and self._tu_loaded:
+            return self._tu
         from indexer import astcache
 
-        return astcache.load_or_parse(self._target(), use_cache=cache)
+        tu = astcache.load_or_parse(self._target(), use_cache=cache)
+        if tu is not None:
+            self._tu = tu
+            self._tu_loaded = True
+        return tu
 
     def walk(self, cache: bool = True):
         """Generator over EVERY cursor in this file's AST (pre-order), so a caller
-        can traverse the tree without juggling the raw TU. ``cache`` is forwarded
-        to :meth:`tu`. Yields nothing if the parse fails."""
+        can traverse the tree without juggling the raw TU. Reuses the memoized
+        :meth:`tu` (``cache`` is forwarded). Yields nothing if the parse fails."""
         tu = self.tu(cache=cache)
         if tu is None:
             return
