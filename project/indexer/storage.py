@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from collections.abc import Sequence
 from typing import Any, Optional
 
@@ -430,6 +430,26 @@ class Directory:
 
 @dataclass
 class File:
+    """A row in the ``file`` table -- and, once a ``Storage`` accessor hands it
+    back, a *smart path* over that row.
+
+    The plain fields below are the persisted columns. In addition, every ``File``
+    returned by :meth:`Storage.get_file` / :meth:`Storage.get_file_by_id` /
+    :meth:`Storage.files` / :meth:`Storage.list_files` is *bound* to the Storage
+    that produced it (``_storage``), which turns it into the storage-layer twin of
+    :class:`indexer.query.File`: it can reconstruct its own :attr:`abspath`, reach
+    its owning :attr:`component` / :attr:`repo`, read a :meth:`source` slice, list
+    its :meth:`symbols`, and parse/walk its AST via :meth:`tu` / :meth:`walk`.
+
+    The key difference from the read-only :class:`indexer.query.File` (whose
+    ``index()`` only raises): storage is the **writable** layer, so :meth:`index`
+    really parses + persists this file and :meth:`resolve` runs the resolve pass.
+
+    Heavy collaborators (``index_source`` / ``astcache`` / ``compiledb``) are
+    imported lazily inside the methods that need them to avoid an import cycle
+    (``indexer.clang`` and ``indexer.utils.files`` both import this module).
+    """
+
     directory_id: int
     name: str
     mtime: Optional[float] = None
@@ -440,6 +460,211 @@ class File:
     indexed_at: Optional[str] = None
     args_overridden: bool = False
     id: Optional[int] = None
+
+    # -- live back-references (init=False => kept out of __init__ and, via the
+    # `f.init` filter in _row_to, out of column hydration; Storage sets them per
+    # instance). compare/repr False so two equal rows still compare equal. --- #
+    _storage: "Optional[Storage]" = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _abspath_cache: Optional[str] = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _tu: Any = field(default=None, init=False, repr=False, compare=False)
+    _tu_loaded: bool = field(default=False, init=False, repr=False, compare=False)
+
+    # -- binding ------------------------------------------------------------- #
+
+    def _bound(self) -> "Storage":
+        """The Storage this File was handed back from, or a clear error."""
+        if self._storage is None:
+            raise RuntimeError(
+                "File is not bound to a Storage; obtain it from "
+                "Storage.get_file()/get_file_by_id()/files()/list_files()"
+            )
+        return self._storage
+
+    @property
+    def abspath(self) -> str:
+        """Reconstructed absolute path (component effective-root + dir + name)."""
+        if self._abspath_cache is None:
+            store = self._bound()
+            p = (
+                store.file_abs_path(self.id)
+                if self.id is not None
+                else (
+                    os.path.join(d, self.name)
+                    if (d := store.directory_abs_path(self.directory_id))
+                    else None
+                )
+            )
+            if p is None:
+                raise RuntimeError(
+                    f"cannot reconstruct abspath for file {self.name!r}"
+                )
+            self._abspath_cache = p
+        return self._abspath_cache
+
+    # -- owning component / repository --------------------------------------- #
+
+    @property
+    def component(self) -> "Optional[Component]":
+        """The owning :class:`Component`, or ``None`` if no component owns it."""
+        return self._bound().component_for_path(self.abspath)
+
+    @property
+    def repo(self) -> "Optional[Repository]":
+        """The owning :class:`Repository` (v23 grouping), or ``None`` when the
+        file's component is ungrouped/unregistered."""
+        comp = self.component
+        if comp is None or comp.repository_id is None:
+            return None
+        return self._bound().get_repository_by_id(comp.repository_id)
+
+    # -- source text --------------------------------------------------------- #
+
+    def source(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        *,
+        encoding: str = "utf-8",
+    ) -> str:
+        """The on-disk text between ``start`` and ``end``, each a 1-based
+        ``(line, col)`` tuple (clang convention). ``end`` is inclusive of the
+        character at ``end[1]``. Raises ``OSError`` if the file is unreadable."""
+        sl, sc = start
+        el, ec = end
+        if sl < 1 or el < sl or (el == sl and ec < sc):
+            raise ValueError(f"invalid range {start}..{end}")
+        with open(self.abspath, "r", encoding=encoding) as fh:
+            lines = fh.readlines()
+        if sl > len(lines):
+            return ""
+        el = min(el, len(lines))
+        if sl == el:
+            return lines[sl - 1][sc - 1 : ec]
+        out = [lines[sl - 1][sc - 1 :]]
+        out.extend(lines[sl : el - 1])
+        out.append(lines[el - 1][:ec])
+        return "".join(out)
+
+    # -- symbols ------------------------------------------------------------- #
+
+    def symbols(self, limit: Optional[int] = None) -> "list[Symbol]":
+        """The indexed symbols declared in this file (``Symbol`` rows, by
+        line/col). ``limit`` caps the result; ``None`` (default) returns all."""
+        if self.id is None:
+            return []
+        syms = self._bound().symbols_in_file(self.id)
+        return syms[:limit] if limit is not None else syms
+
+    # -- AST ----------------------------------------------------------------- #
+
+    def _target(self):
+        """An :class:`indexer.astcmd.Target` for this file -- resolved flags +
+        driver, ready for :func:`indexer.astcache.load_or_parse`."""
+        from indexer import compiledb
+        from indexer.astcmd import Target
+
+        store = self._bound()
+        opts = compiledb.resolve_options(
+            compiledb.sanitize(self.compile_options or []), store.get_alias
+        )
+        return Target(abspath=self.abspath, flags=opts, driver=self.driver)
+
+    def tu(self, cache: bool = True):
+        """The file's ``clang.cindex.TranslationUnit``, **memoized on this File**.
+
+        The first call parses (or, when ``cache`` is True, loads the on-disk
+        ``.ast``, writing it on a miss) and stores the TU; later calls return the
+        SAME object. Pass ``cache=False`` to force a fresh parse from source; that
+        result replaces the memo. Returns ``None`` only if the parse fails."""
+        if cache and self._tu_loaded:
+            return self._tu
+        from indexer import astcache
+
+        tu = astcache.load_or_parse(self._target(), use_cache=cache)
+        if tu is not None:
+            self._tu = tu
+            self._tu_loaded = True
+        return tu
+
+    def walk(self, cache: bool = True):
+        """Generator over EVERY cursor in this file's AST (pre-order). Reuses the
+        memoized :meth:`tu` (``cache`` forwarded). Yields nothing on parse fail."""
+        tu = self.tu(cache=cache)
+        if tu is None:
+            return
+
+        def _walk(cursor):
+            yield cursor
+            for child in cursor.get_children():
+                yield from _walk(child)
+
+        for child in tu.cursor.get_children():
+            yield from _walk(child)
+
+    # -- writable: index / resolve ------------------------------------------- #
+
+    def index(self) -> "dict[str, Any]":
+        """Parse + index THIS file (its TU + headers): persist its symbols, its
+        parse diagnostics, and the indexed mark, then free the TU.
+
+        This is the *real* index -- storage is the writable layer, so (unlike the
+        read-only :meth:`indexer.query.File.index`, which can only defer) a caller
+        just does ``f.index()`` and the File handles every detail. Returns the
+        ``index_source`` result; re-raises ``ClangParseError`` on a fatal parse,
+        after recording its diagnostics on this file's row."""
+        from indexer import compiledb
+        from indexer.clang import ClangParseError, index_source
+
+        store = self._bound()
+        if self.id is None:
+            raise RuntimeError("file has no id; add_file it to a Storage first")
+        path = self.abspath
+        opts = compiledb.resolve_options(
+            compiledb.sanitize(self.compile_options or []), store.get_alias
+        )
+        try:
+            result = index_source(
+                store,
+                path,
+                opts,
+                self.id,
+                driver=self.driver,
+                header_options=self.compile_options,
+            )
+        except ClangParseError as e:
+            store.replace_diagnostics(
+                self.id,
+                e.diagnostics
+                or [
+                    {
+                        "severity": 4,  # clang.cindex.Diagnostic.Fatal
+                        "spelling": str(e),
+                        "file_path": path,
+                        "line": None,
+                        "col": None,
+                    }
+                ],
+            )
+            raise
+        mtime = os.path.getmtime(path) if os.path.exists(path) else None
+        store.replace_diagnostics(self.id, result["diagnostics"])
+        store.mark_file_indexed(self.id, mtime=mtime)
+        self.indexed = True
+        self.mtime = mtime
+        self._tu = None  # just (re)parsed -- drop the stale memoized TU
+        self._tu_loaded = False
+        return result
+
+    def resolve(self) -> "tuple[int, int]":
+        """Resolve the index (roll up edge counts, materialise ``entity_edge``,
+        stamp ``graph_resolved_at``); returns ``(still_stub_count,
+        cross_repo_edge_count)``. Resolution in cidx is index-wide, so this does
+        the real resolve pass -- a script just calls ``f.resolve()``."""
+        return self._bound().resolve_pass()
 
 
 @dataclass
@@ -483,7 +708,9 @@ class Symbol:
 def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
     if row is None:
         return None
-    kwargs = {f.name: row[f.name] for f in fields(cls)}
+    # Only init fields map to columns; init=False fields (e.g. File's live
+    # back-references) carry their defaults and are set by the accessor.
+    kwargs = {f.name: row[f.name] for f in fields(cls) if f.init}
     if cls is Symbol:
         # kind is stored as a CXCursorKind int (v16); present it as the name.
         kwargs["kind"] = SYMBOL_KIND_NAMES.get(kwargs["kind"], kwargs["kind"])
@@ -1696,6 +1923,18 @@ class Storage:
             driver=driver,
         )
 
+    def _bind_file(
+        self, f: Optional[File], abspath: Optional[str] = None
+    ) -> Optional[File]:
+        """Bind a freshly-read File to this Storage so its smart-path methods
+        (source/symbols/tu/walk/index/resolve/component/repo) work; optionally
+        seed its memoized abspath when the caller already reconstructed it."""
+        if f is not None:
+            f._storage = self
+            if abspath is not None:
+                f._abspath_cache = abspath
+        return f
+
     def get_file(self, abs_path: str) -> Optional[File]:
         """File row for an absolute path, or None."""
         try:
@@ -1707,13 +1946,13 @@ class Storage:
             "WHERE d.component_id = ? AND d.path = ? AND f.name = ?",
             (comp_id, rel_dir, name),
         ).fetchone()
-        return _row_to(File, row)
+        return self._bind_file(_row_to(File, row), os.path.abspath(abs_path))
 
     def get_file_by_id(self, file_id: int) -> Optional[File]:
         row = self._conn.execute(
             "SELECT * FROM file WHERE id = ?", (file_id,)
         ).fetchone()
-        return _row_to(File, row)
+        return self._bind_file(_row_to(File, row))
 
     def files(self) -> list[tuple[File, str]]:
         """Every file row with its reconstructed absolute path, sorted by path."""
@@ -1736,7 +1975,7 @@ class Storage:
                 if row["rel"]
                 else os.path.join(eff, row["name"])
             )
-            out.append((_row_to(File, row), abs_path))
+            out.append((self._bind_file(_row_to(File, row), abs_path), abs_path))
         return out
 
     def list_files(
@@ -1781,7 +2020,7 @@ class Storage:
                 if row["rel"]
                 else os.path.join(eff, row["name"])
             )
-            out.append((_row_to(File, row), abs_path))
+            out.append((self._bind_file(_row_to(File, row), abs_path), abs_path))
         return out
 
     def mark_file_indexed(self, file_id: int, mtime: Optional[float] = None) -> None:
