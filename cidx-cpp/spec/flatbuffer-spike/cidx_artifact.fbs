@@ -1,0 +1,50 @@
+// cidx per-TU fact artifact — faithful schema (holds the real extracted facts:
+// symbols + edges + edge_sites + call_args, all strings interned into one pool).
+// Vectors of fixed structs (no per-element vtable) = the compactness lever.
+namespace cidx.artifact;
+
+table Header { artifact_version:uint16; libclang_version:string; tu_file_id:uint32; }
+
+struct Loc { file_ref:uint32; line:uint32; col:uint32; }
+
+// All string-valued columns become uint32 refs into string_pool; the whole
+// record is a fixed-size struct packed tightly in the symbols vector.
+struct Symbol {
+  name_ref:uint32;
+  usr_ref:uint32;
+  qual_ref:uint32;
+  display_ref:uint32;
+  type_ref:uint32;
+  decl_path_ref:uint32;
+  parent_usr_ref:uint32;
+  linkage_ref:uint32;
+  access_ref:uint32;
+  kind:uint16;
+  flags:uint16;        // bit0 is_definition, 1 is_pure, 2 is_static, 3 is_instantiation, 4 is_named_instance
+  loc:Loc;             // definition site
+  decl_loc:Loc;        // declaration site
+}
+
+struct Edge { src_local:uint32; dst_local:uint32; kind:uint8; count:uint32; base_access:uint8; is_virtual:uint8; }
+
+struct EdgeSite {
+  edge_idx:uint32; loc:Loc; conditional:uint8;
+  args_sig_ref:uint32; recv_kind_ref:uint32;
+  recv_type_usr_ref:uint32; recv_decl_usr_ref:uint32; recv_param_pos:int32;
+}
+
+struct CallArg {
+  edge_idx:uint32; loc:Loc; position:uint32;
+  src_kind_ref:uint32; type_usr_ref:uint32; decl_usr_ref:uint32; callee_usr_ref:uint32;
+}
+
+table Artifact {
+  header:Header;
+  string_pool:[string];
+  symbols:[Symbol];
+  edges:[Edge];
+  edge_sites:[EdgeSite];
+  call_args:[CallArg];
+  includes:[uint32];
+}
+root_type Artifact;
