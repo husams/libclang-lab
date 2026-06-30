@@ -133,7 +133,11 @@ class Location:
         if not self.file:
             return "<no-location>"
         base = self.file.name
-        return f"{base}:{self.line}" if self.line else base
+        if self.line is None:
+            return base
+        if self.col is None:
+            return f"{base}:{self.line}"
+        return f"{base}:{self.line}:{self.col}"
 
     def to_dict(self) -> dict:
         return {
