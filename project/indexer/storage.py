@@ -460,6 +460,65 @@ class Component:
         for f, _abspath in store.list_files(component_id=self.id, name=name):
             yield f
 
+    # -- writable: add / remove / save --------------------------------------- #
+
+    def add_file(
+        self,
+        relpath: str,
+        *,
+        mtime: Optional[float] = None,
+        md5: Optional[str] = None,
+        compile_options: "Optional[list[str]]" = None,
+        driver: Optional[str] = None,
+    ) -> "File":
+        """Register a file under this component and return it bound.
+
+        ``relpath`` is resolved against this component's :attr:`abspath` (so
+        ``"src/util.c"`` lands in the ``src`` directory, creating the directory
+        row if needed); an absolute path already under the component works too.
+        Idempotent on (directory, name) -- re-adding refreshes metadata."""
+        store = self._bound()
+        abspath = (
+            relpath if os.path.isabs(relpath)
+            else os.path.join(self.abspath, relpath)
+        )
+        fid = store.add_file_path(
+            abspath, mtime=mtime, md5=md5,
+            compile_options=compile_options, driver=driver,
+        )
+        f = store.get_file_by_id(fid)
+        assert f is not None
+        return f
+
+    def remove_file(self, name: str) -> int:
+        """Delete every file in this component whose name matches the fuzzy
+        ``name`` filter (and the symbols indexed from them). Returns the count
+        removed. ``name`` is required -- pass a specific match to avoid wiping
+        the whole component (use :meth:`Storage.delete_component` for that)."""
+        if not name:
+            raise ValueError("remove_file requires a name filter")
+        store = self._bound()
+        if self.id is None:
+            return 0
+        removed = 0
+        for f, _abspath in store.list_files(component_id=self.id, name=name):
+            if f.id is not None:
+                store.delete_file(f.id)
+                removed += 1
+        return removed
+
+    def save(self) -> "Component":
+        """Persist this Component's current field values (name/path/kind/
+        version/repository_id) back to its row. Returns self for chaining."""
+        store = self._bound()
+        if self.id is None:
+            raise RuntimeError("component has no id; add it to a Storage first")
+        store.update_component(
+            self.id, self.name, self.path, self.kind,
+            self.version, self.repository_id,
+        )
+        return self
+
 
 @dataclass
 class Repository:
@@ -511,6 +570,123 @@ class Repository:
         file name -- e.g. ``repo.files("sample.hpp")``."""
         for comp in self.components():
             yield from comp.files(name=name)
+
+    # -- writable: components ------------------------------------------------- #
+
+    def add_component(
+        self,
+        name: str,
+        path: str,
+        *,
+        kind: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> "Component":
+        """Register a component, group it under this repository, and return it
+        bound. Mirrors the ``import``/``add-source`` grouping: the component's
+        stored path is relativized to the active clone root (so a later
+        :meth:`switch` repoints it for free). ``kind`` defaults to the repo's."""
+        store = self._bound()
+        if self.id is None:
+            raise RuntimeError("repository has no id; add it to a Storage first")
+        cid = store.add_component(name, path, kind=kind or self.kind, version=version)
+        store.set_component_repository(cid, self.id)
+        root = self._bound()._active_clone_root(self.id)
+        if root is not None:
+            store.relativize_component(cid, root)
+        comp = store.get_component_by_id(cid)
+        assert comp is not None
+        return comp
+
+    def remove_component(self, name: str) -> int:
+        """Delete every component grouped under this repository whose name
+        matches the fuzzy ``name`` filter (and its directories/files/symbols).
+        Returns the count removed. ``name`` is required (avoid wiping the whole
+        repository by accident)."""
+        if not name:
+            raise ValueError("remove_component requires a name filter")
+        store = self._bound()
+        if self.id is None:
+            return 0
+        removed = 0
+        for comp in store.components_for_repository(self.id, name=name):
+            if comp.id is not None:
+                store.delete_component(comp.id)
+                removed += 1
+        return removed
+
+    # -- writable: clones ----------------------------------------------------- #
+
+    def _clones_matching(self, filter: str) -> "list[Clone]":
+        """Clones of this repository whose label or path contains ``filter``
+        (case-insensitive substring). Empty ``filter`` matches nothing."""
+        if not filter or self.id is None:
+            return []
+        needle = filter.lower()
+        out = []
+        for c in self._bound().list_clones(self.id):
+            hay = f"{c.label or ''}\n{c.path}".lower()
+            if needle in hay:
+                out.append(c)
+        return out
+
+    def add_clone(self, path: str, label: Optional[str] = None) -> "Clone":
+        """Register a checkout/worktree directory for this repository and return
+        the :class:`Clone`. Idempotent on path. Does NOT switch to it -- call
+        :meth:`switch` (or pass its label there) to make it active."""
+        store = self._bound()
+        if self.id is None:
+            raise RuntimeError("repository has no id; add it to a Storage first")
+        cid = store.add_clone(self.id, path, label=label)
+        clone = store.get_clone_by_id(cid)
+        assert clone is not None
+        return clone
+
+    def switch(self, filter: str) -> "Clone":
+        """Point this repository at the clone matching ``filter`` (case-
+        insensitive substring on label or path) and make it active. Raises if
+        the filter matches zero or more than one clone. Updates this object's
+        :attr:`active_clone_id` in place and returns the now-active Clone."""
+        matches = self._clones_matching(filter)
+        if not matches:
+            raise LookupError(f"no clone matches {filter!r}")
+        if len(matches) > 1:
+            labels = ", ".join(c.label or c.path for c in matches)
+            raise LookupError(f"{filter!r} is ambiguous: matches {labels}")
+        clone = matches[0]
+        store = self._bound()
+        assert self.id is not None
+        store.set_active_clone(self.id, clone.id)
+        self.active_clone_id = clone.id
+        return clone
+
+    def remove_clone(self, filter: str) -> int:
+        """Delete every clone of this repository matching ``filter`` (case-
+        insensitive substring on label or path). Returns the count removed. A
+        removed active clone clears the active pointer (delete_clone handles it);
+        this object's :attr:`active_clone_id` is refreshed to match. ``filter``
+        is required."""
+        if not filter:
+            raise ValueError("remove_clone requires a filter")
+        store = self._bound()
+        removed = 0
+        for c in self._clones_matching(filter):
+            if c.id is not None:
+                if c.id == self.active_clone_id:
+                    self.active_clone_id = None
+                store.delete_clone(c.id)
+                removed += 1
+        return removed
+
+    def save(self) -> "Repository":
+        """Persist this Repository's current field values (name/kind/remote_url/
+        active_clone_id) back to its row. Returns self for chaining."""
+        store = self._bound()
+        if self.id is None:
+            raise RuntimeError("repository has no id; add it to a Storage first")
+        store.update_repository(
+            self.id, self.name, self.kind, self.remote_url, self.active_clone_id,
+        )
+        return self
 
 
 @dataclass
@@ -813,6 +989,24 @@ class File:
         cross_repo_edge_count)``. Resolution in cidx is index-wide, so this does
         the real resolve pass -- a script just calls ``f.resolve()``."""
         return self._bound().resolve_pass()
+
+    # -- writable: save / remove --------------------------------------------- #
+
+    def save(self) -> "File":
+        """Persist this File's current field values back to its row (mtime, md5,
+        compile_options, driver, indexed, args_overridden, ...). Returns self so
+        edits chain: ``f.compile_options = [...]; f.save()``."""
+        self._bound().update_file(self)
+        return self
+
+    def remove(self) -> None:
+        """Delete THIS file and the symbols indexed from it (no filter -- a File
+        is a single row). The object keeps its fields but is no longer backed by
+        a row; re-add it via Storage.add_file to restore."""
+        store = self._bound()
+        if self.id is None:
+            raise RuntimeError("file has no id; nothing to remove")
+        store.delete_file(self.id)
 
 
 @dataclass
@@ -1422,6 +1616,25 @@ class Storage:
         )
         self._commit()
 
+    def update_component(
+        self,
+        component_id: int,
+        name: str,
+        path: str,
+        kind: str,
+        version: Optional[str],
+        repository_id: Optional[int],
+    ) -> None:
+        """Persist every mutable column of a component row in place. Backs
+        Component.save() -- writes the object's current field values wholesale
+        (this DOES clear a field set to None, unlike the COALESCE upserts)."""
+        self._conn.execute(
+            "UPDATE component SET name = ?, path = ?, kind = ?, version = ?, "
+            "repository_id = ? WHERE id = ?",
+            (name, path, kind, version, repository_id, component_id),
+        )
+        self._commit()
+
     def set_component_version(self, name: str, version: Optional[str]) -> bool:
         """Set (or clear when version=None) a component's version by name.
 
@@ -1894,6 +2107,25 @@ class Storage:
         )
         self._commit()
 
+    def update_repository(
+        self,
+        repository_id: int,
+        name: str,
+        kind: str,
+        remote_url: Optional[str],
+        active_clone_id: Optional[int],
+    ) -> None:
+        """Persist every mutable column of a repository row in place. Backs
+        Repository.save() -- writes the object's current field values wholesale
+        (unlike add_repository's COALESCE upsert, this DOES clear a field set to
+        None, so it is a true 'save what I have')."""
+        self._conn.execute(
+            "UPDATE repository SET name = ?, kind = ?, remote_url = ?, "
+            "active_clone_id = ? WHERE id = ?",
+            (name, kind, remote_url, active_clone_id, repository_id),
+        )
+        self._commit()
+
     def delete_repository(self, repository_id: int) -> None:
         """Remove a repository. Clones cascade (ON DELETE CASCADE); components
         are detached (repository_id ON DELETE SET NULL) but otherwise untouched
@@ -2250,6 +2482,29 @@ class Storage:
             "UPDATE file SET indexed = 1, indexed_at = datetime('now'), "
             "  mtime = COALESCE(?, mtime) WHERE id = ?",
             (mtime, file_id),
+        )
+        self._commit()
+
+    def update_file(self, f: "File") -> None:
+        """Persist every mutable column of a file row from the object in place.
+        Backs File.save() -- writes the File's current field values wholesale
+        (directory_id/name/mtime/md5/compile_options/driver/indexed/indexed_at/
+        args_overridden). compile_options is re-serialised to JSON."""
+        if f.id is None:
+            raise RuntimeError("file has no id; add it to a Storage first")
+        opts = (
+            json.dumps(f.compile_options)
+            if f.compile_options is not None
+            else None
+        )
+        self._conn.execute(
+            "UPDATE file SET directory_id = ?, name = ?, mtime = ?, md5 = ?, "
+            "compile_options = ?, driver = ?, indexed = ?, indexed_at = ?, "
+            "args_overridden = ? WHERE id = ?",
+            (
+                f.directory_id, f.name, f.mtime, f.md5, opts, f.driver,
+                int(f.indexed), f.indexed_at, int(f.args_overridden), f.id,
+            ),
         )
         self._commit()
 
