@@ -6,6 +6,8 @@ conftest.py -- no libclang, no network.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from indexer.query import (
@@ -346,3 +348,55 @@ def test_edge_to_dict_auto_populates_sites(g):
     assert {s["line"] for s in d["sites"]} == {22, 25}
     # the peer's own decl line is distinct from the reference sites
     assert d["line"] not in {s["line"] for s in d["sites"]} or len(d["sites"]) > 0
+
+
+# --------------------------------------------------------------------------- #
+# Sym.source() (#25) -- read the symbol's own region straight off disk
+# --------------------------------------------------------------------------- #
+
+
+def test_source_reads_own_extent(tmp_path, g):
+    src = tmp_path / "region.c"
+    src.write_text("int add(int a, int b) {\n    return a + b;\n}\n")
+    sym = replace(
+        g.get("c:@F@main"),
+        file=g.make_file(str(src)),
+        line=1,
+        col=1,
+        end_line=3,
+        end_col=1,
+    )
+    assert sym.source() == "int add(int a, int b) {\n    return a + b;\n}"
+
+
+def test_source_falls_back_to_default_lines_without_extent(tmp_path, g):
+    src = tmp_path / "region2.c"
+    src.write_text("\n".join(f"line{i}" for i in range(1, 20)) + "\n")
+    sym = replace(
+        g.get("c:@F@main"),
+        file=g.make_file(str(src)),
+        line=2,
+        col=1,
+        end_line=None,
+        end_col=None,
+    )
+    assert sym.source(default_lines=3) == "line2\nline3\nline4"
+
+
+def test_source_default_lines_clips_at_eof(tmp_path, g):
+    src = tmp_path / "region3.c"
+    src.write_text("line1\nline2\n")
+    sym = replace(
+        g.get("c:@F@main"),
+        file=g.make_file(str(src)),
+        line=1,
+        col=1,
+        end_line=None,
+        end_col=None,
+    )
+    assert sym.source(default_lines=10) == "line1\nline2"
+
+
+def test_source_empty_without_file_or_line(g):
+    sym = replace(g.get("c:@F@main"), file=None, line=None)
+    assert sym.source() == ""
