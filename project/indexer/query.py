@@ -73,6 +73,9 @@ EDGE_KINDS = {
     "destroy": 16,
     # PR2 (v17): Layer-0 friend declaration (rolled up to befriends entity_edge)
     "friend": 17,
+    # Materialised virtual-dispatch caller edge (built by resolve): caller ->
+    # each transitive override of the virtual method it statically calls.
+    "dispatch_calls": 18,
 }
 EDGE_NAMES = {v: k for k, v in EDGE_KINDS.items()}
 
@@ -1622,6 +1625,7 @@ class GraphQuery:
         sym,
         limit: int = ...,
         include_instantiations: Literal[False] = ...,
+        include_overrides: bool = ...,
     ) -> list[Sym]: ...
 
     @overload
@@ -1631,6 +1635,7 @@ class GraphQuery:
         limit: int = ...,
         *,
         include_instantiations: Literal[True],
+        include_overrides: bool = ...,
     ) -> list[CallerWithContext]: ...
 
     def callers(
@@ -1638,12 +1643,22 @@ class GraphQuery:
         sym,
         limit: int = 500,
         include_instantiations: bool = False,
+        include_overrides: bool = False,
     ) -> "list[Sym] | list[CallerWithContext]":
         """Symbols that call ``sym`` (incoming ``calls``).
 
         ``include_instantiations=False`` (default) — returns only direct callers
         of the literal node ``sym``, byte-identical to the v12 behaviour.
         Return type: ``list[Sym]``.
+
+        ``include_overrides=True`` — also return callers that reach ``sym`` by
+        **virtual dispatch**: when ``sym`` is a method that overrides a virtual
+        base method B, a static call recorded against B (e.g. ``execute() ->
+        base::doSomething``) can land on ``sym`` at run time. These are read in
+        one hop from the materialised ``dispatch_calls`` edges (kind 18) built by
+        ``resolve``. Deduplicated with the direct callers, order-stable (direct
+        first). Return type: ``list[Sym]`` (ignored when
+        ``include_instantiations=True``). Requires a ``resolve``d index.
 
         ``include_instantiations=True`` — when ``sym`` is a template method/
         function, rolls up callers of all implicit-instantiation members
@@ -1666,6 +1681,10 @@ class GraphQuery:
         """
         direct = self._peers(sym, ("calls",), "in", limit)
         if not include_instantiations:
+            if include_overrides:
+                virtual = self._peers(sym, ("dispatch_calls",), "in", limit)
+                seen = {s.id for s in direct}
+                return direct + [s for s in virtual if s.id not in seen]
             return direct
         # Opt-in path: build CallerWithContext entries.
         # Direct callers of the primary get via_instantiation=None, targs=[].

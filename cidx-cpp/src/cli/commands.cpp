@@ -2813,8 +2813,11 @@ int cmd_graph_callers(const ParsedArgs &args, Context &ctx) {
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
   if (!sym) return rc;
-  auto edges = h->g->edges_in(sym->id, std::vector<std::string>{"calls"},
-                              args.graph_limit);
+  std::vector<std::string> kinds{"calls"};
+  if (args.include_overrides) {
+    kinds.emplace_back("dispatch_calls");
+  }
+  auto edges = h->g->edges_in(sym->id, kinds, args.graph_limit);
   graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
                     "callers of " + sym->name + " (@" + sym->loc() + "):");
   return 0;

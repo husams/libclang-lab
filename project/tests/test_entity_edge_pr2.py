@@ -100,7 +100,7 @@ def test_schema_version_is_25():
 
 def test_product_version_is_0410():
     from indexer import cli
-    assert cli.VERSION == "0.42.0", f"Expected '0.42.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.43.0", f"Expected '0.43.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():

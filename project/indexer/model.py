@@ -1294,7 +1294,10 @@ class Callable(Entity):
 
     @overload
     def callers(
-        self, limit: int = ..., include_instantiations: Literal[False] = ...
+        self,
+        limit: int = ...,
+        include_instantiations: Literal[False] = ...,
+        include_overrides: bool = ...,
     ) -> list["Entity"]: ...
 
     @overload
@@ -1303,12 +1306,21 @@ class Callable(Entity):
     ) -> list[CallerWithContextModel]: ...
 
     def callers(
-        self, limit: int = 500, include_instantiations: bool = False
+        self,
+        limit: int = 500,
+        include_instantiations: bool = False,
+        include_overrides: bool = False,
     ) -> "list[Entity] | list[CallerWithContextModel]":
         """Entities that call this one.
 
         ``include_instantiations=False`` (default) — direct callers only;
         byte-identical to the v12 behaviour.  Return type: ``list[Entity]``.
+
+        ``include_overrides=True`` — also include callers that reach this method
+        by **virtual dispatch** (a static call to a virtual base method this one
+        overrides), read from the materialised ``dispatch_calls`` edges built by
+        ``resolve``. Return type: ``list[Entity]`` (ignored when
+        ``include_instantiations=True``).
 
         ``include_instantiations=True`` — when this is a template
         method/function, rolls up callers of all implicit-instantiation
@@ -1333,7 +1345,12 @@ class Callable(Entity):
                 )
             )
         return self._cb._wrap_all(
-            self._cb.graph.callers(self.sym, limit=limit, include_instantiations=False)
+            self._cb.graph.callers(
+                self.sym,
+                limit=limit,
+                include_instantiations=False,
+                include_overrides=include_overrides,
+            )
         )
 
     @overload

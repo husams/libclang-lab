@@ -193,7 +193,8 @@ INSERT OR IGNORE INTO edge_kind (id, name) VALUES
   (8,'field_of'), (9,'method_of'),
   (10,'construct-value'), (11,'construct-temp'), (12,'construct-heap'),
   (13,'construct-copy'), (14,'construct-move'),
-  (15,'factory-construct'), (16,'destroy'), (17,'friend');
+  (15,'factory-construct'), (16,'destroy'), (17,'friend'),
+  (18,'dispatch_calls');
 
 CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
@@ -2685,6 +2686,37 @@ void Storage::rollup_edge_counts() {
       "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = edge.id)");
 }
 
+void Storage::materialize_dispatch_calls() {
+  // Materialise virtual-dispatch caller edges (kind 18, 'dispatch_calls').
+  // A static 'calls' edge (1) into a virtual method B understates reality: at
+  // run time the call can land on any method that overrides B, transitively
+  // down the class hierarchy. libclang records the site against the declared
+  // target (e.g. execute() -> base::doSomething for a pure-virtual base), so
+  // callers(child::doSomething) -- the concrete override -- comes back empty
+  // even though execute reaches it by dynamic dispatch. For each caller -> B
+  // calls edge and each transitive override M of B, store a caller -> M edge so
+  // callers(M, include_overrides) recovers the virtual caller in one hop. The
+  // bridge is the existing 'overrides' edge (6). Idempotent: kind-18 edges are
+  // deleted and rebuilt each pass. Mirrors
+  // indexer/storage.py:materialize_dispatch_calls() byte-identically.
+  db_.exec("DELETE FROM edge WHERE kind = 18");
+  db_.exec(
+      "WITH RECURSIVE dispatch(base_id, target_id) AS ("
+      "    SELECT dst_id AS base_id, src_id AS target_id"
+      "    FROM edge WHERE kind = 6"
+      "  UNION"
+      "    SELECT d.base_id, o.src_id"
+      "    FROM dispatch d"
+      "    JOIN edge o ON o.dst_id = d.target_id AND o.kind = 6"
+      ") "
+      "INSERT OR IGNORE INTO edge (src_id, dst_id, kind, count) "
+      "SELECT c.src_id, d.target_id, 18, c.count "
+      "FROM edge c "
+      "JOIN dispatch d ON d.base_id = c.dst_id "
+      "WHERE c.kind = 1 "
+      "  AND c.src_id != d.target_id");
+}
+
 std::vector<Edge> Storage::cross_repo_edges() {
   auto st = db_.prepare(
       "SELECT e.id, e.src_id, e.dst_id, e.kind, e.count, "
@@ -3733,6 +3765,8 @@ void Storage::materialise_entity_edges() {
 int Storage::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
   rollup_edge_counts();
+  // Materialise virtual-dispatch caller edges (kind 18) from calls + overrides.
+  materialize_dispatch_calls();
   // Materialise Layer-1 entity_edge from the Layer-0 graph.
   materialise_entity_edges();
   // Count remaining stub symbols: a minted placeholder never backfilled by a

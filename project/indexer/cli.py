@@ -74,7 +74,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.42.0"
+VERSION = "0.43.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -1512,7 +1512,8 @@ def cmd_graph_callers(args) -> int:
     sym, rc = _select_symbol(g, args)
     if sym is None:
         return rc
-    edges = g.edges_in(sym, ("calls",), limit=args.limit)
+    kinds = ("calls", "dispatch_calls") if args.include_overrides else ("calls",)
+    edges = g.edges_in(sym, kinds, limit=args.limit)
     _emit_edges(g, edges, args, f"callers of {sym.name} (@{sym.loc}):")
     return 0
 
@@ -2601,6 +2602,12 @@ def main(argv=None) -> int:
 
     q = gsub.add_parser("callers", help="functions that call the symbol")
     _selector(q)
+    q.add_argument(
+        "--include-overrides",
+        action="store_true",
+        help="also show virtual-dispatch callers: callers of a virtual base "
+        "method this one overrides (via materialised dispatch_calls edges)",
+    )
     q.set_defaults(fn=cmd_graph_callers)
 
     q = gsub.add_parser("callees", help="functions the symbol calls")
