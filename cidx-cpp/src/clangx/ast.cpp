@@ -523,19 +523,16 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
 }
 
 bool AstIndexer::store(const Symbol &sym) {
+  // Always upsert (ast.py mirror): add_symbol's own CASE-WHEN/COALESCE logic
+  // never lets a lesser declaration cursor downgrade an already-stored
+  // definition's location/extent — it only fills gaps (e.g. the decl site,
+  // G15) and refreshes fields the row didn't carry yet (e.g. end_line/
+  // end_col backfilled by a schema migration). A prior version skipped the
+  // write entirely for an already-resolved symbol, so add_symbol (the only
+  // place that writes end_line/end_col) was never reached again on reindex.
   const std::optional<Symbol> existing = db_.lookup_symbol(sym.usr);
-  if (existing && existing->resolved) {
-    // The definition is already stored, but this cursor may be the header
-    // declaration of it — record the decl site if missing (G15).
-    if (sym.decl_file_id && !existing->decl_file_id) {
-      db_.update_symbol(sym.usr, {{"decl_file_id", SqlValue(*sym.decl_file_id)},
-                                  {"decl_line", SqlValue(*sym.decl_line)},
-                                  {"decl_col", SqlValue(*sym.decl_col)}});
-    }
-    return false; // skipped
-  }
   db_.add_symbol(sym);
-  return true;
+  return !(existing && existing->resolved); // true = counted as "stored"
 }
 
 // M4: txn-free inner work — caller MUST own an open transaction.
