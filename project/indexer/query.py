@@ -395,6 +395,25 @@ class Sym:
         on spelling -- stubs are minted NAMED from the reference cursor."""
         return not self.resolved and (self.file is None or self.external)
 
+    def source(self, default_lines: int = 10, *, encoding: str = "utf-8") -> str:
+        """The symbol's own source text, read straight off disk.
+
+        Slices ``(line, col)..(end_line, end_col)`` -- its stored extent -- via
+        :meth:`File.source`. When no extent is stored (decl-only / stub), falls
+        back to ``default_lines`` whole lines starting at ``line``. Returns
+        ``""`` when the symbol has no file/line; raises ``OSError`` if the file
+        can't be read (mirrors :meth:`File.source`)."""
+        if not self.file or not self.line:
+            return ""
+        start = (self.line, self.col or 1)
+        if self.end_line is not None:
+            return self.file.source(
+                start, (self.end_line, self.end_col or 1), encoding=encoding
+            )
+        end_line = self.line + max(default_lines - 1, 0)
+        text = self.file.source(start, (end_line, 1 << 30), encoding=encoding)
+        return text[:-1] if text.endswith("\n") else text
+
     def to_dict(self) -> dict[str, Any]:
         """Stable JSON-serializable view. Identical-by-spec to the C++ port."""
         return {

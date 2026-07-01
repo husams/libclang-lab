@@ -8,6 +8,7 @@ decl-vs-def locations, a function with a real type_info signature).
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -364,6 +365,45 @@ def test_distinct_decl_and_def(tmp_path):
         # signature parsed from type_info
         assert fn.return_type.spelling == "int"
         assert [a.spelling for a in fn.arguments] == ["int", "int"]
+
+
+# --------------------------------------------------------------------------- #
+# Entity.source() (#25) -- delegates to the wrapped Sym's own source() region
+# --------------------------------------------------------------------------- #
+
+
+def test_entity_source_delegates_to_sym(cb, ids, tmp_path):
+    src = tmp_path / "region.c"
+    src.write_text("int main(void) {\n    return 0;\n}\n")
+    main = cb.get(ids["main"])
+    patched = cb.wrap(
+        replace(
+            main.sym,
+            file=cb.graph.make_file(str(src)),
+            line=1,
+            col=1,
+            end_line=3,
+            end_col=1,
+        )
+    )
+    assert patched.source() == "int main(void) {\n    return 0;\n}"
+
+
+def test_entity_source_default_lines(cb, ids, tmp_path):
+    src = tmp_path / "region2.c"
+    src.write_text("\n".join(f"line{i}" for i in range(1, 5)) + "\n")
+    main = cb.get(ids["main"])
+    patched = cb.wrap(
+        replace(
+            main.sym,
+            file=cb.graph.make_file(str(src)),
+            line=1,
+            col=1,
+            end_line=None,
+            end_col=None,
+        )
+    )
+    assert patched.source(default_lines=2) == "line1\nline2"
 
 
 # --------------------------------------------------------------------------- #

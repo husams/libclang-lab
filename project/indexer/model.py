@@ -805,6 +805,12 @@ class Entity:
             self.sym.end_col,
         )
 
+    def source(self, default_lines: int = 10, *, encoding: str = "utf-8") -> str:
+        """This entity's own source text, read straight off disk over its
+        stored extent (falling back to ``default_lines`` lines from its start
+        line when no extent is known). See :meth:`Sym.source`."""
+        return self.sym.source(default_lines, encoding=encoding)
+
     @property
     def definition(self) -> Optional[Location]:
         """Where the entity is defined, or None if only declared."""
