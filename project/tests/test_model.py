@@ -160,9 +160,17 @@ def test_callgraph_leaf_has_empty_walk(cb, ids):
 
 
 def test_callgraph_reaches_method_callee(cb, ids):
-    # render -> Base::draw: the walk surfaces a Method callee
+    # render -> Base::draw (static virtual call); callgraph folds in the
+    # dispatch_calls targets by default, so both overrides surface too.
     render = cb.get(ids["render"])
-    assert {e.id for e, _ in render.callgraph()} == {ids["Base::draw"]}
+    assert {e.id for e, _ in render.callgraph()} == {
+        ids["Base::draw"],
+        ids["Derived::draw"],
+        ids["Derived2::draw"],
+    }
+    # The static-only walk is available via the devirt engine's default.
+    static = {s.callee.id for s in render.devirtualized_callgraph()}
+    assert static == {ids["Base::draw"]}
 
 
 def test_callgraph_available_on_all_callable_kinds(cb, ids):

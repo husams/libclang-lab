@@ -1719,6 +1719,7 @@ class GraphQuery:
         sym,
         limit: int = ...,
         include_instantiations: Literal[False] = ...,
+        include_overrides: bool = ...,
     ) -> list[Sym]: ...
 
     @overload
@@ -1728,6 +1729,7 @@ class GraphQuery:
         limit: int = ...,
         *,
         include_instantiations: Literal[True],
+        include_overrides: bool = ...,
     ) -> list[CallerWithContext]: ...
 
     def callees(
@@ -1735,22 +1737,29 @@ class GraphQuery:
         sym,
         limit: int = 500,
         include_instantiations: bool = False,
+        include_overrides: bool = True,
     ) -> "list[Sym] | list[CallerWithContext]":
-        """Symbols that ``sym`` calls (outgoing ``calls``).
+        """Symbols that ``sym`` calls.
 
-        ``include_instantiations=False`` (default) — returns only direct callees
-        of the literal node ``sym``, byte-identical to the v12 behaviour.
-        Return type: ``list[Sym]``.
+        Returns both the direct callees (outgoing ``calls``) **and** the
+        virtual-dispatch targets: when ``sym`` calls a virtual method B, the
+        recorded edge is to B's declared node (e.g. ``execute() ->
+        base::doSomething``); the concrete override(s) B can reach at run time
+        are read in one hop from the materialised ``dispatch_calls`` edges (kind
+        18) that ``resolve`` builds. This is what lets ``callgraph()`` descend
+        through a virtual call into the real override (and on into what *it*
+        calls, e.g. ``print()``). Direct callees first, deduplicated.
 
-        ``include_instantiations=True`` — rolls up callees of all
-        implicit-instantiation members of ``sym``.
-        Return type: ``list[CallerWithContext]``.
-
-        See :meth:`callers` for a description of the
-        :class:`CallerWithContext` fields.
+        ``include_overrides=False`` — opt out to the literal outgoing ``calls``
+        only (the pre-dispatch view). Ignored when
+        ``include_instantiations=True``.
         """
         direct = self._peers(sym, ("calls",), "out", limit)
         if not include_instantiations:
+            if include_overrides:
+                virtual = self._peers(sym, ("dispatch_calls",), "out", limit)
+                seen = {s.id for s in direct}
+                return direct + [s for s in virtual if s.id not in seen]
             return direct
         result: list[CallerWithContext] = [
             CallerWithContext(sym=s, via_instantiation=None, via_template_args=[])
@@ -1829,7 +1838,13 @@ class GraphQuery:
     def virtual_callees(self, fn) -> list[Sym]:
         """Callees of `fn` that are virtual -- the dispatch points inside it.
         Pair with dispatch_targets() to expand each into its real target set."""
-        return [c for c in self.callees(fn) if self.is_virtual_method(c)]
+        # The declared virtual call sites -- NOT the dispatch_calls targets that
+        # callees() now folds in by default (those are the expansion of these).
+        return [
+            c
+            for c in self.callees(fn, include_overrides=False)
+            if self.is_virtual_method(c)
+        ]
 
     # ===================================================================== #
     # 4b. DEVIRTUALIZATION — PHASE 1 (selection maps, NO pruning)

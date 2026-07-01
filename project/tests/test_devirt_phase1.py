@@ -1198,16 +1198,23 @@ class TestDefaultCallgraphUnchanged:
             (ids["ext_fn"], 2),
         ]
 
-    def test_sc11_callgraph_render_unchanged(self, g, ids):
-        """SC-11: render.callgraph() (has a virtual callee) is unchanged."""
+    def test_sc11_callgraph_render_folds_dispatch(self, g, ids):
+        """SC-11: render.callgraph() folds virtual dispatch by default -- it
+        reaches Base::draw AND its overrides via the dispatch_calls edges. The
+        static-only walk stays available on devirtualized_callgraph()."""
         from indexer.model import CodeBase, Callable
 
         with CodeBase(GraphQuery(g.db_path)) as cb:
             render = cb.get(ids["render"])
             assert isinstance(render, Callable)
             result = {e.id for e, _ in render.callgraph()}
-        # render -> Base::draw (static edge; Base::draw has no callees)
-        assert result == {ids["Base::draw"]}
+            static = {s.callee.id for s in render.devirtualized_callgraph()}
+        assert result == {
+            ids["Base::draw"],
+            ids["Derived::draw"],
+            ids["Derived2::draw"],
+        }
+        assert static == {ids["Base::draw"]}
 
     def test_sc12_callees_list_unchanged(self, g, ids):
         """SC-12: callees() list for helper is exactly [compute, ext_fn] (source order)."""
