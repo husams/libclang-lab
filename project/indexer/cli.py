@@ -1512,7 +1512,9 @@ def cmd_graph_callers(args) -> int:
     sym, rc = _select_symbol(g, args)
     if sym is None:
         return rc
-    kinds = ("calls", "dispatch_calls") if args.include_overrides else ("calls",)
+    # Virtual-dispatch callers (materialised dispatch_calls edges) are included
+    # by default; --direct-only restricts to the literal incoming calls edges.
+    kinds = ("calls",) if args.direct_only else ("calls", "dispatch_calls")
     edges = g.edges_in(sym, kinds, limit=args.limit)
     _emit_edges(g, edges, args, f"callers of {sym.name} (@{sym.loc}):")
     return 0
@@ -2603,10 +2605,10 @@ def main(argv=None) -> int:
     q = gsub.add_parser("callers", help="functions that call the symbol")
     _selector(q)
     q.add_argument(
-        "--include-overrides",
+        "--direct-only",
         action="store_true",
-        help="also show virtual-dispatch callers: callers of a virtual base "
-        "method this one overrides (via materialised dispatch_calls edges)",
+        help="only literal incoming calls (exclude virtual-dispatch callers "
+        "reached via materialised dispatch_calls edges, which are on by default)",
     )
     q.set_defaults(fn=cmd_graph_callers)
 

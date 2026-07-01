@@ -1,36 +1,19 @@
-// dispatch.cpp — definitions + call sites for dispatch.hpp.
+// dispatch.cpp — the exact discussed use case for cidx `dispatch_calls`
+// (virtual-dispatch caller edges, kind 18).
 //
-// Exercises, for `cidx graph callers ... --include-overrides`:
-//   * execute() -> base::doSomething        (the static calls edge)
-//   * child/sibling/grandchild::doSomething override base::doSomething
-//   * dispatch_calls: execute -> {child,sibling,grandchild}::doSomething
-//   * a DIRECT call to child::doSomething for contrast (direct vs virtual)
-#include "dispatch.hpp"
+// `execute()` calls the pure-virtual `doSomething()`, so the recorded call edge
+// is execute -> base::doSomething. `child` overrides doSomething. On the raw
+// graph callers(child::doSomething) is empty; after `resolve` materialises the
+// dispatch_calls edge, callers(child::doSomething, include_overrides=True)
+// returns `execute` (base's instance dispatches to the child's override).
 
-namespace dispatch {
+struct base {
+  virtual void doSomething() = 0;
+  void execute() {
+    doSomething();
+  }
+};
 
-void child::doSomething() {}
-void sibling::doSomething() {}
-void grandchild::doSomething() {}
-
-// The motivating caller: a concrete child, invoked through the base's
-// non-virtual execute(). At run time this reaches child::doSomething, but the
-// recorded calls edge is execute -> base::doSomething.
-void call() {
-  child c;
-  c.execute();
-}
-
-// Same shape one level deeper — reaches grandchild::doSomething at run time.
-void call_grandchild() {
-  grandchild g;
-  g.execute();
-}
-
-// A DIRECT (non-dispatch) call straight to the override. This makes
-// child::doSomething have a real incoming `calls` edge, so plain
-// callers(child::doSomething) returns `use_child` while `execute` shows up
-// only under --include-overrides.
-void use_child(child& c) { c.doSomething(); }
-
-}  // namespace dispatch
+struct child : public base {
+  void doSomething() override {}
+};

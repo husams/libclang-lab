@@ -92,7 +92,7 @@ struct ParsedArgs {
   std::optional<std::string> to_name;    // --to-name FUZZY
   std::optional<std::string> to_kind;    // --to-kind {17 kinds}
   // callers flag
-  bool include_overrides = false;        // --include-overrides (virtual callers)
+  bool direct_only = false;              // --direct-only (exclude virtual callers)
   // hierarchy flags
   bool transitive = false;               // --transitive (walk whole hierarchy)
   std::string access{"all"};             // --access {public,protected,private,all}

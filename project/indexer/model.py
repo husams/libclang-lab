@@ -1309,18 +1309,15 @@ class Callable(Entity):
         self,
         limit: int = 500,
         include_instantiations: bool = False,
-        include_overrides: bool = False,
+        include_overrides: bool = True,
     ) -> "list[Entity] | list[CallerWithContextModel]":
         """Entities that call this one.
 
-        ``include_instantiations=False`` (default) — direct callers only;
-        byte-identical to the v12 behaviour.  Return type: ``list[Entity]``.
-
-        ``include_overrides=True`` — also include callers that reach this method
-        by **virtual dispatch** (a static call to a virtual base method this one
-        overrides), read from the materialised ``dispatch_calls`` edges built by
-        ``resolve``. Return type: ``list[Entity]`` (ignored when
-        ``include_instantiations=True``).
+        Includes both direct callers and virtual-dispatch callers (a static call
+        to a virtual base method this one overrides), read from the materialised
+        ``dispatch_calls`` edges ``resolve`` builds -- so after index + resolve
+        this "just works" with no flag. Pass ``include_overrides=False`` for
+        direct callers only. Return type: ``list[Entity]``.
 
         ``include_instantiations=True`` — when this is a template
         method/function, rolls up callers of all implicit-instantiation
