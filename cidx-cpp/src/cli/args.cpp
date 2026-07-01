@@ -349,14 +349,14 @@ const char kGraphCallersUsage[] =
 
 const char kGraphCallersHelp[] =
     "usage: cidx graph callers [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
-    "                          [--include-overrides]\n"
+    "                          [--direct-only]\n"
     "\n"
     "options:\n"
     GRAPH_SELECTOR_OPTIONS
     "\n"
-    "  --include-overrides   also show virtual-dispatch callers: callers of a\n"
-    "                        virtual base method this one overrides (via\n"
-    "                        materialised dispatch_calls edges)";
+    "  --direct-only         only literal incoming calls; exclude virtual-\n"
+    "                        dispatch callers (materialised dispatch_calls edges,\n"
+    "                        which are included by default)";
 
 const char kGraphCalleesUsage[] =
     "usage: cidx graph callees [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
@@ -2094,8 +2094,7 @@ const Spec kGraphCallersSpec = {
     kGraphCallersUsage,
     kGraphCallersHelp,
     {GRAPH_SELECTOR_OPTS,
-     {"--include-overrides", '\0', ValueKind::kNone, "--include-overrides",
-      nullptr, 0}},
+     {"--direct-only", '\0', ValueKind::kNone, "--direct-only", nullptr, 0}},
     {},
     false,
     {},
@@ -2840,7 +2839,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
         return pa;
       }
       fill_graph_selector(st);
-      pa.include_overrides = st.flags.count("--include-overrides") != 0;
+      pa.direct_only = st.flags.count("--direct-only") != 0;
     } else if (pa.what == "callees") {
       ParseState st = parse_leaf(kGraphCalleesSpec, argv, what.next, extras);
       if (st.help) {

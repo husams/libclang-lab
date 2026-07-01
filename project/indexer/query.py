@@ -1643,22 +1643,21 @@ class GraphQuery:
         sym,
         limit: int = 500,
         include_instantiations: bool = False,
-        include_overrides: bool = False,
+        include_overrides: bool = True,
     ) -> "list[Sym] | list[CallerWithContext]":
-        """Symbols that call ``sym`` (incoming ``calls``).
+        """Symbols that call ``sym``.
 
-        ``include_instantiations=False`` (default) — returns only direct callers
-        of the literal node ``sym``, byte-identical to the v12 behaviour.
-        Return type: ``list[Sym]``.
+        Returns both the direct callers (incoming ``calls``) **and** the
+        virtual-dispatch callers: when ``sym`` overrides a virtual base method B,
+        a static call recorded against B (e.g. ``execute() -> base::doSomething``)
+        can land on ``sym`` at run time. Those are read in one hop from the
+        materialised ``dispatch_calls`` edges (kind 18) that ``resolve`` builds --
+        so once you index + resolve, ``callers(child::doSomething)`` returns
+        ``execute`` with no extra flag. Direct callers come first, deduplicated.
 
-        ``include_overrides=True`` — also return callers that reach ``sym`` by
-        **virtual dispatch**: when ``sym`` is a method that overrides a virtual
-        base method B, a static call recorded against B (e.g. ``execute() ->
-        base::doSomething``) can land on ``sym`` at run time. These are read in
-        one hop from the materialised ``dispatch_calls`` edges (kind 18) built by
-        ``resolve``. Deduplicated with the direct callers, order-stable (direct
-        first). Return type: ``list[Sym]`` (ignored when
-        ``include_instantiations=True``). Requires a ``resolve``d index.
+        ``include_overrides=False`` — opt out to get **only** the direct callers
+        of the literal node ``sym`` (the pre-dispatch behaviour). Ignored when
+        ``include_instantiations=True``.
 
         ``include_instantiations=True`` — when ``sym`` is a template method/
         function, rolls up callers of all implicit-instantiation members

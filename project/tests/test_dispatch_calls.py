@@ -76,42 +76,40 @@ def _resolved(tmp_path, **kw):
 
 
 def test_override_has_no_direct_callers(tmp_path):
-    """The bug: the concrete override has no incoming ``calls`` edge."""
+    """The bug: the concrete override has no incoming ``calls`` edge; the
+    direct-only view (opt out) is empty."""
     db_path, ids = _resolved(tmp_path)
     with GraphQuery(db_path) as g:
-        assert g.callers(ids["child::do"]) == []
+        assert g.callers(ids["child::do"], include_overrides=False) == []
 
 
-def test_include_overrides_recovers_virtual_caller(tmp_path):
-    """The fix: ``execute`` reaches ``child::doSomething`` by dispatch."""
+def test_default_recovers_virtual_caller(tmp_path):
+    """The fix: ``callers`` includes ``execute`` BY DEFAULT (no flag) after
+    resolve materialises the dispatch_calls edge."""
     db_path, ids = _resolved(tmp_path)
     with GraphQuery(db_path) as g:
-        got = [s.spelling for s in g.callers(ids["child::do"], include_overrides=True)]
-        assert got == ["execute"]
+        assert [s.spelling for s in g.callers(ids["child::do"])] == ["execute"]
 
 
 def test_base_direct_callers_unchanged(tmp_path):
-    """The base method keeps its ordinary direct caller; no double-count."""
+    """The base method keeps its ordinary direct caller; no double-count (no
+    dispatch_calls edge points AT the base, so default == direct)."""
     db_path, ids = _resolved(tmp_path)
     with GraphQuery(db_path) as g:
         assert [s.spelling for s in g.callers(ids["base::do"])] == ["execute"]
-        # include_overrides on the base adds nothing new (execute already direct)
         assert [
             s.spelling
-            for s in g.callers(ids["base::do"], include_overrides=True)
+            for s in g.callers(ids["base::do"], include_overrides=False)
         ] == ["execute"]
 
 
 def test_transitive_override_two_levels(tmp_path):
-    """A call to base dispatches to a grandchild override two hops down."""
+    """A call to base dispatches to a grandchild override two hops down --
+    surfaced by default."""
     db_path, ids = _resolved(tmp_path, grandchild=True)
     with GraphQuery(db_path) as g:
-        assert g.callers(ids["gchild::do"]) == []
-        got = [
-            s.spelling
-            for s in g.callers(ids["gchild::do"], include_overrides=True)
-        ]
-        assert got == ["execute"]
+        assert g.callers(ids["gchild::do"], include_overrides=False) == []
+        assert [s.spelling for s in g.callers(ids["gchild::do"])] == ["execute"]
 
 
 def test_dispatch_calls_edge_materialised(tmp_path):
@@ -139,10 +137,9 @@ def test_resolve_is_idempotent(tmp_path):
     assert n1 == n3 == 2
 
 
-def test_default_callers_byte_identical(tmp_path):
-    """include_overrides defaults off: callers() is unchanged from before."""
+def test_direct_only_opt_out(tmp_path):
+    """include_overrides=False restores the pre-dispatch direct-only view."""
     db_path, ids = _resolved(tmp_path, grandchild=True)
     with GraphQuery(db_path) as g:
-        # No override node gains a caller unless explicitly opted in.
-        assert g.callers(ids["child::do"]) == []
-        assert g.callers(ids["gchild::do"]) == []
+        assert g.callers(ids["child::do"], include_overrides=False) == []
+        assert g.callers(ids["gchild::do"], include_overrides=False) == []

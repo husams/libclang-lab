@@ -2814,7 +2814,7 @@ int cmd_graph_callers(const ParsedArgs &args, Context &ctx) {
                                     args.kind, args.first, *ctx.err);
   if (!sym) return rc;
   std::vector<std::string> kinds{"calls"};
-  if (args.include_overrides) {
+  if (!args.direct_only) {
     kinds.emplace_back("dispatch_calls");
   }
   auto edges = h->g->edges_in(sym->id, kinds, args.graph_limit);
