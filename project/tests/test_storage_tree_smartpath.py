@@ -40,6 +40,8 @@ def tree(tmp_path):
     db.set_active_clone(rid, cid)
     comp_id = db.add_component("proj-core", str(root_dir))
     db.set_component_repository(comp_id, rid)
+    # v24 grouping stores the path clone-relative so `switch` repoints it.
+    db.relativize_component(comp_id, str(root_dir))
 
     for rel, fname in [("", "sample.hpp"), ("src", "util.c"), ("src", "sample.hpp")]:
         p = root_dir / rel / fname if rel else root_dir / fname
@@ -183,3 +185,158 @@ def test_yielded_file_is_indexable(tree):
     res = util.index()
     assert res["symbols"] == 1
     assert [s.spelling for s in util.symbols()] == ["add"]
+
+
+# -- File.save / File.remove ------------------------------------------------ #
+
+
+def test_file_save_persists_fields(tree):
+    db, _rid, comp_id, _root = tree
+    f = next(f for f in db.get_component_by_id(comp_id).files("util"))
+    f.compile_options = ["-std=c17", "-DX=1"]
+    f.driver = "clang"
+    f.save()
+    reloaded = db.get_file_by_id(f.id)
+    assert reloaded.compile_options == ["-std=c17", "-DX=1"]
+    assert reloaded.driver == "clang"
+
+
+def test_file_remove(tree):
+    db, _rid, comp_id, _root = tree
+    src = db.get_directory(comp_id, "src")
+    util = next(f for f in src.files() if f.name == "util.c")
+    fid = util.id
+    util.remove()
+    assert db.get_file_by_id(fid) is None
+    assert [f.name for f in src.files()] == ["sample.hpp"]
+
+
+# -- Component.add_file / remove_file / save -------------------------------- #
+
+
+def test_component_add_file(tree):
+    db, _rid, comp_id, root = tree
+    (os.path.join(root, "lib"))  # dir need not exist to register the row
+    comp = db.get_component_by_id(comp_id)
+    f = comp.add_file("lib/extra.c", compile_options=["-std=c11"])
+    assert f._storage is db and f.name == "extra.c"
+    assert os.path.realpath(f.abspath) == os.path.realpath(
+        os.path.join(root, "lib", "extra.c")
+    )
+    # visible through the component + its new directory
+    assert "extra.c" in [x.name for x in comp.files("extra")]
+    assert [d.path for d in comp.directories("lib")] == ["lib"]
+
+
+def test_component_remove_file_filter(tree):
+    db, _rid, comp_id, _root = tree
+    comp = db.get_component_by_id(comp_id)
+    # two sample.hpp (root + src); remove both by filter
+    removed = comp.remove_file("sample.hpp")
+    assert removed == 2
+    assert [f.name for f in comp.files()] == ["util.c"]
+
+
+def test_component_remove_file_requires_filter(tree):
+    db, _rid, comp_id, _root = tree
+    with pytest.raises(ValueError):
+        db.get_component_by_id(comp_id).remove_file("")
+
+
+def test_component_save_persists_fields(tree):
+    db, _rid, comp_id, _root = tree
+    comp = db.get_component_by_id(comp_id)
+    comp.name = "renamed-core"
+    comp.version = "9.9"
+    comp.save()
+    reloaded = db.get_component_by_id(comp_id)
+    assert reloaded.name == "renamed-core" and reloaded.version == "9.9"
+
+
+# -- Repository.add_component / remove_component ---------------------------- #
+
+
+def test_repository_add_component(tmp_path, tree):
+    db, rid, _comp_id, _root = tree
+    other = tmp_path / "proj" / "vendor"
+    other.mkdir(parents=True, exist_ok=True)
+    repo = db.get_repository_by_id(rid)
+    comp = repo.add_component("vendor", str(other))
+    assert comp._storage is db and comp.repo.id == rid
+    # grouped path relativized under the active clone root
+    assert comp.path == "vendor"
+    assert {c.name for c in repo.components()} == {"proj-core", "vendor"}
+
+
+def test_repository_remove_component_filter(tree):
+    db, rid, _comp_id, _root = tree
+    repo = db.get_repository_by_id(rid)
+    assert repo.remove_component("core") == 1
+    assert list(repo.components()) == []
+
+
+def test_repository_remove_component_requires_filter(tree):
+    db, rid, _comp_id, _root = tree
+    with pytest.raises(ValueError):
+        db.get_repository_by_id(rid).remove_component("")
+
+
+# -- Repository.add_clone / switch / remove_clone --------------------------- #
+
+
+def test_repository_add_clone_and_switch(tmp_path, tree):
+    db, rid, comp_id, root = tree
+    wt = tmp_path / "proj-wt"
+    (wt / "src").mkdir(parents=True)
+    (wt / "sample.hpp").write_text(SRC)
+    (wt / "src" / "util.c").write_text(SRC)
+    repo = db.get_repository_by_id(rid)
+    repo.add_clone(str(wt), label="wt")
+    # switch to the worktree; component paths now resolve under it
+    clone = repo.switch("wt")
+    assert clone.label == "wt"
+    assert os.path.realpath(repo.path) == os.path.realpath(str(wt))
+    comp = db.get_component_by_id(comp_id)
+    assert os.path.realpath(comp.abspath) == os.path.realpath(str(wt))
+    # switch back by the clone label
+    repo.switch("main")
+    assert os.path.realpath(db.get_repository_by_id(rid).path) == os.path.realpath(root)
+
+
+def test_repository_switch_ambiguous_and_missing(tmp_path, tree):
+    db, rid, _comp_id, _root = tree
+    repo = db.get_repository_by_id(rid)
+    repo.add_clone(str(tmp_path / "a"), label="alpha")
+    repo.add_clone(str(tmp_path / "b"), label="alto")
+    with pytest.raises(LookupError, match="ambiguous"):
+        repo.switch("al")
+    with pytest.raises(LookupError, match="no clone"):
+        repo.switch("zzz")
+
+
+def test_repository_remove_clone_filter(tmp_path, tree):
+    db, rid, _comp_id, _root = tree
+    repo = db.get_repository_by_id(rid)
+    repo.add_clone(str(tmp_path / "gone"), label="scratch")
+    assert repo.remove_clone("scratch") == 1
+    assert "scratch" not in [c.label for c in db.list_clones(rid)]
+
+
+def test_repository_remove_active_clone_clears_pointer(tree):
+    db, rid, _comp_id, root = tree
+    repo = db.get_repository_by_id(rid)
+    # the only clone (root) is active; removing it clears the pointer
+    assert repo.remove_clone(os.path.basename(root)) == 1
+    assert repo.active_clone_id is None
+    assert db.get_repository_by_id(rid).active_clone_id is None
+
+
+def test_repository_save_persists_fields(tree):
+    db, rid, _comp_id, _root = tree
+    repo = db.get_repository_by_id(rid)
+    repo.name = "proj-renamed"
+    repo.remote_url = "git@example.com:proj-renamed.git"
+    repo.save()
+    reloaded = db.get_repository_by_id(rid)
+    assert reloaded.name == "proj-renamed"
+    assert reloaded.remote_url == "git@example.com:proj-renamed.git"
