@@ -852,19 +852,41 @@ class GraphQuery:
     # -- internal: file path / Sym construction ------------------------------ #
 
     def _files(self) -> dict[int, tuple[str, Optional[str]]]:
-        """{file_id: (abs_path, component_name)} -- loaded once, cached."""
+        """{file_id: (abs_path, component_name)} -- loaded once, cached.
+
+        Routes each distinct component through ``Storage.component_abs_base``
+        (the single resolution choke point, v24) rather than joining
+        ``component.path`` in raw -- a grouped component's stored path is
+        RELATIVE to its repository's active clone root, so using it as-is
+        would hand back a clone-relative (unopenable) path."""
         if self._file_cache is None:
+            from indexer.storage import Component, Storage
+
+            store = Storage.from_connection(self._c, self.db_path)
+            abs_base_cache: dict[tuple, str] = {}
             cache: dict[int, tuple[str, Optional[str]]] = {}
             for r in self._c.execute(
                 "SELECT f.id AS fid, c.name AS cname, c.path AS root, "
+                "       c.version AS version, c.repository_id AS repo_id, "
                 "       d.path AS rel, f.name AS name "
                 "FROM file f JOIN directory d ON d.id = f.directory_id "
                 "JOIN component c ON c.id = d.component_id"
             ):
+                key = (r["root"], r["version"], r["repo_id"])
+                eff = abs_base_cache.get(key)
+                if eff is None:
+                    comp_stub = Component(
+                        name="",
+                        path=r["root"],
+                        version=r["version"],
+                        repository_id=r["repo_id"],
+                    )
+                    eff = store.component_abs_base(comp_stub)
+                    abs_base_cache[key] = eff
                 path = (
-                    os.path.join(r["root"], r["rel"], r["name"])
+                    os.path.join(eff, r["rel"], r["name"])
                     if r["rel"]
-                    else os.path.join(r["root"], r["name"])
+                    else os.path.join(eff, r["name"])
                 )
                 cache[r["fid"]] = (path, r["cname"])
             self._file_cache = cache

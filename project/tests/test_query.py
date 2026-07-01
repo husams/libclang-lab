@@ -6,6 +6,7 @@ conftest.py -- no libclang, no network.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import pytest
@@ -18,6 +19,7 @@ from indexer.query import (
     NoEdgesError,
     default_db_path,
 )
+from indexer.storage import Storage, Symbol
 
 
 # --------------------------------------------------------------------------- #
@@ -400,3 +402,50 @@ def test_source_default_lines_clips_at_eof(tmp_path, g):
 def test_source_empty_without_file_or_line(g):
     sym = replace(g.get("c:@F@main"), file=None, line=None)
     assert sym.source() == ""
+
+
+def test_files_resolves_grouped_relative_component_path(tmp_path):
+    """Regression: a component grouped under a repository stores its path
+    RELATIVE to the active clone root (v24 -- see relativize_component). The
+    read-only GraphQuery._files() cache must route through
+    Storage.component_abs_base like the writable side's file_abs_path does,
+    else Sym.file.path comes back clone-relative and unopenable -- e.g.
+    Sym.source() raising FileNotFoundError on a perfectly valid index."""
+    clone_root = tmp_path / "clone"
+    clone_root.mkdir()
+    src = clone_root / "region.c"
+    src.write_text("int main(void) { return 0; }\n")
+
+    db_path = str(tmp_path / "i.db")
+    with Storage(db_path) as db:
+        rid = db.add_repository("r")
+        clone_id = db.add_clone(rid, str(clone_root))
+        db.set_active_clone(rid, clone_id)
+        comp = db.add_component("r", str(clone_root), "repo")
+        db.set_component_repository(comp, rid)
+        db.relativize_component(comp, str(clone_root))  # path becomes "."
+        root = db.add_directory(comp, "")
+        fid = db.add_file(root, "region.c")
+        db.add_symbol(
+            Symbol(
+                usr="c:@F@main",
+                spelling="main",
+                kind="function",
+                qual_name="main",
+                file_id=fid,
+                line=1,
+                col=1,
+                is_definition=True,
+                resolved=True,
+            )
+        )
+
+    g = GraphQuery(db_path)
+    try:
+        sym = g.get("c:@F@main")
+        assert sym.file is not None
+        assert os.path.isabs(sym.file.path)
+        assert os.path.realpath(sym.file.path) == os.path.realpath(str(src))
+        assert sym.source(default_lines=1) == "int main(void) { return 0; }"
+    finally:
+        g.close()
