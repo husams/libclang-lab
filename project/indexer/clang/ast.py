@@ -277,9 +277,14 @@ def _index_file_notxn(
     """M4: txn-free inner work of _index_file; caller MUST own an open transaction.
 
     Store the symbols of one file from this TU; returns (stored, skipped).
-    A symbol is stored only when it is NOT already in the database, or the
-    stored row is unresolved (no definition seen yet). A row that is already
-    resolved is left untouched and counted as skipped.
+    Every cursor is upserted via add_symbol(), whose own CASE-WHEN/COALESCE
+    logic never lets a lesser declaration cursor downgrade an already-stored
+    definition's location/extent -- it only fills in gaps (e.g. the decl
+    site) and refreshes fields the row didn't carry yet (e.g. end_line/
+    end_col backfilled by a schema migration). A symbol whose stored row was
+    already resolved (a definition seen previously) is counted as skipped;
+    everything else (new symbol, or a decl now superseded by this cursor's
+    definition) is counted as stored.
     """
     stored = skipped = 0
     for cursor in _file_cursors(tu, filename):
@@ -287,20 +292,11 @@ def _index_file_notxn(
         if sym is None:
             continue
         existing = db.lookup_symbol(sym.usr)
-        if existing is not None and existing.resolved:
-            # The definition is already stored, but this cursor may be the
-            # header declaration of it -- record the decl site if missing.
-            if sym.decl_file_id is not None and existing.decl_file_id is None:
-                db.update_symbol(
-                    sym.usr,
-                    decl_file_id=sym.decl_file_id,
-                    decl_line=sym.decl_line,
-                    decl_col=sym.decl_col,
-                )
-            skipped += 1
-            continue
         db.add_symbol(sym)
-        stored += 1
+        if existing is not None and existing.resolved:
+            skipped += 1
+        else:
+            stored += 1
     return stored, skipped
 
 

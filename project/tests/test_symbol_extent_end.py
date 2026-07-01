@@ -122,3 +122,43 @@ def test_query_sym_exposes_end_and_span(db_path):
         assert d["end_col"] == sym.end_col
         # span slices the whole entity: file:line-end_line
         assert sym.span == f"{sym.file.name}:{sym.line}-{sym.end_line}"
+
+
+def test_reindex_backfills_end_line_on_an_already_resolved_symbol():
+    """A symbol indexed before the v25 migration is stored as `resolved` with
+    end_line/end_col NULL (storage.py's migration comment promises "a reindex
+    populates them from the AST"). _index_file_notxn used to skip re-storing
+    any already-resolved symbol entirely -- add_symbol() (the only place that
+    writes end_line/end_col) was never called again, so a reindex could never
+    actually backfill it. Simulate that legacy state and assert a reindex now
+    fixes it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "shapes_ext.c")
+        with open(src, "w") as fh:
+            fh.write("int add(int a, int b) {\n    int s = a + b;\n    return s;\n}\n")
+        db_path = os.path.join(tmp, "i.db")
+        db = Storage(db_path)
+        db.add_component("t", tmp)
+        with db.transaction():
+            tu = clang_parse(src, clang_args())
+            A.index_symbols(db, tu, db.add_file_path(src))
+
+        row = _row(db._conn, "add")
+        assert row[2] is not None, "fixture must index end_line normally first"
+
+        db._conn.execute(
+            "UPDATE symbol SET end_line = NULL, end_col = NULL "
+            "WHERE spelling = 'add' AND is_definition = 1"
+        )
+        db._conn.commit()
+        row = _row(db._conn, "add")
+        assert row[2] is None, "fixture didn't actually null out end_line"
+
+        with db.transaction():
+            tu = clang_parse(src, clang_args())
+            A.index_symbols(db, tu, db.add_file_path(src))
+
+        row = _row(db._conn, "add")
+        assert row[2] is not None, "reindex must backfill end_line on a resolved symbol"
+        assert row[0] == 1 and row[2] == 4, (row[0], row[2])
