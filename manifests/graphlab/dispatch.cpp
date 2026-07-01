@@ -17,3 +17,11 @@ struct base {
 struct child : public base {
   void doSomething() override {}
 };
+
+// The caller: a concrete `child`, invoked through the base's non-virtual
+// execute(). At run time this reaches child::doSomething, but the recorded
+// call edge is execute -> base::doSomething.
+void call() {
+  child c;
+  c.execute();
+}
