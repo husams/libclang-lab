@@ -102,6 +102,19 @@ ExpansionLoc cursor_location(LibClang &lib, CXCursor cursor) {
   return loc;
 }
 
+// End of cursor.extent as an expansion site -- the closing '}' of a function or
+// method definition, or the full extent of a class/struct/union/typedef decl.
+// Uses clang_getExpansionLocation to match clang.cindex's extent.end.line/column
+// (cindex resolves SourceLocation line/column via the expansion location).
+ExpansionLoc cursor_extent_end(LibClang &lib, CXCursor cursor) {
+  ExpansionLoc loc;
+  unsigned offset = 0;
+  lib.clang_getExpansionLocation(
+      lib.clang_getRangeEnd(lib.clang_getCursorExtent(cursor)), &loc.file,
+      &loc.line, &loc.col, &offset);
+  return loc;
+}
+
 // Declaration location of a mint target's reference cursor. The target of a
 // mint (callee/base/override/primary) carries a real source location even when
 // its definition body is never separately indexed -- e.g. an implicit/defaulted
@@ -482,6 +495,12 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
   sym.file_id = file_id;
   sym.line = static_cast<int64_t>(loc.line);
   sym.col = static_cast<int64_t>(loc.col);
+  // End of this cursor's own extent, paired with (line, col) so
+  // (line..end_line) slices the whole entity (ast.py:_to_symbol). The upsert
+  // moves end_line/end_col in lockstep with line/col.
+  const ExpansionLoc end = cursor_extent_end(lib, cursor);
+  sym.end_line = static_cast<int64_t>(end.line);
+  sym.end_col = static_cast<int64_t>(end.col);
   // A declaration cursor records itself as the decl site too; the upsert
   // keeps it when the definition later takes file/line/col (ast.py:117-121).
   if (!is_def) {

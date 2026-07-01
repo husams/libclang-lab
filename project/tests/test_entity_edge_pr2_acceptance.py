@@ -87,12 +87,12 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_24():
-    """SCHEMA_VERSION must be 24 after the v23→v24 clone-relative component paths."""
+def test_schema_version_is_25():
+    """SCHEMA_VERSION must be 25 after the v24→v25 symbol extent-end columns."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 24, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 24. "
-        "storage.py SCHEMA_VERSION must be bumped to 24 (clone-relative paths)."
+    assert storage.SCHEMA_VERSION == 25, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 25. "
+        "storage.py SCHEMA_VERSION must be bumped to 25 (symbol end_line/end_col)."
     )
 
 
@@ -319,15 +319,15 @@ def test_cpp_version_is_0410():
     )
 
 
-def test_cpp_schema_version_is_24():
-    """C++ kSchemaVersion must be 24 after the v23->v24 clone-relative paths."""
+def test_cpp_schema_version_is_25():
+    """C++ kSchemaVersion must be 25 after the v24->v25 symbol extent-end columns."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 24, (
-        f"C++ kSchemaVersion is {version}; expected 24. "
-        "Bump kSchemaVersion 23 -> 24 in storage.hpp (clone-relative paths)."
+    assert version == 25, (
+        f"C++ kSchemaVersion is {version}; expected 25. "
+        "Bump kSchemaVersion 24 -> 25 in storage.hpp (symbol end_line/end_col)."
     )
 
 

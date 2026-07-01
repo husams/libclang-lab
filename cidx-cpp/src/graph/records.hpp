@@ -50,6 +50,8 @@ struct Sym {
   std::optional<std::string> file; // abs path of best-known location, or nullopt
   std::optional<int64_t> line;
   std::optional<int64_t> col;
+  std::optional<int64_t> end_line; // v25: end of the symbol's own extent at
+  std::optional<int64_t> end_col;  // (line, col); nullopt for decl-only / stubs
   bool external = false; // file is a raw path in an UNREGISTERED file
 
   // Python Sym.loc property (query.py:135-140)
@@ -62,6 +64,16 @@ struct Sym {
       return base + ":" + std::to_string(*line);
     }
     return base;
+  }
+
+  // Python Sym.span property: file:line-end_line, or nullopt when no end is
+  // known -- the line range that slices the whole entity.
+  std::optional<std::string> span() const {
+    if (!file || !line || *line == 0 || !end_line || *end_line == 0) {
+      return std::nullopt;
+    }
+    return pathutil::basename(*file) + ":" + std::to_string(*line) + "-" +
+           std::to_string(*end_line);
   }
 
   // Python Sym.is_stub property (query.py:143-153)
@@ -97,6 +109,16 @@ struct Sym {
       o.push_back({"col", Value::of(*col)});
     } else {
       o.push_back({"col", Value::null()});
+    }
+    if (end_line) {
+      o.push_back({"end_line", Value::of(*end_line)});
+    } else {
+      o.push_back({"end_line", Value::null()});
+    }
+    if (end_col) {
+      o.push_back({"end_col", Value::of(*end_col)});
+    } else {
+      o.push_back({"end_col", Value::null()});
     }
     o.push_back({"is_definition", Value::of(is_definition)});
     o.push_back({"is_pure", Value::of(is_pure)});

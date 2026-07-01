@@ -94,8 +94,8 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_24():
-    assert SCHEMA_VERSION == 24, f"Expected 24, got {SCHEMA_VERSION}"
+def test_schema_version_is_25():
+    assert SCHEMA_VERSION == 25, f"Expected 25, got {SCHEMA_VERSION}"
 
 
 def test_product_version_is_0410():

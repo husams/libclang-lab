@@ -314,6 +314,8 @@ def test_sym_to_dict_schema(g):
         "file",
         "line",
         "col",
+        "end_line",
+        "end_col",
         "is_definition",
         "is_pure",
         "is_static",

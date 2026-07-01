@@ -122,6 +122,8 @@ class Location:
     file: Optional[File]
     line: Optional[int]
     col: Optional[int]
+    end_line: Optional[int] = None  # v25: end of the entity's own extent
+    end_col: Optional[int] = None   # (line..end_line) slices the whole entity
 
     @property
     def path(self) -> Optional[str]:
@@ -139,11 +141,22 @@ class Location:
             return f"{base}:{self.line}"
         return f"{base}:{self.line}:{self.col}"
 
+    @property
+    def span(self) -> Optional[str]:
+        """``file:line-end_line`` -- the line range that slices the whole entity
+        (function/method body, class/struct/union/enum/typedef region), or
+        ``None`` when no end is known."""
+        if not self.file or self.line is None or self.end_line is None:
+            return None
+        return f"{self.file.name}:{self.line}-{self.end_line}"
+
     def to_dict(self) -> dict:
         return {
             "file": self.file.path if self.file else None,
             "line": self.line,
             "col": self.col,
+            "end_line": self.end_line,
+            "end_col": self.end_col,
         }
 
     def __repr__(self) -> str:
@@ -781,8 +794,16 @@ class Entity:
 
     @property
     def location(self) -> Location:
-        """Best-known location (definition, else declaration)."""
-        return Location(self.sym.file, self.sym.line, self.sym.col)
+        """Best-known location (definition, else declaration). Carries the
+        entity's extent end (``end_line``/``end_col``), so ``.location.span``
+        gives the ``file:line-end_line`` range that slices the whole entity."""
+        return Location(
+            self.sym.file,
+            self.sym.line,
+            self.sym.col,
+            self.sym.end_line,
+            self.sym.end_col,
+        )
 
     @property
     def definition(self) -> Optional[Location]:

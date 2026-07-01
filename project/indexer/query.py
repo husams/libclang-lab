@@ -353,6 +353,10 @@ class Sym:
     file: Optional[File]  # best-known location as a File (smart path), None=stub
     line: Optional[int]
     col: Optional[int]
+    end_line: Optional[int] = None  # v25: end of the symbol's own extent at
+    end_col: Optional[int] = None   # (line, col) -- (line..end_line) slices the
+    # whole entity (function/method body, class/struct/union/enum/typedef region).
+    # None for decl-only / stub fallbacks that carry no stored end.
     external: bool = False  # `file` is a raw path in an UNREGISTERED file
     # (system/stdlib header no component owns), not a
     # location in any indexed file -- see is_stub
@@ -367,6 +371,16 @@ class Sym:
             return "<no-location>"
         base = self.file.name
         return f"{base}:{self.line}" if self.line else base
+
+    @property
+    def span(self) -> Optional[str]:
+        """`file:line-end_line` -- the line range that slices the whole entity,
+        or None when no end is known (decl-only / stub). Lets a reader jump to
+        (line..end_line) and read the function/class/enum/typedef without
+        scanning the file."""
+        if not self.file or not self.line or not self.end_line:
+            return None
+        return f"{self.file.name}:{self.line}-{self.end_line}"
 
     @property
     def is_stub(self) -> bool:
@@ -393,6 +407,8 @@ class Sym:
             "file": self.file.path if self.file else None,
             "line": self.line,
             "col": self.col,
+            "end_line": self.end_line,
+            "end_col": self.end_col,
             "is_definition": self.is_definition,
             "is_pure": self.is_pure,
             "is_static": self.is_static,
@@ -717,7 +733,8 @@ class DispatchSite:
 
 _SYM_COLS = (
     "s.id, s.usr, s.spelling, s.qual_name, s.kind, s.type_info, "
-    "s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, s.decl_col, "
+    "s.file_id, s.line, s.col, s.end_line, s.end_col, "
+    "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
     "s.access, s.parent_usr, s.resolved"
 )
@@ -853,8 +870,13 @@ class GraphQuery:
     def _sym(self, r: sqlite3.Row) -> Sym:
         files = self._files()
         fid, line, col = r["file_id"], r["line"], r["col"]
+        # end_line/end_col are the end of the extent that (line, col) starts.
+        # Only the best-known site (file_id) carries an end; the decl-site and
+        # stub fallbacks below have no stored end, so they read None.
+        end_line, end_col = r["end_line"], r["end_col"]
         if fid is None:  # decl-only: fall back to decl site
             fid, line, col = r["decl_file_id"], r["decl_line"], r["decl_col"]
+            end_line = end_col = None
         if fid is not None:
             path, comp = files.get(fid, (None, None))
             external = False
@@ -882,6 +904,8 @@ class GraphQuery:
             file=self.make_file(path, external=external, component_name=comp),
             line=line,
             col=col,
+            end_line=end_line,
+            end_col=end_col,
             external=external,
         )
 
