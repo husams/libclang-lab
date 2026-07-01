@@ -243,8 +243,14 @@ def _to_symbol(cursor: cx.Cursor, file_id: int) -> Symbol | None:
         kind=kind,
         type_info=cursor.type.spelling or None,
         file_id=file_id,
-        line=cursor.location.line,
-        col=cursor.location.column,
+        # Start of this cursor's own extent -- NOT cursor.location (which is
+        # the identifying spelling location, e.g. the class/function NAME).
+        # extent.start includes the leading class/struct/union/enum keyword
+        # and, for a function/method, its return type (and out-of-line
+        # qualifier, e.g. `Circle::`), so (line, col)..(end_line, end_col)
+        # slices the WHOLE declaration, not just name..closing brace.
+        line=cursor.extent.start.line,
+        col=cursor.extent.start.column,
         # End of this cursor's own extent (the closing '}' of a function/method
         # definition, or the full extent of a class/struct/union/typedef decl),
         # paired with (line, col) so (line..end_line) slices the whole entity.

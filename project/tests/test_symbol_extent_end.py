@@ -113,6 +113,68 @@ def test_every_indexed_symbol_has_an_end(db_path):
     assert total > 0 and with_end == total, "located symbols all carry an end"
 
 
+# --------------------------------------------------------------------------- #
+# (line, col) must be the start of the DECLARATION, not the identifying
+# spelling location -- else Sym.source() truncates the leading keyword
+# (struct/union/enum) or a function's return type. Regression test for the
+# cursor.location -> cursor.extent.start fix.
+# --------------------------------------------------------------------------- #
+
+KEYWORD_HEADER = """\
+struct Box { int w; int h; };
+
+union Number { int i; float f; };
+
+enum Color2 { RED2, GREEN2, BLUE2 };
+"""
+
+KEYWORD_SOURCE = """\
+#include "keywords_ext.h"
+
+double compute(int a, int b) {
+    return a + b;
+}
+"""
+
+
+@pytest.fixture
+def db_path_kw():
+    with tempfile.TemporaryDirectory() as tmp:
+        hdr = os.path.join(tmp, "keywords_ext.h")
+        src = os.path.join(tmp, "keywords_ext.c")
+        with open(hdr, "w") as fh:
+            fh.write(KEYWORD_HEADER)
+        with open(src, "w") as fh:
+            fh.write(KEYWORD_SOURCE)
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        with db.transaction():
+            for path in (hdr, src):
+                tu = clang_parse(path, clang_args())
+                assert not [d for d in tu.diagnostics if d.severity >= 4], (
+                    f"fixture {path} must parse without fatals"
+                )
+                A.index_symbols(db, tu, db.add_file_path(path))
+        yield db._conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+@pytest.mark.parametrize(
+    "spelling,expected_prefix",
+    [
+        ("Box", "struct Box"),
+        ("Number", "union Number"),
+        ("Color2", "enum Color2"),
+        ("compute", "double compute"),
+    ],
+)
+def test_source_includes_leading_keyword_or_return_type(
+    db_path_kw, spelling, expected_prefix
+):
+    with GraphQuery(db_path_kw) as g:
+        sym = g.find(spelling)[0]
+        assert sym.source().startswith(expected_prefix), sym.source()
+
+
 def test_query_sym_exposes_end_and_span(db_path):
     with GraphQuery(db_path) as g:
         sym = g.find("add")[0]
