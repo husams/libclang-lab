@@ -57,6 +57,8 @@ inline const std::map<std::string, int64_t> &edge_kinds_map() {
       {"factory-construct", 15}, {"destroy", 16},
       // PR2 (v17): Layer-0 friend declaration (rolled up to befriends)
       {"friend", 17},
+      // Materialised virtual-dispatch caller edge (built by resolve)
+      {"dispatch_calls", 18},
   };
   return m;
 }
@@ -72,6 +74,8 @@ inline const std::map<int64_t, std::string> &edge_names_map() {
       {15, "factory-construct"}, {16, "destroy"},
       // PR2 (v17): Layer-0 friend declaration (rolled up to befriends)
       {17, "friend"},
+      // Materialised virtual-dispatch caller edge (built by resolve)
+      {18, "dispatch_calls"},
   };
   return m;
 }

@@ -63,7 +63,7 @@ Edge make_edge(int64_t src, int64_t dst, int64_t kind_id, int64_t count = 1) {
 // ---------------------------------------------------------------------------
 // T5 — edge_kind seed: exactly the 9 design rows
 // ---------------------------------------------------------------------------
-TEST_CASE("T5 edge_kind table seeded with exactly 9 design rows") {
+TEST_CASE("T5 edge_kind table seeded with the design rows") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
@@ -79,7 +79,7 @@ TEST_CASE("T5 edge_kind table seeded with exactly 9 design rows") {
     }
   }
 
-  REQUIRE(rows.size() == 17);  // v17: PR1 adds 7 construct/destroy kinds + friend
+  REQUIRE(rows.size() == 18);  // +dispatch_calls (18, virtual-dispatch callers)
   // Exact order + id + name for the first 9 (original design §2).
   const std::vector<std::pair<int64_t, std::string>> expected = {
       {1, "calls"},    {2, "inherits"}, {3, "contains"},
@@ -91,6 +91,8 @@ TEST_CASE("T5 edge_kind table seeded with exactly 9 design rows") {
       {15, "factory-construct"}, {16, "destroy"},
       // PR2 (v17): friend (rolled up to befriends)
       {17, "friend"},
+      // Materialised virtual-dispatch caller edge (built by resolve)
+      {18, "dispatch_calls"},
   };
   for (std::size_t i = 0; i < expected.size(); ++i) {
     CHECK(rows[i].id == expected[i].first);

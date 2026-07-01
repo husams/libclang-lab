@@ -241,7 +241,8 @@ INSERT OR IGNORE INTO edge_kind (id, name) VALUES
   (8,'field_of'), (9,'method_of'),
   (10,'construct-value'), (11,'construct-temp'), (12,'construct-heap'),
   (13,'construct-copy'), (14,'construct-move'),
-  (15,'factory-construct'), (16,'destroy'), (17,'friend');
+  (15,'factory-construct'), (16,'destroy'), (17,'friend'),
+  (18,'dispatch_calls');
 
 CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
@@ -3231,6 +3232,51 @@ class Storage:
         )
         self._commit()
 
+    def materialize_dispatch_calls(self) -> None:
+        """Materialise virtual-dispatch caller edges (kind 18, ``dispatch_calls``).
+
+        A static ``calls`` edge (1) into a virtual method B understates reality:
+        at run time the call can land on any method that overrides B, transitively
+        down the class hierarchy. libclang records the site against the *declared*
+        target (e.g. ``execute() -> base::doSomething`` for a pure-virtual base),
+        so ``callers(child::doSomething)`` -- the concrete override -- comes back
+        empty even though ``execute`` reaches it via dynamic dispatch.
+
+        For each ``caller -> B`` calls edge and each transitive override M of B,
+        store a ``dispatch_calls`` edge ``caller -> M`` so ``callers(M,
+        include_overrides=True)`` recovers the virtual caller in a single hop.
+        The bridge is the existing ``overrides`` edge (6); no new extraction.
+
+        Idempotent: kind-18 edges are deleted and rebuilt each pass (a re-run of
+        ``resolve`` reflects any override/call changes). Sound over-approximation
+        -- the mirror of ``dispatch_targets`` -- so every caller that could reach
+        M at run time appears; type-based pruning is out of scope here.
+        """
+        self._conn.execute("DELETE FROM edge WHERE kind = 18")
+        self._conn.execute(
+            """
+            WITH RECURSIVE dispatch(base_id, target_id) AS (
+                -- direct override: target overrides base (overrides edge = 6,
+                -- src = overriding method, dst = overridden base method)
+                SELECT dst_id AS base_id, src_id AS target_id
+                FROM edge WHERE kind = 6
+              UNION
+                -- transitive: target overrides a mid method already reachable
+                -- from base, so a call to base can dispatch to target too
+                SELECT d.base_id, o.src_id
+                FROM dispatch d
+                JOIN edge o ON o.dst_id = d.target_id AND o.kind = 6
+            )
+            INSERT OR IGNORE INTO edge (src_id, dst_id, kind, count)
+            SELECT c.src_id, d.target_id, 18, c.count
+            FROM edge c
+            JOIN dispatch d ON d.base_id = c.dst_id
+            WHERE c.kind = 1
+              AND c.src_id != d.target_id
+            """
+        )
+        self._commit()
+
     def cross_repo_edges(self) -> list[tuple[int, int, int]]:
         """Return (src_id, dst_id, kind) for edges crossing component boundaries."""
         rows = self._conn.execute(
@@ -3263,6 +3309,7 @@ class Storage:
         from indexer.entity_rollup import materialize_entity_edges
 
         self.rollup_edge_counts()
+        self.materialize_dispatch_calls()
         materialize_entity_edges(self)
         # A still-stub is a minted placeholder never backfilled by a real
         # symbol: resolved=0 with NO location (neither a definition nor a decl

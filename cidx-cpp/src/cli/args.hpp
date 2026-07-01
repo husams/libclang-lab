@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.42.0";
+inline constexpr const char *kVersion = "0.43.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -91,6 +91,8 @@ struct ParsedArgs {
   std::optional<int64_t> to_id;          // --to-id N
   std::optional<std::string> to_name;    // --to-name FUZZY
   std::optional<std::string> to_kind;    // --to-kind {17 kinds}
+  // callers flag
+  bool include_overrides = false;        // --include-overrides (virtual callers)
   // hierarchy flags
   bool transitive = false;               // --transitive (walk whole hierarchy)
   std::string access{"all"};             // --access {public,protected,private,all}

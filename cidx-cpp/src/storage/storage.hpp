@@ -339,6 +339,11 @@ public:
   // (kind=7) — idempotent; COUNT(*) is the source of truth.
   void rollup_edge_counts();
 
+  // Materialise virtual-dispatch caller edges (kind 18, 'dispatch_calls'):
+  // caller -> each transitive override of the virtual method it statically
+  // calls. Idempotent (DELETE + rebuild). Called by resolve_pass().
+  void materialize_dispatch_calls();
+
   // Edges whose ends live in different components.
   std::vector<Edge> cross_repo_edges();
 
