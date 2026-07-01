@@ -1352,7 +1352,10 @@ class Callable(Entity):
 
     @overload
     def callees(
-        self, limit: int = ..., include_instantiations: Literal[False] = ...
+        self,
+        limit: int = ...,
+        include_instantiations: Literal[False] = ...,
+        include_overrides: bool = ...,
     ) -> list["Entity"]: ...
 
     @overload
@@ -1361,13 +1364,21 @@ class Callable(Entity):
     ) -> list[CallerWithContextModel]: ...
 
     def callees(
-        self, limit: int = 500, include_instantiations: bool = False
+        self,
+        limit: int = 500,
+        include_instantiations: bool = False,
+        include_overrides: bool = True,
     ) -> "list[Entity] | list[CallerWithContextModel]":
-        """Entities this one calls, **in source order** when ``include_instantiations``
-        is ``False`` — ordered by the first call site (line, col).
+        """Entities this one calls, **in source order** (by first call site) for
+        the direct callees.
 
-        ``include_instantiations=False`` (default) — direct callees only;
-        byte-identical to the v12 behaviour.  Return type: ``list[Entity]``.
+        Includes both direct callees and virtual-dispatch targets: when this
+        calls a virtual method B, the concrete override(s) B can reach at run
+        time are read from the materialised ``dispatch_calls`` edges ``resolve``
+        builds, and appended after the source-ordered direct callees. This is
+        what lets :meth:`callgraph` descend through a virtual call into the real
+        override. Pass ``include_overrides=False`` for the literal outgoing
+        ``calls`` only. Return type: ``list[Entity]``.
 
         ``include_instantiations=True`` — rolls up callees of all
         implicit-instantiation members.  Return type:
@@ -1386,7 +1397,18 @@ class Callable(Entity):
             )
         edges = self._cb.graph.edges_out(self.sym, kinds=("calls",), limit=limit)
         edges.sort(key=_call_site_order)
-        return self._cb._wrap_all(e.peer for e in edges)
+        peers = [e.peer for e in edges]
+        if include_overrides:
+            # Virtual-dispatch targets have no call site; append after the
+            # source-ordered direct callees, deduplicated.
+            seen = {p.id for p in peers}
+            for p in self._cb.graph._peers(
+                self.sym, ("dispatch_calls",), "out", limit
+            ):
+                if p.id not in seen:
+                    seen.add(p.id)
+                    peers.append(p)
+        return self._cb._wrap_all(peers)
 
     def callgraph(
         self, depth: Optional[int] = None, *, fanout: int = 500
@@ -1422,6 +1444,8 @@ class Callable(Entity):
                 return iter(())
             if not isinstance(node, Callable):
                 return iter(())  # a call edge can point at a non-callable leaf
+            # callees() folds in virtual-dispatch targets by default, so the
+            # walk descends through a virtual call into the real override(s).
             return iter(node.callees(limit=fanout))
 
         # Explicit iterator stack -> iterative DFS pre-order (no recursion limit
@@ -1503,7 +1527,10 @@ class Callable(Entity):
                 return iter(())
             if not isinstance(node, Callable):
                 return iter(())
-            callees = node.callees(limit=fanout)
+            # Static callees only: this engine does its own virtual expansion
+            # (via dispatch_targets below), so it must NOT fold in the
+            # dispatch_calls edges that callees() now includes by default.
+            callees = node.callees(limit=fanout, include_overrides=False)
             if not expand_virtual:
                 return iter(callees)
             # Superset mode: append each virtual callee's concrete targets as
@@ -1559,7 +1586,8 @@ class Callable(Entity):
                 return
             if not isinstance(node, Callable):
                 return
-            callees = node.callees(limit=fanout)
+            # Static callees only (the Gamma engine expands virtual sites itself).
+            callees = node.callees(limit=fanout, include_overrides=False)
             # Build edges map: callee_id -> edge for site lookup (with sites=True
             # so the site provenance is available for Gamma decisions)
             edges = self._cb.graph.edges_out(node.sym, kinds=("calls",), limit=fanout)

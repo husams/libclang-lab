@@ -363,9 +363,14 @@ const char kGraphCalleesUsage[] =
 
 const char kGraphCalleesHelp[] =
     "usage: cidx graph callees [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
+    "                          [--direct-only]\n"
     "\n"
     "options:\n"
-    GRAPH_SELECTOR_OPTIONS;
+    GRAPH_SELECTOR_OPTIONS
+    "\n"
+    "  --direct-only         only literal outgoing calls; exclude virtual-\n"
+    "                        dispatch targets (materialised dispatch_calls edges,\n"
+    "                        which are included by default)";
 
 // "usage: cidx graph refs [-h] " is 28 chars → continuation indent = 28 spaces
 // (different from callers/callees which are 31 chars wide).
@@ -2105,7 +2110,8 @@ const Spec kGraphCalleesSpec = {
     "cidx graph callees",
     kGraphCalleesUsage,
     kGraphCalleesHelp,
-    {GRAPH_SELECTOR_OPTS},
+    {GRAPH_SELECTOR_OPTS,
+     {"--direct-only", '\0', ValueKind::kNone, "--direct-only", nullptr, 0}},
     {},
     false,
     {},
@@ -2847,6 +2853,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
         return pa;
       }
       fill_graph_selector(st);
+      pa.direct_only = st.flags.count("--direct-only") != 0;
     } else if (pa.what == "refs") {
       ParseState st = parse_leaf(kGraphRefsSpec, argv, what.next, extras);
       if (st.help) {

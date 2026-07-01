@@ -1527,7 +1527,10 @@ def cmd_graph_callees(args) -> int:
     sym, rc = _select_symbol(g, args)
     if sym is None:
         return rc
-    edges = g.edges_out(sym, ("calls",), limit=args.limit)
+    # Virtual-dispatch targets (materialised dispatch_calls edges) are included
+    # by default; --direct-only restricts to the literal outgoing calls edges.
+    kinds = ("calls",) if args.direct_only else ("calls", "dispatch_calls")
+    edges = g.edges_out(sym, kinds, limit=args.limit)
     _emit_edges(g, edges, args, f"callees of {sym.name} (@{sym.loc}):")
     return 0
 
@@ -2614,6 +2617,12 @@ def main(argv=None) -> int:
 
     q = gsub.add_parser("callees", help="functions the symbol calls")
     _selector(q)
+    q.add_argument(
+        "--direct-only",
+        action="store_true",
+        help="only literal outgoing calls (exclude virtual-dispatch targets "
+        "reached via materialised dispatch_calls edges, which are on by default)",
+    )
     q.set_defaults(fn=cmd_graph_callees)
 
     q = gsub.add_parser("refs", help="incoming references (calls + uses) to the symbol")

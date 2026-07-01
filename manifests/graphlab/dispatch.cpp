@@ -14,8 +14,12 @@ struct base {
   }
 };
 
+void print() {
+}
+
+
 struct child : public base {
-  void doSomething() override {}
+  void doSomething() override { print(); }
 };
 
 // The caller: a concrete `child`, invoked through the base's non-virtual

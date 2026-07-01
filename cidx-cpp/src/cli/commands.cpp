@@ -2829,8 +2829,11 @@ int cmd_graph_callees(const ParsedArgs &args, Context &ctx) {
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
   if (!sym) return rc;
-  auto edges = h->g->edges_out(sym->id, std::vector<std::string>{"calls"},
-                               args.graph_limit);
+  std::vector<std::string> kinds{"calls"};
+  if (!args.direct_only) {
+    kinds.emplace_back("dispatch_calls");
+  }
+  auto edges = h->g->edges_out(sym->id, kinds, args.graph_limit);
   graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
                     "callees of " + sym->name + " (@" + sym->loc() + "):");
   return 0;

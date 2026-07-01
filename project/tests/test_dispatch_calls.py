@@ -137,6 +137,19 @@ def test_resolve_is_idempotent(tmp_path):
     assert n1 == n3 == 2
 
 
+def test_callees_folds_dispatch_target(tmp_path):
+    """The forward mirror: callees(execute) includes the concrete override by
+    default (so callgraph descends through the virtual call); --direct-only /
+    include_overrides=False restricts to the static declared callee."""
+    db_path, ids = _resolved(tmp_path)
+    with GraphQuery(db_path) as g:
+        default = {s.id for s in g.callees(ids["execute"])}
+        assert ids["base::do"] in default  # static call edge
+        assert ids["child::do"] in default  # via dispatch_calls
+        direct = {s.id for s in g.callees(ids["execute"], include_overrides=False)}
+        assert direct == {ids["base::do"]}
+
+
 def test_direct_only_opt_out(tmp_path):
     """include_overrides=False restores the pre-dispatch direct-only view."""
     db_path, ids = _resolved(tmp_path, grandchild=True)
