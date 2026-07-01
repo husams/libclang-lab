@@ -1995,6 +1995,7 @@ def _index_edges_notxn(
             primary = _lib.clang_getSpecializedCursorTemplate(cursor)
             if (
                 primary is None
+                or primary.is_null()
                 or primary.kind == cx.CursorKind.NO_DECL_FOUND
                 or primary.kind == cx.CursorKind.INVALID_FILE
                 or primary.kind.value <= 0
