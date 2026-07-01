@@ -1004,15 +1004,7 @@ def _mint_instantiation_nodes(
 
     # (e) instantiates(5): type_id -> class primary, guarded by primary indexed
     class_primary = _lib.clang_getSpecializedCursorTemplate(parent)
-    if (
-        class_primary is not None
-        and class_primary.kind.value > 0
-        and class_primary.kind
-        not in (
-            cx.CursorKind.NO_DECL_FOUND,
-            cx.CursorKind.INVALID_FILE,
-        )
-    ):
+    if not _invalid_cursor(class_primary):
         class_prim_usr = class_primary.get_usr()
         if class_prim_usr and class_prim_usr != type_usr:
             class_prim_sym = db.lookup_symbol(class_prim_usr)
@@ -1142,15 +1134,7 @@ def _body_descent(
                         # specialized parent (clang_getSpecializedCursorTemplate
                         # returns a valid non-null cursor with a non-trivial kind).
                         _pre_primary = _lib.clang_getSpecializedCursorTemplate(ref)
-                        _is_inst_member = (
-                            _pre_primary is not None
-                            and _pre_primary.kind.value > 0
-                            and _pre_primary.kind
-                            not in (
-                                cx.CursorKind.NO_DECL_FOUND,
-                                cx.CursorKind.INVALID_FILE,
-                            )
-                        )
+                        _is_inst_member = not _invalid_cursor(_pre_primary)
                         _pre_prim_usr = (
                             _pre_primary.get_usr() if _is_inst_member else ""
                         )
@@ -1288,15 +1272,7 @@ def _body_descent(
                         # std::vector, std::move, etc.). For a recovered primary
                         # template this is a no-op (it has no specialized parent).
                         primary = _lib.clang_getSpecializedCursorTemplate(ref)
-                        if (
-                            primary is not None
-                            and primary.kind.value > 0
-                            and primary.kind
-                            not in (
-                                cx.CursorKind.NO_DECL_FOUND,
-                                cx.CursorKind.INVALID_FILE,
-                            )
-                        ):
+                        if not _invalid_cursor(primary):
                             prim_usr = primary.get_usr()
                             if prim_usr and prim_usr != callee_usr:
                                 prim_sym = db.lookup_symbol(prim_usr)
@@ -1471,21 +1447,9 @@ def _body_descent(
             nargs = _lib.clang_Type_getNumTemplateArguments(var_type)
             if nargs > 0:
                 type_decl = var_type.get_declaration()
-                if (
-                    type_decl is not None
-                    and type_decl.kind != cx.CursorKind.NO_DECL_FOUND
-                    and type_decl.kind.value > 0
-                ):
+                if not _invalid_cursor(type_decl):
                     primary = _lib.clang_getSpecializedCursorTemplate(type_decl)
-                    if (
-                        primary is not None
-                        and primary.kind.value > 0
-                        and primary.kind
-                        not in (
-                            cx.CursorKind.NO_DECL_FOUND,
-                            cx.CursorKind.INVALID_FILE,
-                        )
-                    ):
+                    if not _invalid_cursor(primary):
                         prim_usr = primary.get_usr()
                         if prim_usr:
                             prim_sym = db.lookup_symbol(prim_usr)
@@ -1536,10 +1500,21 @@ def _body_descent(
 
 
 def _invalid_cursor(c: Optional[cx.Cursor]) -> bool:
-    """True when a libclang cursor is null / not-found / invalid."""
+    """True when a libclang cursor is null / not-found / invalid.
+
+    ``Cursor.is_null()`` only exists on newer bindings (the Linux `clang`
+    package); there, ``.kind`` is guarded and raises on a null cursor, so
+    it must be checked first. Pip `libclang` 18.1.1 (macOS) has neither
+    the method nor the guard -- reading ``.kind`` there is always safe and
+    yields an invalid CursorKind for a null cursor.
+    """
+    if c is None:
+        return True
+    is_null = getattr(c, "is_null", None)
+    if is_null is not None and is_null():
+        return True
     return (
-        c is None
-        or c.kind == cx.CursorKind.NO_DECL_FOUND
+        c.kind == cx.CursorKind.NO_DECL_FOUND
         or c.kind == cx.CursorKind.INVALID_FILE
         or c.kind.value <= 0
     )
@@ -1833,15 +1808,7 @@ def _index_edges_notxn(
             # paths, so without this the entity roll-up never sees the
             # `Singleton<Cache> instantiates Singleton` relation.
             base_primary = _lib.clang_getSpecializedCursorTemplate(ref)
-            if (
-                base_primary is not None
-                and base_primary.kind.value > 0
-                and base_primary.kind
-                not in (
-                    cx.CursorKind.NO_DECL_FOUND,
-                    cx.CursorKind.INVALID_FILE,
-                )
-            ):
+            if not _invalid_cursor(base_primary):
                 base_prim_usr = base_primary.get_usr()
                 if base_prim_usr and base_prim_usr != base_usr:
                     base_prim_sym = db.lookup_symbol(base_prim_usr)
@@ -1993,13 +1960,7 @@ def _index_edges_notxn(
             if not cursor.is_definition():
                 continue
             primary = _lib.clang_getSpecializedCursorTemplate(cursor)
-            if (
-                primary is None
-                or primary.is_null()
-                or primary.kind == cx.CursorKind.NO_DECL_FOUND
-                or primary.kind == cx.CursorKind.INVALID_FILE
-                or primary.kind.value <= 0
-            ):
+            if _invalid_cursor(primary):
                 continue
             spec_usr = cursor.get_usr()
             prim_usr = primary.get_usr()
