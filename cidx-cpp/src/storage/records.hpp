@@ -85,6 +85,8 @@ struct Symbol {
   std::optional<int64_t> file_id;
   std::optional<int64_t> line;
   std::optional<int64_t> col;
+  std::optional<int64_t> end_line; // v25: end of the symbol's own extent at
+  std::optional<int64_t> end_col;  // (line, col); (line..end_line) slices it whole
   std::optional<int64_t> decl_file_id;
   std::optional<int64_t> decl_line;
   std::optional<int64_t> decl_col;

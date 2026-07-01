@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS symbol (
     file_id      INTEGER REFERENCES file(id) ON DELETE SET NULL,
     line         INTEGER,                     -- definition site once seen,
     col          INTEGER,                     -- else the declaration site
+    end_line     INTEGER,                     -- v25: END of the symbol's own
+    end_col      INTEGER,                     -- extent (cursor.extent.end) at the
+                                              -- (line, col) site above -- the
+                                              -- closing brace of a function or
+                                              -- method definition, or the full
+                                              -- extent of a class/struct/union/
+                                              -- typedef declaration.
     decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
     decl_line    INTEGER,                     -- declaration site (e.g. the .h
     decl_col     INTEGER,                     -- prototype); NULL if none seen
@@ -339,7 +346,7 @@ CREATE TABLE IF NOT EXISTS entity_node (
     kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '24');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '25');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -400,13 +407,13 @@ const std::map<int64_t, std::string> &symbol_kind_names_map() {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 21> kSymbolInsertCols = {
+constexpr std::array<std::string_view, 23> kSymbolInsertCols = {
     "usr",            "spelling",      "qual_name",    "display_name",
     "kind",           "type_info",     "file_id",      "line",
     "col",            "decl_file_id",  "decl_line",    "decl_col",
     "decl_path",      "is_definition", "is_pure",      "is_static",
     "is_instantiation", "linkage",     "access",       "parent_usr",
-    "resolved",
+    "resolved",       "end_line",      "end_col",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
@@ -428,12 +435,14 @@ constexpr char kFileCols[] =
 constexpr char kSymbolCols[] =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
-    "is_static, linkage, access, parent_usr, resolved, decl_path, is_instantiation";
+    "is_static, linkage, access, parent_usr, resolved, decl_path, "
+    "is_instantiation, end_line, end_col";
 constexpr char kSymbolColsS[] =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
-    "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation";
+    "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation, "
+    "s.end_line, s.end_col";
 
 std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -564,6 +573,8 @@ Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.resolved = st.col_int64(off + 19) != 0;
   s.decl_path = opt_text(st, off + 20);
   s.is_instantiation = st.col_int64(off + 21) != 0;
+  s.end_line = opt_int64(st, off + 22);
+  s.end_col = opt_int64(st, off + 23);
   return s;
 }
 
@@ -819,6 +830,14 @@ void Storage::migrate() {
     if (!has_col(cols2, "is_named_instance")) {
       db_.exec("ALTER TABLE symbol ADD COLUMN is_named_instance INTEGER NOT NULL "
                "DEFAULT 0");
+      changed = true;
+    }
+    // v24 -> v25: end of the symbol's own extent (end_line/end_col), paired with
+    // (line, col). Only the START was stored before, so nothing to backfill --
+    // old rows read NULL until a reindex populates them from cursor.extent.end.
+    if (!has_col(cols2, "end_line")) {
+      db_.exec("ALTER TABLE symbol ADD COLUMN end_line INTEGER");
+      db_.exec("ALTER TABLE symbol ADD COLUMN end_col INTEGER");
       changed = true;
     }
   }
@@ -2165,8 +2184,9 @@ int64_t Storage::add_symbol(const Symbol &sym) {
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
       "is_definition, is_pure, is_static, is_instantiation, linkage, access, "
-      "parent_usr, resolved, decl_path) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "parent_usr, resolved, decl_path, end_line, end_col) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+      "?, ?) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  spelling         = excluded.spelling, "
       "  qual_name        = COALESCE(excluded.qual_name, symbol.qual_name), "
@@ -2182,6 +2202,12 @@ int64_t Storage::add_symbol(const Symbol &sym) {
       "  col              = CASE WHEN excluded.is_definition >= "
       "symbol.is_definition "
       "                          THEN excluded.col ELSE symbol.col END, "
+      "  end_line         = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.end_line ELSE symbol.end_line END, "
+      "  end_col          = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.end_col ELSE symbol.end_col END, "
       "  decl_file_id     = COALESCE(excluded.decl_file_id, symbol.decl_file_id), "
       "  decl_line        = COALESCE(excluded.decl_line, symbol.decl_line), "
       "  decl_col         = COALESCE(excluded.decl_col, symbol.decl_col), "
@@ -2217,6 +2243,9 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   // decl_path is INSERTed but intentionally NOT in the ON CONFLICT SET: a real
   // add_symbol never clobbers a stub's recorded external path (mirrors Python).
   bind_opt(st, 21, sym.decl_path);
+  // end_line/end_col move in lockstep with line/col (same CASE in the SET above).
+  bind_opt(st, 22, sym.end_line);
+  bind_opt(st, 23, sym.end_col);
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }

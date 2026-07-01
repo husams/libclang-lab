@@ -436,7 +436,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
   CHECK(cols("symbol") == std::vector<std::string>{
                               "id", "usr", "spelling", "qual_name",
                               "display_name", "kind", "type_info", "file_id",
-                              "line", "col", "decl_file_id", "decl_line",
+                              "line", "col", "end_line", "end_col",
+                              "decl_file_id", "decl_line",
                               "decl_col", "decl_path", "is_definition",
                               "is_pure", "is_static", "is_instantiation",
                               "is_named_instance",

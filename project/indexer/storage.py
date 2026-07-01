@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -154,6 +154,18 @@ CREATE TABLE IF NOT EXISTS symbol (
     file_id      INTEGER REFERENCES file(id) ON DELETE SET NULL,
     line         INTEGER,                     -- definition site once seen,
     col          INTEGER,                     -- else the declaration site
+    end_line     INTEGER,                     -- v25: END of the symbol's own
+    end_col      INTEGER,                     -- extent (cursor.extent.end) at the
+                                              -- (line, col) site above -- the
+                                              -- closing brace of a function or
+                                              -- method definition, or the full
+                                              -- extent of a class/struct/union/
+                                              -- typedef declaration.
+                                              -- Paired with (line, col) and moved
+                                              -- in lockstep when a definition
+                                              -- supersedes a declaration, so
+                                              -- (line..end_line) always slices the
+                                              -- whole entity. NULL until reindexed.
     decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
     decl_line    INTEGER,                     -- declaration site (e.g. the .h
     decl_col     INTEGER,                     -- prototype); NULL if none seen
@@ -1031,6 +1043,8 @@ class Symbol:
     file_id: Optional[int] = None
     line: Optional[int] = None
     col: Optional[int] = None
+    end_line: Optional[int] = None  # v25: end of the symbol's own extent at
+    end_col: Optional[int] = None   # (line, col); (line..end_line) slices it whole
     decl_file_id: Optional[int] = None
     decl_line: Optional[int] = None
     decl_col: Optional[int] = None
@@ -1224,6 +1238,14 @@ class Storage:
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN is_named_instance INTEGER NOT NULL DEFAULT 0"
             )
+            changed = True
+        # v24 -> v25: end of the symbol's own extent (end_line/end_col), paired
+        # with (line, col). Only the START was stored before, so there is nothing
+        # to backfill -- old rows read NULL until a reindex populates them from
+        # the AST (cursor.extent.end).
+        if "end_line" not in cols2:
+            self._conn.execute("ALTER TABLE symbol ADD COLUMN end_line INTEGER")
+            self._conn.execute("ALTER TABLE symbol ADD COLUMN end_col INTEGER")
             changed = True
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
@@ -2681,6 +2703,8 @@ class Storage:
         "file_id",
         "line",
         "col",
+        "end_line",
+        "end_col",
         "decl_file_id",
         "decl_line",
         "decl_col",
@@ -2723,6 +2747,10 @@ class Storage:
             "                       THEN excluded.line ELSE symbol.line END, "
             "  col           = CASE WHEN excluded.is_definition >= symbol.is_definition "
             "                       THEN excluded.col ELSE symbol.col END, "
+            "  end_line      = CASE WHEN excluded.is_definition >= symbol.is_definition "
+            "                       THEN excluded.end_line ELSE symbol.end_line END, "
+            "  end_col       = CASE WHEN excluded.is_definition >= symbol.is_definition "
+            "                       THEN excluded.end_col ELSE symbol.end_col END, "
             "  decl_file_id  = COALESCE(excluded.decl_file_id, symbol.decl_file_id), "
             "  decl_line     = COALESCE(excluded.decl_line, symbol.decl_line), "
             "  decl_col      = COALESCE(excluded.decl_col, symbol.decl_col), "

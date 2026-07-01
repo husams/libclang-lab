@@ -378,10 +378,10 @@ TEST_CASE("graph_query: Sym value type — is_stub, loc, to_dict key order") {
   CHECK(real.loc() == "foo.cpp:42");
 
   // to_dict key order (R7): id,usr,spelling,qual_name,kind,type_info,
-  //                         file,line,col,is_definition,is_pure,is_static,
-  //                         is_instantiation,is_stub
+  //                         file,line,col,end_line,end_col,is_definition,
+  //                         is_pure,is_static,is_instantiation,is_stub
   auto dict = real.to_dict();
-  REQUIRE(dict.o.size() == 14);
+  REQUIRE(dict.o.size() == 16);
   CHECK(dict.o[0].first == "id");
   CHECK(dict.o[1].first == "usr");
   CHECK(dict.o[2].first == "spelling");
@@ -391,11 +391,13 @@ TEST_CASE("graph_query: Sym value type — is_stub, loc, to_dict key order") {
   CHECK(dict.o[6].first == "file");
   CHECK(dict.o[7].first == "line");
   CHECK(dict.o[8].first == "col");
-  CHECK(dict.o[9].first == "is_definition");
-  CHECK(dict.o[10].first == "is_pure");
-  CHECK(dict.o[11].first == "is_static");
-  CHECK(dict.o[12].first == "is_instantiation");
-  CHECK(dict.o[13].first == "is_stub");
+  CHECK(dict.o[9].first == "end_line");
+  CHECK(dict.o[10].first == "end_col");
+  CHECK(dict.o[11].first == "is_definition");
+  CHECK(dict.o[12].first == "is_pure");
+  CHECK(dict.o[13].first == "is_static");
+  CHECK(dict.o[14].first == "is_instantiation");
+  CHECK(dict.o[15].first == "is_stub");
 }
 
 // ---------------------------------------------------------------------------

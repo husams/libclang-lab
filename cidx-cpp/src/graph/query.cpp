@@ -125,12 +125,19 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   std::optional<int64_t> fid = sym.file_id;
   std::optional<int64_t> line = sym.line;
   std::optional<int64_t> col = sym.col;
+  // end_line/end_col pair with (line, col). Only the best-known site (file_id)
+  // carries an end; the decl-site and stub fallbacks below have no stored end,
+  // so they read nullopt (mirrors query.py:_sym).
+  std::optional<int64_t> end_line = sym.end_line;
+  std::optional<int64_t> end_col = sym.end_col;
 
   if (!fid) {
     // decl-only: fall back to decl site
     fid = sym.decl_file_id;
     line = sym.decl_line;
     col = sym.decl_col;
+    end_line = std::nullopt;
+    end_col = std::nullopt;
   }
 
   if (fid) {
@@ -142,12 +149,16 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
     // else: file_id doesn't exist in cache (unusual) -> file remains nullopt
     s.line = line;
     s.col = col;
+    s.end_line = end_line;
+    s.end_col = end_col;
     s.external = false;
   } else {
     // No registered location: may have decl_path (external/stub)
     s.file = sym.decl_path;
     s.line = sym.decl_line;
     s.col = sym.decl_col;
+    s.end_line = std::nullopt;
+    s.end_col = std::nullopt;
     s.external = sym.decl_path.has_value();
   }
 

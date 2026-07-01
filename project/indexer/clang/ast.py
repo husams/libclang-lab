@@ -245,6 +245,13 @@ def _to_symbol(cursor: cx.Cursor, file_id: int) -> Symbol | None:
         file_id=file_id,
         line=cursor.location.line,
         col=cursor.location.column,
+        # End of this cursor's own extent (the closing '}' of a function/method
+        # definition, or the full extent of a class/struct/union/typedef decl),
+        # paired with (line, col) so (line..end_line) slices the whole entity.
+        # The upsert moves end_line/end_col in lockstep with line/col when a
+        # definition later supersedes a declaration.
+        end_line=cursor.extent.end.line,
+        end_col=cursor.extent.end.column,
         # A declaration cursor records itself as the decl site too; the
         # upsert keeps it when the .cpp definition later takes file/line/col.
         decl_file_id=None if is_def else file_id,
