@@ -740,6 +740,41 @@ TEST_SUITE("clang") {
     CHECK(def->decl_line == 6);
   }
 
+  TEST_CASE(
+      "symbol (line, col) is the start of the DECLARATION extent, not the "
+      "identifying spelling location -- else a source-text slice truncates "
+      "the leading struct/union/enum keyword or a function's return type "
+      "(mirrors test_symbol_extent_end.py::"
+      "test_source_includes_leading_keyword_or_return_type)") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    if (!require_manifests()) {
+      return;
+    }
+    IndexFixture f;
+    const std::string shapes_c = kManifestsDir + "/shapes.c";
+    const int64_t c_id = f.add_owned_file(kManifestsDir, shapes_c);
+    const ParsedTu tu = f.parser.parse(shapes_c, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, c_id);
+    f.indexer.index_headers(tu);
+
+    // struct Shape { ... } (shapes.h:23) -- col must land on `struct`
+    // (col 9), not the identifying spelling location `Shape` (col 16).
+    const auto shape = one_sym(f.db, "Shape", std::string("struct"));
+    REQUIRE(shape);
+    CHECK(shape->line == 23);
+    CHECK(shape->col == 9);
+
+    // double shape_area(const Shape *s) { ... } (shapes.c:12) -- col must
+    // land on the return type `double` (col 1), not the function name
+    // `shape_area` (col 8).
+    const auto shape_area = one_sym(f.db, "shape_area");
+    REQUIRE(shape_area);
+    CHECK(shape_area->line == 12);
+    CHECK(shape_area->col == 1);
+  }
+
   TEST_CASE("shapes.c then shapes.h: resolved rows skipped but decl-patched "
             "(G15); subtree/body pruning (G21); `macro` unreachable (G22); "
             "linkage spellings (D13)") {

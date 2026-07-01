@@ -115,6 +115,20 @@ ExpansionLoc cursor_extent_end(LibClang &lib, CXCursor cursor) {
   return loc;
 }
 
+// Start of cursor.extent as an expansion site -- NOT cursor.location (which is
+// the identifying spelling location, e.g. the class/function NAME). extent.start
+// includes the leading class/struct/union/enum keyword and, for a function/
+// method, its return type (and out-of-line qualifier, e.g. `Circle::`), so
+// (line, col)..(end_line, end_col) slices the WHOLE declaration (ast.py mirror).
+ExpansionLoc cursor_extent_start(LibClang &lib, CXCursor cursor) {
+  ExpansionLoc loc;
+  unsigned offset = 0;
+  lib.clang_getExpansionLocation(
+      lib.clang_getRangeStart(lib.clang_getCursorExtent(cursor)), &loc.file,
+      &loc.line, &loc.col, &offset);
+  return loc;
+}
+
 // Declaration location of a mint target's reference cursor. The target of a
 // mint (callee/base/override/primary) carries a real source location even when
 // its definition body is never separately indexed -- e.g. an implicit/defaulted
@@ -493,8 +507,12 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
     sym.type_info = std::move(type_info);
   }
   sym.file_id = file_id;
-  sym.line = static_cast<int64_t>(loc.line);
-  sym.col = static_cast<int64_t>(loc.col);
+  // Start of this cursor's own extent -- NOT `loc` (cursor.location, the
+  // identifying spelling location) -- so (line, col)..(end_line, end_col)
+  // slices the WHOLE declaration (ast.py:_to_symbol).
+  const ExpansionLoc start = cursor_extent_start(lib, cursor);
+  sym.line = static_cast<int64_t>(start.line);
+  sym.col = static_cast<int64_t>(start.col);
   // End of this cursor's own extent, paired with (line, col) so
   // (line..end_line) slices the whole entity (ast.py:_to_symbol). The upsert
   // moves end_line/end_col in lockstep with line/col.
