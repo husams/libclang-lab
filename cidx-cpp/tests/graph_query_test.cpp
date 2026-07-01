@@ -167,6 +167,38 @@ TEST_CASE("graph_query: get_by_id / get_by_usr on seeded DB") {
 }
 
 // ---------------------------------------------------------------------------
+// G2b: files() resolves a grouped component's CLONE-RELATIVE path (v24/v25
+// regression). A component grouped under a repository stores its `path`
+// RELATIVE to the repository's active clone root (relativize_component);
+// files() must route through Storage::component_abs_base like the writable
+// side's file_abs_path does, else Sym.file comes back clone-relative
+// ("./region.c") instead of the real absolute path.
+// ---------------------------------------------------------------------------
+TEST_CASE("graph_query: files() resolves grouped relative component path") {
+  Storage db(":memory:");
+  int64_t rid = db.add_repository("r");
+  int64_t clone_id = db.add_clone(rid, "/w/a");
+  db.set_active_clone(rid, clone_id);
+  int64_t comp = db.add_component("r", "/w/a", "repo");
+  db.set_component_repository(comp, rid);
+  db.relativize_component(comp, "/w/a"); // stored path becomes "."
+  int64_t dir = db.add_directory(comp, "");
+  int64_t fid = db.add_file(dir, "region.c");
+
+  Symbol sym = make_sym("c:@F@main", "main", "function", "main");
+  sym.file_id = fid;
+  sym.line = 1;
+  sym.col = 1;
+  db.add_symbol(sym);
+
+  GraphQuery g(db, ":memory:");
+  auto s = g.get_by_usr("c:@F@main");
+  REQUIRE(s);
+  REQUIRE(s->file);
+  CHECK(*s->file == "/w/a/region.c");
+}
+
+// ---------------------------------------------------------------------------
 // G3: edges_in / edges_out direction
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: edges_in / edges_out direction") {

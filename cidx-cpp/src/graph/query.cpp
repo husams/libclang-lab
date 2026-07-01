@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -68,16 +70,24 @@ bool GraphQuery::is_resolved() {
 
 // ---------------------------------------------------------------------------
 // File cache: {file_id -> (abs_path, component_name)}
-// Batch query mirrors query.py:_files() (query.py:587-604).
+// Batch query mirrors query.py:_files() -- routes each distinct component
+// through Storage::component_abs_base (the resolution choke point, v24)
+// rather than joining component.path raw: a grouped component's stored path
+// is RELATIVE to its repository's active clone root, so using it as-is would
+// hand back a clone-relative (unopenable) path.
 // ---------------------------------------------------------------------------
 
 const std::unordered_map<int64_t, std::pair<std::string, std::optional<std::string>>> &
 GraphQuery::files() {
   if (!file_cache_) {
     std::unordered_map<int64_t, std::pair<std::string, std::optional<std::string>>> cache;
+    std::map<std::tuple<std::string, std::optional<std::string>, std::optional<int64_t>>,
+              std::string>
+        abs_base_cache;
     auto &raw = db_.raw_db();
     auto st = raw.prepare(
         "SELECT f.id AS fid, c.name AS cname, c.path AS root, "
+        "       c.version AS version, c.repository_id AS repo_id, "
         "       d.path AS rel, f.name AS name "
         "FROM file f JOIN directory d ON d.id = f.directory_id "
         "JOIN component c ON c.id = d.component_id");
@@ -85,13 +95,28 @@ GraphQuery::files() {
       const int64_t fid = st.col_int64(0);
       const std::string cname = st.col_text(1);
       const std::string root = st.col_text(2);
-      const std::string rel = st.col_text(3);
-      const std::string name = st.col_text(4);
+      const std::optional<std::string> version =
+          st.col_is_null(3) ? std::nullopt : std::optional<std::string>(st.col_text(3));
+      const std::optional<int64_t> repo_id =
+          st.col_is_null(4) ? std::nullopt : std::optional<int64_t>(st.col_int64(4));
+      const std::string rel = st.col_text(5);
+      const std::string name = st.col_text(6);
+
+      const auto key = std::make_tuple(root, version, repo_id);
+      auto it = abs_base_cache.find(key);
+      if (it == abs_base_cache.end()) {
+        Component comp_stub;
+        comp_stub.path = root;
+        comp_stub.version = version;
+        comp_stub.repository_id = repo_id;
+        it = abs_base_cache.emplace(key, db_.component_abs_base(comp_stub)).first;
+      }
+      const std::string &eff = it->second;
       std::string path;
       if (!rel.empty()) {
-        path = pathutil::join(root, rel, name);
+        path = pathutil::join(eff, rel, name);
       } else {
-        path = pathutil::join(root, name);
+        path = pathutil::join(eff, name);
       }
       cache[fid] = {path, cname};
     }
