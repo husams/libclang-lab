@@ -759,8 +759,42 @@ class Entity:
         specialization or an instantiation of a template (e.g.
         ``[TemplateArg(#0 type int)]`` for ``Wrapper<int>``). Empty for a plain,
         non-templated entity. Available on every entity -- not just records -- so
-        an instance member node can list its bindings too."""
+        an instance member node can list its bindings too.
+
+        The low-level view: each :class:`TemplateArg` carries ``arg_kind`` (type
+        vs. value), the ``literal`` spelling, and a ``ref_id`` linking a
+        class-type argument to its indexed symbol. For the resolved-type view use
+        :attr:`template_argument_types` / :meth:`template_argument_entities`."""
         return self._cb.graph.template_args(self.sym)
+
+    @property
+    def template_argument_types(self) -> list["Type"]:
+        """The concrete template arguments as :class:`Type` objects, in order --
+        the actual types a template was instantiated with: ``[Type('int')]`` for
+        ``Wrapper<int>``, ``[Type('app::Cache')]`` for ``Singleton<app::Cache>``.
+
+        Each :class:`Type` exposes ``spelling`` / ``name`` and resolves to its
+        declaring entity via :meth:`Type.declaration`; for a precise, ref-id
+        backed resolution use :meth:`template_argument_entities` instead. A
+        non-type (value) argument carries its value text as the spelling so the
+        list stays position-aligned with :attr:`template_arguments`."""
+        return [Type(ta.literal or "", self._cb) for ta in self.template_arguments]
+
+    def template_argument_entities(self) -> "list[Optional[Entity]]":
+        """The declaring entity of each template argument, in order, resolved
+        precisely from the stored ``ref_id`` -- e.g. ``Singleton<app::Cache>``
+        yields ``[Class('app::Cache' ...)]`` and ``Box<Color>`` yields
+        ``[Enum('geo::Color' ...)]``.
+
+        Position ``i`` is ``None`` when the argument is a builtin/unindexed type
+        (``int``) or a non-type value (``64``) -- i.e. whenever no indexed symbol
+        backs it. Pair with :attr:`template_argument_types` for the textual
+        (always-present) view."""
+        out: list[Optional[Entity]] = []
+        for ta in self.template_arguments:
+            sym = self._cb.graph.get(ta.ref_id) if ta.ref_id is not None else None
+            out.append(self._cb.wrap(sym))
+        return out
 
     @property
     def kind(self) -> str:
@@ -878,6 +912,9 @@ class Entity:
         display = self.display_name
         if display != self.name:
             d["display_name"] = display
+        targs = self.template_arguments
+        if targs:
+            d["template_arguments"] = [ta.to_dict() for ta in targs]
         decl = self.declaration
         if decl is not None:
             d["declaration"] = decl.to_dict()

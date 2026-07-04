@@ -61,6 +61,10 @@ public:
 // explicit instantiation for int: NOT a specialization.
 template class Box<int>;
 
+// a record type used as a template argument (exercises ref-id resolution).
+struct Widget { int w; };
+template class Box<Widget>;
+
 // a function that instantiates Box<char> by using it.
 char use() {
     Box<char> bc('x');
@@ -179,3 +183,60 @@ def test_query_layer_template_readers(cb):
     inst = box.instantiations()[0]
     args = g.template_args(inst.sym)
     assert args and args[0].arg_kind == 1 and args[0].literal in ("int", "bool")
+
+
+# --------------------------------------------------------------------------- #
+# display name + the resolved list-of-types views
+# --------------------------------------------------------------------------- #
+
+
+def _instance_by_arg(cb, literal):
+    """The Box instance/specialization whose single arg spelling is `literal`."""
+    box = _box_template(cb)
+    for e in box.instantiations() + box.specializations():
+        if [a.literal for a in e.template_arguments] == [literal]:
+            return e
+    raise AssertionError(f"no Box instance with arg {literal!r}")
+
+
+def test_display_name_carries_template_args(cb):
+    # display_name keeps the namespace AND the concrete argument, so two
+    # instances are told apart (name/spelling both collapse to nn::Box / Box).
+    box_int = _instance_by_arg(cb, "int")
+    box_bool = _instance_by_arg(cb, "bool")
+    assert box_int.display_name == "nn::Box<int>"
+    assert box_bool.display_name == "nn::Box<bool>"
+    assert box_int.name == box_bool.name == "nn::Box"
+    # __repr__ uses it, so the two reprs differ.
+    assert repr(box_int) != repr(box_bool)
+    assert "Box<int>" in repr(box_int)
+
+
+def test_template_argument_types_are_type_objects(cb):
+    box_int = _instance_by_arg(cb, "int")
+    types = box_int.template_argument_types
+    assert [t.spelling for t in types] == ["int"]
+    # a class-type argument resolves through the Type view too.
+    box_widget = _instance_by_arg(cb, "nn::Widget")
+    wtypes = box_widget.template_argument_types
+    assert [t.name for t in wtypes] == ["nn::Widget"]
+
+
+def test_template_argument_entities_resolve_via_ref_id(cb):
+    # a builtin argument has no backing entity ...
+    box_int = _instance_by_arg(cb, "int")
+    assert box_int.template_argument_entities() == [None]
+    # ... a record argument resolves to its declaring entity by ref_id.
+    box_widget = _instance_by_arg(cb, "nn::Widget")
+    ents = box_widget.template_argument_entities()
+    assert len(ents) == 1 and ents[0] is not None
+    assert ents[0].name == "nn::Widget"
+    assert isinstance(ents[0], Record)
+
+
+def test_to_dict_surfaces_display_name_and_args(cb):
+    box_widget = _instance_by_arg(cb, "nn::Widget")
+    d = box_widget.to_dict()
+    assert d["display_name"] == "nn::Box<Widget>"
+    assert d["template_arguments"][0]["literal"] == "nn::Widget"
+    assert d["template_arguments"][0]["kind_name"] == "type"
