@@ -683,6 +683,8 @@ class CodeBase:
         if base is None:
             return out
         for e in self._lookup(base):
+            if not isinstance(e, Record):
+                continue
             if not _is_instance(e) or not _name_matches(base, e):
                 continue
             if want is not None:
@@ -734,6 +736,31 @@ class Entity:
     @property
     def spelling(self) -> str:
         return self.sym.spelling
+
+    @property
+    def display_name(self) -> str:
+        """The fully-qualified name WITH concrete template arguments, so two
+        instantiations are told apart: ``cont::Wrapper<int>`` vs
+        ``cont::Wrapper<bool>`` (the primary template reads ``cont::Wrapper<T>``).
+
+        Composed from the qualified :attr:`name` (``cont::Wrapper``) plus the
+        ``<...>`` suffix of the stored ``display_name`` (``Wrapper<int>``), so the
+        namespace qualification is kept. Falls back to :attr:`name` for a
+        non-templated symbol. Prefer this over :attr:`name` when printing
+        template instances -- :attr:`name`/:attr:`spelling` drop the arguments."""
+        dn = self.sym.display_name
+        if dn and "<" in dn:
+            return _strip_template_args(self.name) + dn[dn.index("<") :]
+        return self.name
+
+    @property
+    def template_arguments(self) -> list[TemplateArg]:
+        """The concrete template arguments this entity binds, when it is a
+        specialization or an instantiation of a template (e.g.
+        ``[TemplateArg(#0 type int)]`` for ``Wrapper<int>``). Empty for a plain,
+        non-templated entity. Available on every entity -- not just records -- so
+        an instance member node can list its bindings too."""
+        return self._cb.graph.template_args(self.sym)
 
     @property
     def kind(self) -> str:
@@ -848,6 +875,9 @@ class Entity:
     def to_dict(self) -> dict:
         d = self.sym.to_dict()
         d["entity"] = type(self).__name__
+        display = self.display_name
+        if display != self.name:
+            d["display_name"] = display
         decl = self.declaration
         if decl is not None:
             d["declaration"] = decl.to_dict()
@@ -860,7 +890,7 @@ class Entity:
         return hash(self.sym.id)
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.name!r} @{self.location.loc})"
+        return f"{type(self).__name__}({self.display_name!r} @{self.location.loc})"
 
 
 # --------------------------------------------------------------------------- #
@@ -1787,14 +1817,6 @@ class Record(Entity):
         pure-virtual (a defaulted virtual destructor is allowed) and it has no
         data members. Equivalent to ``class_kind is ClassKind.INTERFACE``."""
         return self.class_kind is ClassKind.INTERFACE
-
-    @property
-    def template_arguments(self) -> list[TemplateArg]:
-        """The concrete template arguments this record binds, when it is a
-        specialization or an instantiation of a class template (e.g.
-        ``[TemplateArg(#0 type bool)]`` for ``Wrapper<bool>``). Empty for a
-        plain, non-templated record."""
-        return self._cb.graph.template_args(self.sym)
 
     @property
     def fields(self) -> list[Field]:

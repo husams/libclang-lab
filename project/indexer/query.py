@@ -367,6 +367,12 @@ class Sym:
     # False; a file-scope `static` free function is reflected by linkage)
     is_instantiation: bool = False  # v13: implicit template-instantiation node
     # (X<int> type node or X<int>::member); definition via instantiates edge
+    display_name: Optional[str] = None  # spelling WITH template arguments, e.g.
+    # ``Wrapper<int>`` for an instantiation/specialization (``Wrapper<T>`` for the
+    # primary template); None/equal-to-spelling for a non-templated symbol. This
+    # is the template-argument-bearing name that tells two instantiations apart
+    # (``qual_name``/``spelling`` are both the bare ``Wrapper``). Deliberately NOT
+    # surfaced in ``to_dict`` -- that view stays byte-identical to the C++ port.
 
     @property
     def loc(self) -> str:
@@ -754,7 +760,7 @@ class DispatchSite:
 # --------------------------------------------------------------------------- #
 
 _SYM_COLS = (
-    "s.id, s.usr, s.spelling, s.qual_name, s.kind, s.type_info, "
+    "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, s.type_info, "
     "s.file_id, s.line, s.col, s.end_line, s.end_col, "
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
@@ -935,6 +941,7 @@ class GraphQuery:
             usr=r["usr"],
             spelling=r["spelling"],
             name=r["qual_name"] or r["spelling"],
+            display_name=r["display_name"],
             kind=SYMBOL_KIND_NAMES.get(r["kind"], r["kind"]),
             type_info=r["type_info"],
             is_definition=bool(r["is_definition"]),
