@@ -560,6 +560,6 @@ def test_namespace_functions_include_templates(tmp_path):
     with CodeBase(GraphQuery(db_path)) as cb:
         ns = cb.get(ids["ns"])
         assert isinstance(ns, Namespace)
-        names = sorted(e.spelling for e in ns.functions)
+        names = sorted(e.spelling for e in ns.functions())
         assert names == ["wrap"]
-        assert all(isinstance(e, FunctionTemplate) for e in ns.functions)
+        assert all(isinstance(e, FunctionTemplate) for e in ns.functions())

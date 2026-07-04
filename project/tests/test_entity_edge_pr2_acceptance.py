@@ -295,27 +295,27 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0410():
-    """Python VERSION must be 0.43.0 (dispatch_calls edge kind 18)."""
+def test_python_version_is_0440():
+    """Python VERSION must be 0.44.0 (alias.aliased() + Namespace accessors)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.43.0", (
-        f"Python VERSION is '{version}'; expected '0.43.0'. "
-        "Bump VERSION to 0.43.0 in cli.py (dispatch_calls edge kind)."
+    assert version == "0.44.0", (
+        f"Python VERSION is '{version}'; expected '0.44.0'. "
+        "Bump VERSION to 0.44.0 in cli.py (alias->instance uses edge)."
     )
 
 
-def test_cpp_version_is_0410():
-    """C++ kVersion must be 0.43.0 (dispatch_calls edge kind 18)."""
+def test_cpp_version_is_0440():
+    """C++ kVersion must be 0.44.0 (alias.aliased() + Namespace accessors)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.43.0", (
-        f"C++ kVersion is '{version}'; expected '0.43.0'. "
-        "Bump kVersion to 0.43.0 in args.hpp (dispatch_calls edge kind)."
+    assert version == "0.44.0", (
+        f"C++ kVersion is '{version}'; expected '0.44.0'. "
+        "Bump kVersion to 0.44.0 in args.hpp (alias->instance uses edge)."
     )
 
 

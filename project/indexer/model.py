@@ -1996,27 +1996,148 @@ class Typedef(Entity):
     def underlying_type(self) -> Optional[Type]:
         return Type(self.sym.type_info, self._cb) if self.sym.type_info else None
 
+    def aliased(self) -> "Optional[Entity]":
+        """The entity this alias directly names -- the *original* type it refers
+        to -- or ``None`` when the underlying type is a builtin / unindexed type
+        (``typedef int Integer;``) or is otherwise not indexed.
+
+        Resolved from the structural ``uses`` edge the indexer emits from an
+        alias to its underlying named type, so it returns the precise indexed
+        declaration -- including a concrete *template instance*::
+
+            typedef Widget WidgetAlias;   ->  Class('Widget')
+            using GadgetAlias = Gadget;    ->  Struct('Gadget')
+            using ColorAlias = Color;      ->  Enum('Color')
+            using IntBox = Box<int>;       ->  Box<int> instance (a Record whose
+                                               .template_arguments give [int])
+            using Handle = OtherAlias;     ->  Typedef('OtherAlias')
+
+        Single-level by design, matching how the type is *written*: an alias of
+        an alias resolves to the next alias, not through to the final record --
+        chain ``.aliased()`` to walk the chain to its end."""
+        for sym in self._cb.graph.neighbors(
+            self.sym, kinds=("uses",), direction="out"
+        ):
+            e = self._cb.wrap(sym)
+            if e is not None:
+                return e
+        return None
+
 
 class Namespace(Entity):
-    """A C++ namespace."""
+    """A C++ namespace.
 
-    def members(self) -> list[Entity]:
-        return self._cb._wrap_all(self._cb.graph.members(self.sym))
+    Beyond :meth:`members` (every symbol declared in the namespace, of any
+    kind), the accessors below return typed, kind-filtered views: records vs.
+    class templates, plain functions vs. function templates, type aliases,
+    enums, variables vs. constants, and nested namespaces."""
 
-    @property
-    def functions(self) -> "list[Function | FunctionTemplate]":
-        """Free functions in this namespace, including free function templates
-        (FunctionTemplate is a sibling of Function, not a subclass)."""
+    def members(self, pattern: Optional[str] = None) -> list[Entity]:
+        """Every symbol declared directly in this namespace, of any kind
+        (records, templates, functions, aliases, enums, variables, nested
+        namespaces, ...). The kind-specific accessors are filtered views of
+        this set.
+
+        ``pattern`` narrows to members whose name contains it (case-insensitive
+        substring of spelling / qualified name / display name); ``None`` returns
+        all."""
         return [
             e
-            for e in self.members()
+            for e in self._cb._wrap_all(self._cb.graph.members(self.sym))
+            if _name_contains(e, pattern)
+        ]
+
+    def functions(
+        self, pattern: Optional[str] = None
+    ) -> "list[Function | FunctionTemplate]":
+        """Free functions in this namespace, INCLUDING free function templates
+        (FunctionTemplate is a sibling of Function, not a subclass). Use
+        :meth:`function_templates` for the template-only view.
+
+        ``pattern`` narrows to functions whose name contains it (case-insensitive
+        substring); ``None`` returns all."""
+        return [
+            e
+            for e in self.members(pattern)
             if isinstance(e, (Function, FunctionTemplate))
             and not isinstance(e, Method)
         ]
 
-    @property
-    def classes(self) -> list[Record]:
-        return [e for e in self.members() if isinstance(e, Record)]
+    def function_templates(
+        self, pattern: Optional[str] = None
+    ) -> "list[FunctionTemplate]":
+        """Free function templates declared directly in this namespace
+        (``template <class T> T identity(T);``) -- the template-only subset of
+        :meth:`functions`. ``pattern`` narrows by name-contains; ``None`` = all."""
+        return [
+            e
+            for e in self.members(pattern)
+            if isinstance(e, FunctionTemplate) and not isinstance(e, Method)
+        ]
+
+    def classes(self, pattern: Optional[str] = None) -> list[Record]:
+        """Plain class / struct / union records declared directly in this
+        namespace -- EXCLUDING class templates (see :meth:`class_templates`) and
+        concrete template instantiations (``Box<int>``). For the template
+        primaries use :meth:`class_templates`.
+
+        ``pattern`` narrows to records whose name contains it (case-insensitive
+        substring), so ``ns.classes("Box")`` returns records named like ``Box``;
+        ``None`` returns all."""
+        return [
+            e
+            for e in self.members(pattern)
+            if isinstance(e, Record)
+            and not isinstance(e, ClassTemplate)
+            and not e.is_instantiation
+        ]
+
+    def class_templates(
+        self, pattern: Optional[str] = None
+    ) -> "list[ClassTemplate]":
+        """Class templates declared directly in this namespace
+        (``template <class T> class Box``). ``pattern`` narrows by name-contains;
+        ``None`` = all."""
+        return [
+            e for e in self.members(pattern) if isinstance(e, ClassTemplate)
+        ]
+
+    def type_aliases(self, pattern: Optional[str] = None) -> "list[Typedef]":
+        """``typedef`` / ``using`` type aliases declared directly in this
+        namespace. Resolve each to the type it names with
+        :meth:`Typedef.aliased`. ``pattern`` narrows by name-contains;
+        ``None`` = all."""
+        return [e for e in self.members(pattern) if isinstance(e, Typedef)]
+
+    def enums(self, pattern: Optional[str] = None) -> "list[Enum]":
+        """Enumerations declared directly in this namespace. ``pattern`` narrows
+        by name-contains; ``None`` = all."""
+        return [e for e in self.members(pattern) if isinstance(e, Enum)]
+
+    def variables(self, pattern: Optional[str] = None) -> "list[Variable]":
+        """All namespace-scope variables declared directly in this namespace,
+        both mutable and const/constexpr. :meth:`constants` is the const subset.
+        ``pattern`` narrows by name-contains; ``None`` = all."""
+        return [e for e in self.members(pattern) if isinstance(e, Variable)]
+
+    def constants(self, pattern: Optional[str] = None) -> "list[Variable]":
+        """Namespace-scope variables whose declared type is *top-level* const
+        (``const int kMax``, ``constexpr double kPi``) -- a best-effort const
+        subset of :meth:`variables`. A pointer-to-const bound to a mutable
+        variable (``const char *name``) is NOT a constant and is excluded.
+        ``pattern`` narrows by name-contains; ``None`` = all."""
+        return [
+            e
+            for e in self.members(pattern)
+            if isinstance(e, Variable)
+            and e.type is not None
+            and _is_top_level_const(e.type.spelling)
+        ]
+
+    def namespaces(self, pattern: Optional[str] = None) -> "list[Namespace]":
+        """Namespaces nested directly in this one. ``pattern`` narrows by
+        name-contains; ``None`` = all."""
+        return [e for e in self.members(pattern) if isinstance(e, Namespace)]
 
 
 class Variable(Entity):
@@ -2212,6 +2333,41 @@ def _base_type_name(spelling: str) -> str:
     s = s.replace("*", " ").replace("&", " ")
     parts = s.split()
     return parts[-1] if parts else ""
+
+
+def _is_top_level_const(spelling: str) -> bool:
+    """True when the *variable itself* is const/constexpr (top-level const), not
+    merely pointing/referring to const data. Best-effort, from the type spelling:
+
+    * ``const int`` / ``const double``   -> True  (constexpr spells as const T)
+    * ``char *const``                    -> True  (const applies to the pointer)
+    * ``const char *``                   -> False (pointer-to-const; var mutable)
+    * ``int``                            -> False
+
+    For a pointer type the const must appear AFTER the last ``*`` to be top-level;
+    for a non-pointer value type any ``const`` is top-level."""
+    if "const" not in spelling:
+        return False
+    star = spelling.rfind("*")
+    if star == -1:  # value type: leading/only const is top-level
+        return True
+    return "const" in spelling[star:]
+
+
+def _name_contains(entity: "Entity", pattern: Optional[str]) -> bool:
+    """True when ``pattern`` (case-insensitive substring) occurs in the entity's
+    bare spelling, its fully-qualified name, or its display name (which carries
+    template arguments). ``pattern`` of ``None`` matches everything -- the
+    unfiltered case. Used by the :class:`Namespace` member accessors so
+    ``ns.classes("Box")`` returns records whose name contains ``Box``."""
+    if pattern is None:
+        return True
+    p = pattern.lower()
+    return (
+        p in entity.spelling.lower()
+        or p in entity.name.lower()
+        or p in entity.display_name.lower()
+    )
 
 
 # --------------------------------------------------------------------------- #

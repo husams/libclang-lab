@@ -1743,6 +1743,15 @@ def _index_edges_notxn(
                 if _v_sym is not None:
                     _emit_type_use(db, _v_sym.id, cursor.type, file_id, cursor.location)
         elif ck in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):
+            # Stage 2: a named alias of a class-template specialization mints the
+            # X<B> instance entity (own composes/aggregates/associates via T->B).
+            # Minted FIRST -- before the uses-emit below -- so an alias OF a
+            # template instance (`using IntBox = Box<int>;`) reliably gets a
+            # structural uses(7) edge -> the X<B> instance (keyed on the spec USR),
+            # exactly like a `Box<int> field;` member (FIELD_DECL, above). Without
+            # this order the instance is not yet minted when emit runs, so the
+            # alias would resolve to no underlying target at all.
+            _mint_named_instance(db, cursor)
             _t_usr = cursor.get_usr()
             if _t_usr:
                 _t_sym = db.lookup_symbol(_t_usr)
@@ -1754,9 +1763,6 @@ def _index_edges_notxn(
                         file_id,
                         cursor.location,
                     )
-            # Stage 2: a named alias of a class-template specialization mints the
-            # X<B> instance entity (own composes/aggregates/associates via T->B).
-            _mint_named_instance(db, cursor)
 
         # -- CXX_BASE_SPECIFIER: inherits ---------------------------------
         # Derived class is the enclosing record from the walk parent, NOT
