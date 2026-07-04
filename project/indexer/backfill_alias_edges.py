@@ -111,15 +111,23 @@ def _parse_file(db: Storage, file_id: int, use_cache: bool = True):
 
 
 def _backfill_one_file(
-    db: Storage, file_id: int, want_usrs: set[str], apply: bool, use_cache: bool
+    db: Storage,
+    file_id: int,
+    want_usrs: set[str],
+    apply: bool,
+    use_cache: bool,
+    verbose: bool = False,
 ) -> list[tuple[str, str]]:
     """Parse one file and, for its candidate alias cursors, emit the missing
     ``uses`` edge to the instance. Returns ``[(alias_usr, instance_display), ...]``
-    for the edges that were (or would be) added."""
+    for the edges that were (or would be) added. When ``verbose`` is set, prints
+    the file being parsed and the per-alias outcome (linked / no-instance)."""
     tu, abspath = _parse_file(db, file_id, use_cache=use_cache)
     if tu is None:
         print(f"  warning: could not parse file id {file_id}", file=sys.stderr)
         return []
+    if verbose:
+        print(f"  file: {abspath}  ({len(want_usrs)} candidate alias(es))")
 
     added: list[tuple[str, str]] = []
     for cursor in tu.cursor.walk_preorder():
@@ -130,12 +138,16 @@ def _backfill_one_file(
             continue  # not a candidate (already linked, or a different alias)
         sym = db.lookup_symbol(usr)
         if sym is None:
+            if verbose:
+                print(f"      {usr}: no indexed symbol -- skipped")
             continue
         # Only act when the underlying type is a template specialization -- that
         # is the case the old extraction dropped. Mint the instance (idempotent;
         # keyed on the spec USR) then look for the uses target it produces.
         before = _uses_target(db, sym.id)
         if before is not None:
+            if verbose:
+                print(f"      {usr}: already linked -> {before} -- skipped")
             continue  # already has an edge (raced with another pass); skip
         if apply:
             with db.transaction():
@@ -153,6 +165,15 @@ def _backfill_one_file(
             tgt = _dry_run_target(db, cursor)
         if tgt is not None:
             added.append((usr, tgt))
+            if verbose:
+                verb = "linked" if apply else "would link"
+                print(f"      {sym.spelling}: {verb} -> {tgt}")
+        elif verbose:
+            underlying = cursor.underlying_typedef_type.spelling
+            print(
+                f"      {sym.spelling}: underlying {underlying!r} is not an "
+                "indexed template instance -- no edge (builtin/unindexed)"
+            )
     return added
 
 
@@ -187,6 +208,7 @@ def _dry_run_target(db: Storage, cursor) -> str | None:
 
 
 def run(args) -> int:
+    verbose = getattr(args, "verbose", False)
     index = args.index or default_index_path()
     if not os.path.exists(index):
         print(f"error: no index at {index}", file=sys.stderr)
@@ -209,7 +231,12 @@ def run(args) -> int:
         total = 0
         for file_id, want in sorted(candidates.items()):
             added = _backfill_one_file(
-                db, file_id, want, apply=args.apply, use_cache=not args.no_cache
+                db,
+                file_id,
+                want,
+                apply=args.apply,
+                use_cache=not args.no_cache,
+                verbose=verbose,
             )
             for alias_usr, tgt in added:
                 arrow = "->" if args.apply else "would ->"
@@ -244,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
         "--no-cache",
         action="store_true",
         help="always reparse from source (ignore the on-disk AST cache)",
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="print each file parsed and the per-alias outcome",
     )
     return run(ap.parse_args(argv))
 
