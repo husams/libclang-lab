@@ -2114,6 +2114,15 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
         }
       }
     } else if (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl) {
+      // Stage 2: a named alias of a class-template specialization mints the
+      // X<B> instance entity (own composes/aggregates/associates via T->B).
+      // Minted FIRST -- before the uses-emit below -- so an alias OF a template
+      // instance (`using IntBox = Box<int>;`) reliably gets a structural uses(7)
+      // edge -> the X<B> instance (keyed on the spec USR), exactly like a
+      // `Box<int> field;` member (FIELD_DECL, above). Without this order the
+      // instance is not yet minted when emit runs, so the alias would resolve to
+      // no underlying target at all.
+      mint_named_instance(lib, db_, cursor);
       const std::string td_usr =
           CxString(lib, lib.clang_getCursorUSR(cursor)).str();
       if (!td_usr.empty()) {
@@ -2124,9 +2133,6 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                         file_id, cursor, 0);
         }
       }
-      // Stage 2: a named alias of a class-template specialization mints the
-      // X<B> instance entity (own composes/aggregates/associates via T->B).
-      mint_named_instance(lib, db_, cursor);
     }
 
     // -- CXX_BASE_SPECIFIER: inherits ----------------------------------
