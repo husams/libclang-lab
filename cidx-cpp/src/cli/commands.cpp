@@ -3029,6 +3029,63 @@ int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
+// v27: symbols defined in more than one backend (query.py:cmd_graph_redefined).
+int cmd_graph_redefined(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto syms = h->g->redefined(args.graph_limit);
+  graph::emit_syms(syms, args.graph_json, *ctx.out,
+                   "symbols redefined per backend (multi_def > 1):");
+  return 0;
+}
+
+// v27: each backend body of a symbol + its possible-call fan-out
+// (query.py:cmd_graph_definitions -- output byte-identical).
+int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  auto defs = h->g->definitions(sym->id);
+  std::vector<graph::Definition> possible;
+  if (!args.direct_only) possible = h->g->possible_callees(sym->id);
+  if (args.graph_json) {
+    using namespace json_out;
+    Array darr;
+    for (const auto &d : defs) darr.push_back(d.to_dict());
+    Array parr;
+    for (const auto &d : possible) parr.push_back(d.to_dict());
+    Object o;
+    o.push_back({"symbol", sym->to_dict()});
+    o.push_back({"multi_def", Value::of(sym->multi_def)});
+    o.push_back({"definitions", Value::arr(std::move(darr))});
+    o.push_back({"possible_callees", Value::arr(std::move(parr))});
+    *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
+    return 0;
+  }
+  *ctx.out << "definitions of " << sym->name << " (" << defs.size()
+           << " backend body/bodies):\n";
+  for (const auto &d : defs) {
+    *ctx.out << "  " << fmt::ljust(d.sym.kind, 14) << " @" << d.loc()
+             << "  component=" << (d.component ? *d.component : "None") << "\n";
+  }
+  if (!possible.empty()) {
+    *ctx.out << "possible-call targets from " << sym->name << ":\n";
+    std::size_t w = 0;
+    for (const auto &d : possible) {
+      const std::string &nm = d.sym.name.empty() ? d.sym.usr : d.sym.name;
+      if (nm.size() > w) w = nm.size();
+    }
+    for (const auto &d : possible) {
+      const std::string &nm = d.sym.name.empty() ? d.sym.usr : d.sym.name;
+      *ctx.out << "  " << fmt::ljust(nm, static_cast<int>(w)) << "  @" << d.loc()
+               << "\n";
+    }
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Portable-paths commands (v14): component show/set-version,
 //                               label add/rm/list/resolve
@@ -3532,6 +3589,8 @@ int run_command(const ParsedArgs &args, Context &ctx) {
     if (args.what == "path")      return cmd_graph_path(args, ctx);
     if (args.what == "hierarchy") return cmd_graph_hierarchy(args, ctx);
     if (args.what == "dispatch")  return cmd_graph_dispatch(args, ctx);
+    if (args.what == "redefined")   return cmd_graph_redefined(args, ctx);
+    if (args.what == "definitions") return cmd_graph_definitions(args, ctx);
   }
   if (args.command == "component") {
     if (args.what == "show") return cmd_component_show(args, ctx);

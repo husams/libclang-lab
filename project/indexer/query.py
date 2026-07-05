@@ -373,6 +373,14 @@ class Sym:
     # is the template-argument-bearing name that tells two instantiations apart
     # (``qual_name``/``spelling`` are both the bare ``Wrapper``). Deliberately NOT
     # surfaced in ``to_dict`` -- that view stays byte-identical to the C++ port.
+    multi_def: int = 0  # v27: number of definitions (bodies). >1 == redefined
+    # per backend (library method left undefined, each server reimplements it).
+
+    @property
+    def is_redefined(self) -> bool:
+        """True when this symbol has more than one definition (a per-backend
+        redefinition). See GraphQuery.definitions()/possible_callees()."""
+        return self.multi_def > 1
 
     @property
     def loc(self) -> str:
@@ -448,6 +456,41 @@ class Sym:
         nm = self.name or self.usr
         tag = " stub" if self.is_stub else ""
         return f"Sym(#{self.id} {self.kind} {nm} @{self.loc}{tag})"
+
+
+@dataclass(frozen=True)
+class Definition:
+    """One backend body of a (possibly redefined) symbol -- a `definition` row.
+
+    `sym` is the symbol being defined; `file`/`line`/`col` locate THIS body
+    (a redefined symbol has several, one per backend file/component)."""
+
+    sym: Sym
+    component: Optional[str]
+    file: Optional[File]
+    line: Optional[int]
+    col: Optional[int]
+    end_line: Optional[int] = None
+    end_col: Optional[int] = None
+
+    @property
+    def loc(self) -> str:
+        if not self.file:
+            return "<no-location>"
+        return f"{self.file.name}:{self.line}" if self.line else self.file.name
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "usr": self.sym.usr,
+            "name": self.sym.name,
+            "kind": self.sym.kind,
+            "component": self.component,
+            "file": self.file.name if self.file else None,
+            "line": self.line,
+            "col": self.col,
+            "end_line": self.end_line,
+            "end_col": self.end_col,
+        }
 
 
 @dataclass(frozen=True)
@@ -764,7 +807,7 @@ _SYM_COLS = (
     "s.file_id, s.line, s.col, s.end_line, s.end_col, "
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
-    "s.access, s.parent_usr, s.resolved"
+    "s.access, s.parent_usr, s.resolved, s.multi_def"
 )
 
 
@@ -958,6 +1001,7 @@ class GraphQuery:
             end_line=end_line,
             end_col=end_col,
             external=external,
+            multi_def=(r["multi_def"] if "multi_def" in r.keys() else 0),
         )
 
     @staticmethod
@@ -1819,6 +1863,68 @@ class GraphQuery:
                         )
                     )
         return result
+
+    # ===================================================================== #
+    # 3b. MULTI-DEFINITION (per-backend redefinitions, v27)
+    # ===================================================================== #
+
+    def redefined(self, limit: int = 500) -> list[Sym]:
+        """Every symbol defined in more than one backend (multi_def > 1) -- the
+        answer to "list all re-defined". Most-redefined first."""
+        rows = self._c.execute(
+            "SELECT * FROM symbol WHERE multi_def > 1 "
+            "ORDER BY multi_def DESC, qual_name, spelling LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._sym(r) for r in rows]
+
+    def _definition_rows(self, sql: str, params: Sequence[Any]) -> list[Definition]:
+        files = self._files()
+        out: list[Definition] = []
+        for r in self._c.execute(sql, params):
+            sym = self.get(r["symbol_id"])
+            if sym is None:
+                continue
+            path, comp = files.get(r["file_id"], (None, None))
+            out.append(
+                Definition(
+                    sym=sym,
+                    component=comp,
+                    file=self.make_file(path, component_name=comp),
+                    line=r["line"],
+                    col=r["col"],
+                    end_line=r["end_line"],
+                    end_col=r["end_col"],
+                )
+            )
+        return out
+
+    def definitions(self, sym) -> list[Definition]:
+        """The distinct bodies of `sym`, one per backend (component, file). A
+        normal symbol has one; a redefined one has several."""
+        sid = self._resolve_id(sym)
+        return self._definition_rows(
+            "SELECT symbol_id, file_id, line, col, end_line, end_col "
+            "FROM definition WHERE symbol_id = ? ORDER BY file_id, line",
+            (sid,),
+        )
+
+    def possible_callees(self, sym) -> list[Definition]:
+        """The candidate target BODIES a call to/through `sym` may reach at run
+        time: for each redefined callee of any of `sym`'s bodies, every backend
+        definition of that callee (materialised `possible_call`). This is the
+        "possible call" fan-out -- e.g. ``do()`` -> {Server1::reg, Server2::reg}."""
+        sid = self._resolve_id(sym)
+        return self._definition_rows(
+            "SELECT td.symbol_id AS symbol_id, td.file_id AS file_id, "
+            "       td.line AS line, td.col AS col, "
+            "       td.end_line AS end_line, td.end_col AS end_col "
+            "FROM possible_call pc "
+            "JOIN definition sd ON sd.id = pc.src_def_id "
+            "JOIN definition td ON td.id = pc.dst_def_id "
+            "WHERE sd.symbol_id = ? ORDER BY td.symbol_id, td.file_id",
+            (sid,),
+        )
 
     # ===================================================================== #
     # 4. DYNAMIC DISPATCH

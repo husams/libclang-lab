@@ -145,6 +145,7 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   s.access = sym.access;
   s.parent_usr = sym.parent_usr;
   s.resolved = sym.resolved;
+  s.multi_def = sym.multi_def; // v27
 
   // Determine the best-known location (mirrors query.py:_sym, query.py:606-639)
   std::optional<int64_t> fid = sym.file_id;
@@ -638,6 +639,60 @@ std::vector<Sym> GraphQuery::dispatch_targets(int64_t sym_id) {
     frontier = std::move(nxt);
   }
   return targets;
+}
+
+// ---------------------------------------------------------------------------
+// v27 multi-definition
+// ---------------------------------------------------------------------------
+
+std::vector<Sym> GraphQuery::redefined(int limit) {
+  auto syms = db_.redefined_symbols(limit);
+  std::vector<Sym> out;
+  out.reserve(syms.size());
+  for (auto &sym : syms) {
+    out.push_back(make_sym_from_symbol(sym));
+  }
+  return out;
+}
+
+// Build Definition records from raw definition rows, joining file/component
+// from the file cache (mirrors query.py:_definition_rows).
+static std::vector<Definition>
+defs_from_rows(GraphQuery &g,
+               const std::vector<Storage::DefinitionRow> &rows,
+               const std::unordered_map<
+                   int64_t, std::pair<std::string, std::optional<std::string>>> &fc) {
+  std::vector<Definition> out;
+  out.reserve(rows.size());
+  for (const auto &r : rows) {
+    auto sym = g.get_by_id(r.symbol_id);
+    if (!sym) {
+      continue;
+    }
+    Definition d;
+    d.sym = *sym;
+    if (r.file_id) {
+      auto it = fc.find(*r.file_id);
+      if (it != fc.end()) {
+        d.file = it->second.first;
+        d.component = it->second.second;
+      }
+    }
+    d.line = r.line;
+    d.col = r.col;
+    d.end_line = r.end_line;
+    d.end_col = r.end_col;
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+std::vector<Definition> GraphQuery::definitions(int64_t sym_id) {
+  return defs_from_rows(*this, db_.definitions_of(sym_id), files());
+}
+
+std::vector<Definition> GraphQuery::possible_callees(int64_t sym_id) {
+  return defs_from_rows(*this, db_.possible_callees_of(sym_id), files());
 }
 
 // ---------------------------------------------------------------------------

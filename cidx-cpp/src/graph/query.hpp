@@ -169,6 +169,12 @@ public:
   // query.py:dispatch_targets (R4: insertion-ordered BFS, self first if !pure).
   std::vector<Sym> dispatch_targets(int64_t sym_id);
 
+  // ---- v27 multi-definition (query.py:GraphQuery.redefined/definitions/
+  //      possible_callees) -----------------------------------------------------
+  std::vector<Sym> redefined(int limit = 500);
+  std::vector<Definition> definitions(int64_t sym_id);
+  std::vector<Definition> possible_callees(int64_t sym_id);
+
   // ---- Accessors -----------------------------------------------------------
 
   const std::string &db_path() const { return db_path_; }

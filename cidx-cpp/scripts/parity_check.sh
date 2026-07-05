@@ -259,6 +259,17 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve --rebuild
 
+  # v27: multi-definition CLI (manifests/multidef has the per-backend redefined
+  # Context::reg + static Context::count; run() fans out to both reg bodies).
+  # Output is golden-locked byte-for-byte across both tools. (-h help is NOT
+  # diffed: Python argparse vs C++ hand-rolled help legitimately differ.)
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph redefined
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph redefined --json
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::run
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::run --json
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::reg --direct-only
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::reg --json
+
   # M3: graphlab fixture — includes chain.cpp (value-typed local B passed as
   # argument to top_rank) which exercises call_arg/edge_site provenance with
   # UNEXPOSED_EXPR arguments.  Parity here golden-locks that Python and C++

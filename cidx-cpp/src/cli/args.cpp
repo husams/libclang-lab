@@ -298,15 +298,15 @@ const char kDumpCcHelp[] =
 const char kGraphUsage[] =
     "usage: cidx graph [-h]\n"
     "                  "
-    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch} ...\n";
+    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions} ...\n";
 
 const char kGraphHelp[] =
     "usage: cidx graph [-h]\n"
     "                  "
-    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch} ...\n"
+    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions} ...\n"
     "\n"
     "positional arguments:\n"
-    "  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch}\n"
+    "  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions}\n"
     "    callers             functions that call the symbol\n"
     "    callees             functions the symbol calls\n"
     "    refs                incoming references (calls + uses) to the symbol\n"
@@ -315,6 +315,8 @@ const char kGraphHelp[] =
     "    path                shortest path between two symbols, or none\n"
     "    hierarchy           class bases, subclasses, and members\n"
     "    dispatch            run-time targets of a virtual-method call\n"
+    "    redefined           symbols defined in more than one backend\n"
+    "    definitions         each backend body of a symbol + possible-call fan-out\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n";
@@ -544,6 +546,43 @@ const char kGraphDispatchHelp[] =
     "\n"
     "options:\n"
     GRAPH_SELECTOR_OPTIONS;
+
+// v27: definitions / redefined (per-backend multi-definition).
+const char kGraphDefinitionsUsage[] =
+    "usage: cidx graph definitions [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                              [--kind {class,class-template,constructor,"
+    "destructor,enum,enum-constant,function,function-template,macro,member,"
+    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                              [--first] [--db PATH] [--json] [--limit N]\n"
+    "                              [--direct-only]\n";
+
+const char kGraphDefinitionsHelp[] =
+    "usage: cidx graph definitions [-h] "
+    "(--usr USR | --id N | --name FUZZY)\n"
+    "                              [--first] [--db PATH] [--json] [--limit N]\n"
+    "                              [--direct-only]\n"
+    "\n"
+    "each backend body of a symbol + its possible-call fan-out\n"
+    "\n"
+    "options:\n"
+    GRAPH_SELECTOR_OPTIONS
+    "  --direct-only         list the backend bodies only (omit the "
+    "possible-call fan-out)\n";
+
+const char kGraphRedefinedUsage[] =
+    "usage: cidx graph redefined [-h] [--db PATH] [--json] [--limit N]\n";
+
+const char kGraphRedefinedHelp[] =
+    "usage: cidx graph redefined [-h] [--db PATH] [--json] [--limit N]\n"
+    "\n"
+    "symbols defined in more than one backend (multi_def>1)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --db PATH             index database to query\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 200)\n";
 
 // The 17 symbol kinds, sorted — sorted(SYMBOL_KINDS) in cli.py.
 #define CIDX_KIND_BRACE                                                        \
@@ -1313,8 +1352,8 @@ const std::vector<std::string> kCommands = {
 const std::vector<std::string> kRepoWhats = {"list", "ls", "show", "add-clone",
                                              "switch", "rm"};
 const std::vector<std::string> kGraphWhats = {
-    "callers", "callees", "refs", "neighbors", "walk", "path", "hierarchy",
-    "dispatch"};
+    "callers",   "callees",  "refs",      "neighbors",   "walk",
+    "path",      "hierarchy", "dispatch", "redefined",   "definitions"};
 const std::vector<std::string> kAstWhats = {"dump", "locals", "conditions",
                                             "cache"};
 const std::vector<std::string> kAstCacheWhats = {"build", "status", "clear"};
@@ -2209,6 +2248,35 @@ const Spec kGraphDispatchSpec = {
     {1},
 };
 
+// v27: definitions (like dispatch/callers: symbol selector + --direct-only).
+const Spec kGraphDefinitionsSpec = {
+    "cidx graph definitions",
+    kGraphDefinitionsUsage,
+    kGraphDefinitionsHelp,
+    {GRAPH_SELECTOR_OPTS,
+     {"--direct-only", '\0', ValueKind::kNone, "--direct-only", nullptr, 0}},
+    {},
+    false,
+    {},
+    {1},
+};
+
+// v27: redefined (no symbol selector -- only --db/--json/--limit).
+const Spec kGraphRedefinedSpec = {
+    "cidx graph redefined",
+    kGraphRedefinedUsage,
+    kGraphRedefinedHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+        {"--json", '\0', ValueKind::kNone, "--json", nullptr, 0},
+        {"--limit", '\0', ValueKind::kInt, "--limit", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {},
+};
+
 // -- ast leaf specs (ADR-006 M5) --------------------------------------------
 // Shared "common" options for all ast sub-commands (mirrors _ast_common).
 // mutex group 2: --cache (kNone/true by default) vs --no-cache (kNone/false).
@@ -2909,7 +2977,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       fill_graph_selector(st);
       pa.transitive = st.flags.count("--transitive") != 0;
       pa.access = opt_value(st, "--access").value_or("all");
-    } else { // dispatch
+    } else if (pa.what == "dispatch") {
       ParseState st =
           parse_leaf(kGraphDispatchSpec, argv, what.next, extras);
       if (st.help) {
@@ -2917,6 +2985,25 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
         return pa;
       }
       fill_graph_selector(st);
+    } else if (pa.what == "definitions") {
+      ParseState st =
+          parse_leaf(kGraphDefinitionsSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphDefinitionsHelp;
+        return pa;
+      }
+      fill_graph_selector(st);
+      pa.direct_only = st.flags.count("--direct-only") != 0;
+    } else { // redefined (no symbol selector; --limit defaults to 200)
+      ParseState st =
+          parse_leaf(kGraphRedefinedSpec, argv, what.next, extras);
+      if (st.help) {
+        pa.help_text = kGraphRedefinedHelp;
+        return pa;
+      }
+      pa.index_db = opt_value(st, "--db");
+      pa.graph_json = st.flags.count("--json") != 0;
+      pa.graph_limit = int_value(st, "--limit", 200);
     }
     // Apply abspath+expanduser to --db for graph (cli.py:1819)
     if (pa.index_db) {

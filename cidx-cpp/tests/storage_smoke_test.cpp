@@ -410,7 +410,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "call_arg", "label", "diagnostic",
                                         "entity_edge_kind", "entity_edge",
                                         "entity_kind", "entity_node",
-                                        "repository", "clone", "decl_site"});
+                                        "repository", "clone", "decl_site", "definition", "def_edge", "possible_call"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -441,7 +441,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                               "decl_col", "decl_path", "is_definition",
                               "is_pure", "is_static", "is_instantiation",
                               "is_named_instance",
-                              "linkage", "access", "parent_usr", "resolved"});
+                              "linkage", "access", "parent_usr", "resolved", "multi_def"});
 
   // the indexes (5 symbol + 2 edge + 1 call_arg + 1 diagnostic)
   std::set<std::string> indexes;
@@ -463,7 +463,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst", "idx_decl_site_symbol"});
+                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {

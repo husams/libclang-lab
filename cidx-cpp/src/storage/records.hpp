@@ -104,6 +104,8 @@ struct Symbol {
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;
   bool resolved = false;
+  int64_t multi_def = 0; // v27: number of definitions (bodies); >1 == redefined
+                         // per backend. Set at resolve, not by add_symbol.
   int64_t id = -1;
 };
 

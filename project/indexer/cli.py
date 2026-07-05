@@ -74,7 +74,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.45.0"
+VERSION = "0.46.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -1693,6 +1693,51 @@ def cmd_graph_dispatch(args) -> int:
     return 0
 
 
+def cmd_graph_redefined(args) -> int:
+    """cidx graph redefined -- symbols defined in >1 backend (multi_def > 1)."""
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    syms = g.redefined(limit=args.limit)
+    _emit_syms(syms, args, "symbols redefined per backend (multi_def > 1):")
+    return 0
+
+
+def cmd_graph_definitions(args) -> int:
+    """cidx graph definitions SYM -- each backend body of the symbol, and (unless
+    --direct-only) the possible-call target bodies it fans out to."""
+    g = _open_graph(args)
+    if g is None:
+        return 1
+    sym, rc = _select_symbol(g, args)
+    if sym is None:
+        return rc
+    defs = g.definitions(sym)
+    possible = [] if args.direct_only else g.possible_callees(sym)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "symbol": sym.to_dict(),
+                    "multi_def": sym.multi_def,
+                    "definitions": [d.to_dict() for d in defs],
+                    "possible_callees": [d.to_dict() for d in possible],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    print(f"definitions of {sym.name} ({len(defs)} backend body/bodies):")
+    for d in defs:
+        print(f"  {d.sym.kind:<14} @{d.loc}  component={d.component}")
+    if possible:
+        print(f"possible-call targets from {sym.name}:")
+        w = max((len(d.sym.name or d.sym.usr) for d in possible), default=0)
+        for d in possible:
+            print(f"  {(d.sym.name or d.sym.usr):<{w}}  @{d.loc}")
+    return 0
+
+
 # -- component show / set-version --------------------------------------------
 
 
@@ -2695,6 +2740,37 @@ def main(argv=None) -> int:
     q = gsub.add_parser("dispatch", help="run-time targets of a virtual-method call")
     _selector(q)
     q.set_defaults(fn=cmd_graph_dispatch)
+
+    # v27: multi-definition (per-backend redefinitions).
+    q = gsub.add_parser(
+        "redefined", help="symbols defined in more than one backend (multi_def>1)"
+    )
+    q.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="index database to query (default: the standard cache index)",
+    )
+    q.add_argument(
+        "--json", action="store_true", help="emit stable machine-readable JSON"
+    )
+    q.add_argument(
+        "--limit", type=int, default=200, metavar="N",
+        help="cap the number of results (default 200)",
+    )
+    q.set_defaults(fn=cmd_graph_redefined)
+
+    q = gsub.add_parser(
+        "definitions", help="each backend body of a symbol + its possible-call fan-out"
+    )
+    _selector(q)
+    q.add_argument(
+        "--direct-only",
+        action="store_true",
+        help="list the backend bodies only (omit the possible-call fan-out, "
+        "which is shown by default)",
+    )
+    q.set_defaults(fn=cmd_graph_definitions)
 
     # -- ast (on-demand AST analysis; reads only the symbol/file tables) --------
     p = sub.add_parser("ast", help="on-demand AST analysis (dump, locals, conditions)")
