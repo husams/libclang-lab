@@ -95,13 +95,13 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_26():
-    assert SCHEMA_VERSION == 26, f"Expected 26, got {SCHEMA_VERSION}"
+def test_schema_version_is_27():
+    assert SCHEMA_VERSION == 27, f"Expected 27, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0450():
+def test_product_version_is_0460():
     from indexer import cli
-    assert cli.VERSION == "0.45.0", f"Expected '0.45.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.46.0", f"Expected '0.46.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():

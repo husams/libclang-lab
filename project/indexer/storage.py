@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -200,7 +200,14 @@ CREATE TABLE IF NOT EXISTS symbol (
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
-    resolved     INTEGER NOT NULL DEFAULT 0
+    resolved     INTEGER NOT NULL DEFAULT 0,
+    multi_def    INTEGER NOT NULL DEFAULT 0  -- v27: COUNT of definitions of this
+                                             -- symbol (rows in `definition`), set
+                                             -- at resolve. >1 means the symbol is
+                                             -- redefined per backend (library
+                                             -- method left undefined, each server
+                                             -- re-implements it). O(1) "list
+                                             -- redefined" without a join.
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -425,6 +432,59 @@ CREATE TABLE IF NOT EXISTS entity_node (
     id   INTEGER PRIMARY KEY REFERENCES symbol(id) ON DELETE CASCADE,
     kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
 );
+
+-- ---- v27: multi-definition symbols (per-backend redefinitions) --------------
+-- A library declares a method (or static member var) and leaves it undefined;
+-- each backend re-implements the SAME symbol in its own file/component. The
+-- `symbol` row is keyed UNIQUE(usr), so all bodies collapse to one node and their
+-- call edges merge -- Server1's body cannot be told from Server2's. `definition`
+-- records ONE row per body (keyed by component+file), `def_edge` hangs each body's
+-- outgoing calls/uses off that definition (so bodies stay separate), and
+-- `possible_call` fans a call out to every possible body at resolve time.
+CREATE TABLE IF NOT EXISTS definition (
+    id           INTEGER PRIMARY KEY,
+    symbol_id    INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    component_id INTEGER REFERENCES component(id) ON DELETE SET NULL,
+    file_id      INTEGER REFERENCES file(id) ON DELETE CASCADE,
+    line         INTEGER,
+    col          INTEGER,
+    end_line     INTEGER,
+    end_col      INTEGER,
+    -- one body per (component, file, symbol). component_id is derived from the
+    -- file's owning component; both are in the key so the same relative file path
+    -- in two clones/components stays distinct (matches the variant key the user
+    -- asked for: component + file + USR).
+    UNIQUE (component_id, file_id, symbol_id)
+);
+CREATE INDEX IF NOT EXISTS idx_definition_symbol ON definition(symbol_id);
+
+-- Per-body outgoing calls/uses. src is a DEFINITION (a backend body), not a
+-- symbol, so each variant keeps its own edges. dst stays a symbol (the callee's
+-- canonical/declared node). kind reuses edge_kind (1 calls / 7 uses). resolve
+-- rolls these back up into the collapsed symbol->symbol `edge` view.
+CREATE TABLE IF NOT EXISTS def_edge (
+    id         INTEGER PRIMARY KEY,
+    src_def_id INTEGER NOT NULL REFERENCES definition(id) ON DELETE CASCADE,
+    dst_id     INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind       INTEGER NOT NULL,   -- edge_kind.id (1 calls / 7 uses)
+    count      INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_def_id, dst_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_def_edge_src ON def_edge(src_def_id, kind);
+CREATE INDEX IF NOT EXISTS idx_def_edge_dst ON def_edge(dst_id, kind);
+
+-- Materialised body->body "possible call" fan-out (mirrors dispatch_calls k18,
+-- but the target is a DEFINITION not a symbol so it cannot live in `edge`). For
+-- each def_edge(caller -> S) where S has >1 definition, one row per body of S.
+-- Deleted and rebuilt each resolve pass.
+CREATE TABLE IF NOT EXISTS possible_call (
+    src_def_id INTEGER NOT NULL REFERENCES definition(id) ON DELETE CASCADE,
+    dst_def_id INTEGER NOT NULL REFERENCES definition(id) ON DELETE CASCADE,
+    count      INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_def_id, dst_def_id)
+);
+CREATE INDEX IF NOT EXISTS idx_possible_call_src ON possible_call(src_def_id);
+CREATE INDEX IF NOT EXISTS idx_possible_call_dst ON possible_call(dst_def_id);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -1086,6 +1146,8 @@ class Symbol:
     access: Optional[str] = None
     parent_usr: Optional[str] = None
     resolved: bool = False
+    multi_def: int = 0  # v27: number of definitions (bodies) of this symbol;
+    # >1 == redefined per backend. Set at resolve, not by add_symbol.
     id: Optional[int] = None
 
 
@@ -1274,6 +1336,16 @@ class Storage:
         if "end_line" not in cols2:
             self._conn.execute("ALTER TABLE symbol ADD COLUMN end_line INTEGER")
             self._conn.execute("ALTER TABLE symbol ADD COLUMN end_col INTEGER")
+            changed = True
+        # v26 -> v27: count of definitions of this symbol (>1 == redefined per
+        # backend). No backfill from stored data -- a reindex + resolve
+        # populates it (definition rows are written at index, counted at
+        # resolve); old rows read 0 until then. Uses cols2 because the v15->v16
+        # rebuild recreates `symbol` without this column.
+        if "multi_def" not in cols2:
+            self._conn.execute(
+                "ALTER TABLE symbol ADD COLUMN multi_def INTEGER NOT NULL DEFAULT 0"
+            )
             changed = True
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
@@ -3333,6 +3405,134 @@ class Storage:
         )
         self._commit()
 
+    # -- v27: multi-definition (per-backend redefinition) --------------------
+    # `definition` and `def_edge` are written at INDEX time (see clang/ast.py):
+    # deriving them in resolve is impossible because delete_edges_for_file wipes
+    # a losing backend's call edges from `edge` (the shared symbol's file_id
+    # flips to the last-indexed TU), so the raw per-body edges must be captured
+    # while each TU is live. Keyed by the backend body's file, they are immune
+    # to that flip. resolve only counts them (set_multi_def) and fans them out
+    # (materialize_possible_calls) -- both set-based and idempotent.
+    #
+    # Scope (the kinds a "redefinition" is tracked for): function, method,
+    # constructor, destructor, and static member variables. Header-defined
+    # classes/typedefs are excluded (an #include in many TUs is not redefinition).
+
+    def get_or_create_definition(
+        self,
+        symbol_id: int,
+        file_id: Optional[int],
+        line: Optional[int] = None,
+        col: Optional[int] = None,
+        end_line: Optional[int] = None,
+        end_col: Optional[int] = None,
+        component_id: Optional[int] = None,
+    ) -> int:
+        """Return the `definition` row id for this symbol's body in this
+        (component, file), creating it if new. One row per backend body -- keyed
+        by (component_id, file_id, symbol_id) so Server1::reg and Server2::reg
+        (same USR, different files) stay distinct. component derived from file."""
+        if component_id is None:
+            component_id = self.component_id_for_file(file_id)
+        cur = self._conn.execute(
+            "INSERT INTO definition "
+            "(symbol_id, component_id, file_id, line, col, end_line, end_col) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(component_id, file_id, symbol_id) DO UPDATE SET "
+            "  line = excluded.line, col = excluded.col, "
+            "  end_line = excluded.end_line, end_col = excluded.end_col "
+            "RETURNING id",
+            (symbol_id, component_id, file_id, line, col, end_line, end_col),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("get_or_create_definition: upsert returned no id")
+        return row["id"]
+
+    def component_id_for_file(self, file_id: Optional[int]) -> Optional[int]:
+        """The component that owns this file (file -> directory -> component)."""
+        if file_id is None:
+            return None
+        row = self._conn.execute(
+            "SELECT d.component_id AS cid FROM file f "
+            "JOIN directory d ON d.id = f.directory_id WHERE f.id = ?",
+            (file_id,),
+        ).fetchone()
+        return row["cid"] if row is not None else None
+
+    def add_def_edge(
+        self, src_def_id: int, dst_id: int, kind: int, count: int = 1
+    ) -> int:
+        """Upsert a per-body outgoing edge (src is a definition). kind reuses
+        edge_kind (1 calls / 7 uses). Returns the def_edge id."""
+        cur = self._conn.execute(
+            "INSERT INTO def_edge (src_def_id, dst_id, kind, count) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(src_def_id, dst_id, kind) DO UPDATE SET "
+            "  count = def_edge.count + excluded.count "
+            "RETURNING id",
+            (src_def_id, dst_id, kind, count),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("add_def_edge: upsert returned no id")
+        return row["id"]
+
+    def copy_body_edges_to_def_edge(self, def_id: int, symbol_id: int) -> None:
+        """Snapshot a function body's just-emitted calls/uses into def_edge.
+
+        Called right after _body_descent for one function in one TU: at that
+        instant `edge` holds exactly THIS TU's kind-1/7 edges for the symbol
+        (delete_edges_for_file cleared the prior TU's). Copying them keyed by
+        this backend's `def_id` preserves them even after a later TU re-index
+        wipes the symbol's `edge` rows."""
+        self._conn.execute(
+            "INSERT INTO def_edge (src_def_id, dst_id, kind, count) "
+            "SELECT ?, dst_id, kind, count FROM edge "
+            "WHERE src_id = ? AND kind IN (1, 7) "
+            "ON CONFLICT(src_def_id, dst_id, kind) DO UPDATE SET "
+            "  count = excluded.count",
+            (def_id, symbol_id),
+        )
+        self._commit()
+
+    def delete_definitions_for_file(self, file_id: int) -> None:
+        """Drop this file's definition rows (cascades def_edge) before re-index.
+        Keyed on definition.file_id (the actual body file), so re-indexing one
+        backend never disturbs another backend's rows."""
+        self._conn.execute(
+            "DELETE FROM definition WHERE file_id = ?", (file_id,)
+        )
+        self._commit()
+
+    def set_multi_def(self) -> None:
+        """Set symbol.multi_def = COUNT(definition rows). >1 == redefined."""
+        self._conn.execute("UPDATE symbol SET multi_def = 0")
+        self._conn.execute(
+            "UPDATE symbol SET multi_def = "
+            "  (SELECT COUNT(*) FROM definition d WHERE d.symbol_id = symbol.id) "
+            "WHERE id IN (SELECT DISTINCT symbol_id FROM definition)"
+        )
+        self._commit()
+
+    def materialize_possible_calls(self) -> None:
+        """Rebuild `possible_call`: body->body fan-out. For each per-body call
+        (def_edge kind 1) into a symbol with >1 definition, one row per candidate
+        body of that callee. Requires set_multi_def() to have run."""
+        self._conn.execute("DELETE FROM possible_call")
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO possible_call (src_def_id, dst_def_id, count)
+            SELECT de.src_def_id, td.id, SUM(de.count)
+            FROM def_edge de
+            JOIN symbol s     ON s.id = de.dst_id
+            JOIN definition td ON td.symbol_id = de.dst_id
+            WHERE de.kind = 1 AND s.multi_def > 1
+            GROUP BY de.src_def_id, td.id
+            """
+        )
+        self._commit()
+
     def cross_repo_edges(self) -> list[tuple[int, int, int]]:
         """Return (src_id, dst_id, kind) for edges crossing component boundaries."""
         rows = self._conn.execute(
@@ -3365,6 +3565,11 @@ class Storage:
         from indexer.entity_rollup import materialize_entity_edges
 
         self.rollup_edge_counts()
+        # v27: multi-definition. `definition`/`def_edge` are already written at
+        # index time; here we just count them into symbol.multi_def and fan out
+        # per-body calls into `possible_call`. Order: possible_call needs multi_def.
+        self.set_multi_def()
+        self.materialize_possible_calls()
         self.materialize_dispatch_calls()
         materialize_entity_edges(self)
         # A still-stub is a minted placeholder never backfilled by a real

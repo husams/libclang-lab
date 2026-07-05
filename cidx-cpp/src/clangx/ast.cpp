@@ -784,6 +784,7 @@ HeaderStats AstIndexer::index_headers(
       Transaction txn = db_.transaction();
       if (graph_enabled_) {
         db_.delete_edges_for_file(ph.file_id);
+        db_.delete_definitions_for_file(ph.file_id); // v27: cascades def_edge
         index_edges_notxn(tu, ph.inc_name, ph.file_id);
       }
       txn.commit();
@@ -2093,6 +2094,46 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
   return CXChildVisit_Continue; // children already visited recursively above
 }
 
+// v27: walk a static member variable's INITIALIZER, recording each call it
+// makes as a def_edge off this backend's definition. Mirrors
+// ast.py:_emit_static_init_def_edges. A variable has no body descent, so
+// `int C::x = seed();` would otherwise drop the `seed` dependency.
+struct StaticInitCtx {
+  LibClang *lib;
+  Storage *db;
+  int64_t def_id;
+};
+
+CXChildVisitResult static_init_visitor(CXCursor cursor, CXCursor /*parent*/,
+                                       CXClientData data) noexcept {
+  auto *ctx = static_cast<StaticInitCtx *>(data);
+  try {
+    LibClang &lib = *ctx->lib;
+    if (lib.clang_getCursorKind(cursor) == CXCursor_CallExpr) {
+      const CXCursor ref = lib.clang_getCursorReferenced(cursor);
+      if (!lib.clang_Cursor_isNull(ref)) {
+        const std::string usr =
+            CxString(lib, lib.clang_getCursorUSR(ref)).str();
+        if (!usr.empty()) {
+          const auto sym = ctx->db->lookup_symbol(usr);
+          if (sym) {
+            ctx->db->add_def_edge(ctx->def_id, sym->id, 1); // calls
+          }
+        }
+      }
+    }
+  } catch (...) {
+    // Swallow: initializer def_edges are best-effort, like the Python walk.
+  }
+  return CXChildVisit_Recurse;
+}
+
+void emit_static_init_def_edges(LibClang &lib, Storage &db, CXCursor var_cursor,
+                                int64_t def_id) {
+  StaticInitCtx ctx{&lib, &db, def_id};
+  lib.clang_visitChildren(var_cursor, &static_init_visitor, &ctx);
+}
+
 } // namespace
 
 void AstIndexer::body_descent(CXCursor fn_cursor, int64_t src_id,
@@ -2226,6 +2267,26 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
         if (sym) {
           emit_type_use(lib, db_, sym->id, lib.clang_getCursorType(cursor),
                         file_id, cursor, 0);
+          // v27: an out-of-line static DATA MEMBER definition
+          // (`int C::x = ...;`) is a per-backend body -- redefined in each
+          // backend. Record its `definition` row (so it counts toward
+          // multi_def / "list redefined") and its initializer's calls.
+          if (ck == CXCursor_VarDecl &&
+              lib.clang_isCursorDefinition(cursor) != 0) {
+            const CXCursor sp = lib.clang_getCursorSemanticParent(cursor);
+            const CXCursorKind spk = lib.clang_getCursorKind(sp);
+            if (spk == CXCursor_ClassDecl || spk == CXCursor_StructDecl ||
+                spk == CXCursor_UnionDecl || spk == CXCursor_ClassTemplate) {
+              const ExpansionLoc vstart = cursor_extent_start(lib, cursor);
+              const ExpansionLoc vend = cursor_extent_end(lib, cursor);
+              const int64_t vdef_id = db_.get_or_create_definition(
+                  sym->id, file_id, static_cast<int64_t>(vstart.line),
+                  static_cast<int64_t>(vstart.col),
+                  static_cast<int64_t>(vend.line),
+                  static_cast<int64_t>(vend.col));
+              emit_static_init_def_edges(lib, db_, cursor, vdef_id);
+            }
+          }
         }
       }
     } else if (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl) {
@@ -2673,7 +2734,17 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     if (!fn_sym) {
       return;
     }
+    // v27: this function's body in THIS file is a per-backend definition.
+    // Create its `definition` row, descend, then snapshot the calls/uses it just
+    // emitted into `def_edge` -- immune to a later TU wiping `edge`.
+    const ExpansionLoc dstart = cursor_extent_start(lib, cursor);
+    const ExpansionLoc dend = cursor_extent_end(lib, cursor);
+    const int64_t def_id = db_.get_or_create_definition(
+        fn_sym->id, file_id, static_cast<int64_t>(dstart.line),
+        static_cast<int64_t>(dstart.col), static_cast<int64_t>(dend.line),
+        static_cast<int64_t>(dend.col));
     body_descent(cursor, fn_sym->id, file_id);
+    db_.copy_body_edges_to_def_edge(def_id, fn_sym->id);
   });
 
   // B3: namespace uses -- qualifiers / using-directives / using-declarations.
@@ -2688,6 +2759,7 @@ void AstIndexer::index_edges(const ParsedTu &tu, const std::string &filename,
   // Delete stale edges from a previous index of this file (idempotent
   // re-index).
   db_.delete_edges_for_file(file_id);
+  db_.delete_definitions_for_file(file_id); // v27: cascades this file's def_edge
 
   Transaction txn = db_.transaction();
   index_edges_notxn(tu, filename, file_id);

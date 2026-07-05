@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 26;
+constexpr int kSchemaVersion = 27;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -344,6 +344,32 @@ public:
   // calls. Idempotent (DELETE + rebuild). Called by resolve_pass().
   void materialize_dispatch_calls();
 
+  // -- v27: multi-definition (per-backend redefinitions) ---------------------
+  // Return the `definition` row id for this symbol's body in (component, file),
+  // creating it if new. component derived from the file when not supplied.
+  int64_t get_or_create_definition(int64_t symbol_id,
+                                   std::optional<int64_t> file_id,
+                                   std::optional<int64_t> line = std::nullopt,
+                                   std::optional<int64_t> col = std::nullopt,
+                                   std::optional<int64_t> end_line = std::nullopt,
+                                   std::optional<int64_t> end_col = std::nullopt);
+  // The component that owns this file (file -> directory -> component).
+  std::optional<int64_t> component_id_for_file(std::optional<int64_t> file_id);
+  // Upsert a per-body outgoing edge (src is a definition). kind reuses edge_kind
+  // (1 calls / 7 uses). Returns the def_edge id.
+  int64_t add_def_edge(int64_t src_def_id, int64_t dst_id, int64_t kind,
+                       int64_t count = 1);
+  // Snapshot a function body's just-emitted calls/uses (edge kind 1/7 for this
+  // symbol) into def_edge keyed by def_id. Called right after body_descent.
+  void copy_body_edges_to_def_edge(int64_t def_id, int64_t symbol_id);
+  // Drop this file's definition rows (cascades def_edge) before re-index.
+  void delete_definitions_for_file(int64_t file_id);
+  // Set symbol.multi_def = COUNT(definition rows). Called by resolve_pass().
+  void set_multi_def();
+  // Materialise body->body possible-call fan-out. Called by resolve_pass()
+  // after set_multi_def(). Idempotent (DELETE + rebuild).
+  void materialize_possible_calls();
+
   // Edges whose ends live in different components.
   std::vector<Edge> cross_repo_edges();
 
@@ -365,6 +391,18 @@ public:
   std::vector<Symbol> find_symbols(const std::string &pattern,
                                    const std::optional<std::string> &kind,
                                    int limit);
+
+  // v27 multi-definition readers (query.py:GraphQuery.redefined/definitions/
+  // possible_callees). DefinitionRow is one `definition` (or possible-call
+  // target) row; the graph layer joins in component/file for display.
+  struct DefinitionRow {
+    int64_t symbol_id = -1;
+    std::optional<int64_t> file_id;
+    std::optional<int64_t> line, col, end_line, end_col;
+  };
+  std::vector<Symbol> redefined_symbols(int limit);
+  std::vector<DefinitionRow> definitions_of(int64_t symbol_id);
+  std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id);
 
   // A6 result row: 8 edge columns + decoded symbol-from-offset (plan §A6).
   struct GraphEdgeRow {

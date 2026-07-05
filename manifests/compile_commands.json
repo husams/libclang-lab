@@ -85,6 +85,16 @@
     "file": "messy.c"
   },
   {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/multidef",
+    "command": "c++ -std=c++17 -c server1.cpp -o server1.o",
+    "file": "server1.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/multidef",
+    "command": "c++ -std=c++17 -c server2.cpp -o server2.o",
+    "file": "server2.cpp"
+  },
+  {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/project",
     "command": "cc -I. -c app.c -o app.o",
     "file": "app.c"

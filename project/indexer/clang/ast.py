@@ -407,6 +407,7 @@ def index_headers(
     for inc_name, file_id, mtime, stored in pending:
         with db.transaction():
             db.delete_edges_for_file(file_id)
+            db.delete_definitions_for_file(file_id)  # v27: cascades def_edge
             _index_edges_notxn(db, tu, inc_name, file_id)
         db.mark_file_indexed(file_id, mtime=mtime)
         counts["indexed"] += 1
@@ -1720,6 +1721,40 @@ def _emit_namespace_uses(
     descend(tu.cursor, None)
 
 
+# v27: records whose out-of-line static data member definition counts as a
+# per-backend body. (A namespace/file-scope global VAR_DECL is NOT a redefinition.)
+_STATIC_MEMBER_PARENT_KINDS = frozenset(
+    {
+        cx.CursorKind.CLASS_DECL,
+        cx.CursorKind.STRUCT_DECL,
+        cx.CursorKind.UNION_DECL,
+        cx.CursorKind.CLASS_TEMPLATE,
+    }
+)
+
+
+def _emit_static_init_def_edges(
+    db: Storage, var_cursor: cx.Cursor, def_id: int
+) -> None:
+    """Record what a static member variable's INITIALIZER calls, per backend.
+
+    A variable has no function-body descent, so `int C::x = seed();` would
+    otherwise drop the `seed` dependency. Walk the initializer subtree and add a
+    def_edge (calls, kind 1) for every resolved call to an indexed symbol, keyed
+    to THIS backend's definition."""
+    for node in var_cursor.walk_preorder():
+        if node == var_cursor:
+            continue
+        if node.kind == cx.CursorKind.CALL_EXPR:
+            ref = node.referenced
+            if ref is not None:
+                usr = ref.get_usr()
+                if usr:
+                    sym = db.lookup_symbol(usr)
+                    if sym is not None:
+                        db.add_def_edge(def_id, sym.id, 1)  # calls
+
+
 def _index_edges_notxn(
     db: Storage, tu: cx.TranslationUnit, filename: str, file_id: int
 ) -> None:
@@ -1816,6 +1851,26 @@ def _index_edges_notxn(
                 _v_sym = db.lookup_symbol(_v_usr)
                 if _v_sym is not None:
                     _emit_type_use(db, _v_sym.id, cursor.type, file_id, cursor.location)
+                    # v27: an out-of-line static DATA MEMBER definition
+                    # (`int C::x = ...;`) is a per-backend body -- redefined in
+                    # each backend. Record its `definition` row (so it counts
+                    # toward multi_def / "list redefined") and its initializer's
+                    # calls as def_edges.
+                    _sp = cursor.semantic_parent
+                    if (
+                        cursor.is_definition()
+                        and _sp is not None
+                        and _sp.kind in _STATIC_MEMBER_PARENT_KINDS
+                    ):
+                        _v_def_id = db.get_or_create_definition(
+                            _v_sym.id,
+                            file_id,
+                            line=cursor.extent.start.line,
+                            col=cursor.extent.start.column,
+                            end_line=cursor.extent.end.line,
+                            end_col=cursor.extent.end.column,
+                        )
+                        _emit_static_init_def_edges(db, cursor, _v_def_id)
         elif ck in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):
             # Stage 2: a named alias of a class-template specialization mints the
             # X<B> instance entity (own composes/aggregates/associates via T->B).
@@ -2135,9 +2190,21 @@ def _index_edges_notxn(
             )
             else None
         )
+        # v27: this function's body in THIS file is a per-backend definition.
+        # Create its `definition` row, descend, then snapshot the calls/uses it
+        # just emitted into `def_edge` -- immune to a later TU wiping `edge`.
+        _def_id = db.get_or_create_definition(
+            fn_sym.id,
+            file_id,
+            line=cursor.extent.start.line,
+            col=cursor.extent.start.column,
+            end_line=cursor.extent.end.line,
+            end_col=cursor.extent.end.column,
+        )
         _body_descent(
             db, cursor, fn_sym.id, file_id, enclosing_owner_usr=_owner_usr
         )
+        db.copy_body_edges_to_def_edge(_def_id, fn_sym.id)
 
     # B3: namespace uses -- qualifiers / using-directives / using-declarations.
     _emit_namespace_uses(db, tu, filename, file_id)
@@ -2154,6 +2221,7 @@ def index_edges(
     """
     # Delete stale edges from a previous index of this file.
     db.delete_edges_for_file(file_id)
+    db.delete_definitions_for_file(file_id)  # v27: cascades this file's def_edge
     with db.transaction():
         _index_edges_notxn(db, tu, filename, file_id)
 

@@ -152,7 +152,14 @@ CREATE TABLE IF NOT EXISTS symbol (
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
-    resolved     INTEGER NOT NULL DEFAULT 0
+    resolved     INTEGER NOT NULL DEFAULT 0,
+    multi_def    INTEGER NOT NULL DEFAULT 0  -- v27: COUNT of definitions of this
+                                             -- symbol (rows in `definition`), set
+                                             -- at resolve. >1 means the symbol is
+                                             -- redefined per backend (library
+                                             -- method left undefined, each server
+                                             -- re-implements it). O(1) "list
+                                             -- redefined" without a join.
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -374,7 +381,60 @@ CREATE TABLE IF NOT EXISTS entity_node (
     kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '26');
+-- ---- v27: multi-definition symbols (per-backend redefinitions) --------------
+-- A library declares a method (or static member var) and leaves it undefined;
+-- each backend re-implements the SAME symbol in its own file/component. The
+-- `symbol` row is keyed UNIQUE(usr), so all bodies collapse to one node and their
+-- call edges merge -- Server1's body cannot be told from Server2's. `definition`
+-- records ONE row per body (keyed by component+file), `def_edge` hangs each body's
+-- outgoing calls/uses off that definition (so bodies stay separate), and
+-- `possible_call` fans a call out to every possible body at resolve time.
+CREATE TABLE IF NOT EXISTS definition (
+    id           INTEGER PRIMARY KEY,
+    symbol_id    INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    component_id INTEGER REFERENCES component(id) ON DELETE SET NULL,
+    file_id      INTEGER REFERENCES file(id) ON DELETE CASCADE,
+    line         INTEGER,
+    col          INTEGER,
+    end_line     INTEGER,
+    end_col      INTEGER,
+    -- one body per (component, file, symbol). component_id is derived from the
+    -- file's owning component; both are in the key so the same relative file path
+    -- in two clones/components stays distinct (matches the variant key the user
+    -- asked for: component + file + USR).
+    UNIQUE (component_id, file_id, symbol_id)
+);
+CREATE INDEX IF NOT EXISTS idx_definition_symbol ON definition(symbol_id);
+
+-- Per-body outgoing calls/uses. src is a DEFINITION (a backend body), not a
+-- symbol, so each variant keeps its own edges. dst stays a symbol (the callee's
+-- canonical/declared node). kind reuses edge_kind (1 calls / 7 uses). resolve
+-- rolls these back up into the collapsed symbol->symbol `edge` view.
+CREATE TABLE IF NOT EXISTS def_edge (
+    id         INTEGER PRIMARY KEY,
+    src_def_id INTEGER NOT NULL REFERENCES definition(id) ON DELETE CASCADE,
+    dst_id     INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind       INTEGER NOT NULL,   -- edge_kind.id (1 calls / 7 uses)
+    count      INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_def_id, dst_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_def_edge_src ON def_edge(src_def_id, kind);
+CREATE INDEX IF NOT EXISTS idx_def_edge_dst ON def_edge(dst_id, kind);
+
+-- Materialised body->body "possible call" fan-out (mirrors dispatch_calls k18,
+-- but the target is a DEFINITION not a symbol so it cannot live in `edge`). For
+-- each def_edge(caller -> S) where S has >1 definition, one row per body of S.
+-- Deleted and rebuilt each resolve pass.
+CREATE TABLE IF NOT EXISTS possible_call (
+    src_def_id INTEGER NOT NULL REFERENCES definition(id) ON DELETE CASCADE,
+    dst_def_id INTEGER NOT NULL REFERENCES definition(id) ON DELETE CASCADE,
+    count      INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_def_id, dst_def_id)
+);
+CREATE INDEX IF NOT EXISTS idx_possible_call_src ON possible_call(src_def_id);
+CREATE INDEX IF NOT EXISTS idx_possible_call_dst ON possible_call(dst_def_id);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '27');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -464,13 +524,13 @@ constexpr char kSymbolCols[] =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
     "is_static, linkage, access, parent_usr, resolved, decl_path, "
-    "is_instantiation, end_line, end_col";
+    "is_instantiation, end_line, end_col, multi_def";
 constexpr char kSymbolColsS[] =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
     "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation, "
-    "s.end_line, s.end_col";
+    "s.end_line, s.end_col, s.multi_def";
 
 std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -603,6 +663,7 @@ Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.is_instantiation = st.col_int64(off + 21) != 0;
   s.end_line = opt_int64(st, off + 22);
   s.end_col = opt_int64(st, off + 23);
+  s.multi_def = st.col_int64(off + 24); // v27
   return s;
 }
 
@@ -866,6 +927,14 @@ void Storage::migrate() {
     if (!has_col(cols2, "end_line")) {
       db_.exec("ALTER TABLE symbol ADD COLUMN end_line INTEGER");
       db_.exec("ALTER TABLE symbol ADD COLUMN end_col INTEGER");
+      changed = true;
+    }
+    // v26 -> v27: count of definitions of this symbol (>1 == redefined per
+    // backend). No backfill -- a reindex + resolve populates it (definition
+    // rows are written at index, counted at resolve); old rows read 0.
+    if (!has_col(cols2, "multi_def")) {
+      db_.exec("ALTER TABLE symbol ADD COLUMN multi_def INTEGER NOT NULL "
+               "DEFAULT 0");
       changed = true;
     }
   }
@@ -2772,6 +2841,121 @@ void Storage::materialize_dispatch_calls() {
       "  AND c.src_id != d.target_id");
 }
 
+// -- v27: multi-definition (per-backend redefinition). Mirrors
+// indexer/storage.py byte-identically. `definition`/`def_edge` are written at
+// INDEX time (deriving them in resolve is impossible -- delete_edges_for_file
+// wipes a losing backend's edges when the shared symbol's file_id flips to the
+// last-indexed TU). resolve only counts (set_multi_def) + fans out
+// (materialize_possible_calls).
+
+std::optional<int64_t>
+Storage::component_id_for_file(std::optional<int64_t> file_id) {
+  if (!file_id) {
+    return std::nullopt;
+  }
+  auto st = db_.prepare("SELECT d.component_id AS cid FROM file f "
+                        "JOIN directory d ON d.id = f.directory_id "
+                        "WHERE f.id = ?");
+  st.bind(1, *file_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  const std::optional<int64_t> cid = opt_int64(st, 0);
+  st.step_done();
+  return cid;
+}
+
+int64_t Storage::get_or_create_definition(int64_t symbol_id,
+                                          std::optional<int64_t> file_id,
+                                          std::optional<int64_t> line,
+                                          std::optional<int64_t> col,
+                                          std::optional<int64_t> end_line,
+                                          std::optional<int64_t> end_col) {
+  const std::optional<int64_t> component_id = component_id_for_file(file_id);
+  auto st = db_.prepare(
+      "INSERT INTO definition "
+      "(symbol_id, component_id, file_id, line, col, end_line, end_col) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(component_id, file_id, symbol_id) DO UPDATE SET "
+      "  line = excluded.line, col = excluded.col, "
+      "  end_line = excluded.end_line, end_col = excluded.end_col "
+      "RETURNING id");
+  st.bind(1, symbol_id);
+  bind_opt(st, 2, component_id);
+  bind_opt(st, 3, file_id);
+  bind_opt(st, 4, line);
+  bind_opt(st, 5, col);
+  bind_opt(st, 6, end_line);
+  bind_opt(st, 7, end_col);
+  if (!st.step()) {
+    throw StorageError("get_or_create_definition: upsert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+int64_t Storage::add_def_edge(int64_t src_def_id, int64_t dst_id, int64_t kind,
+                              int64_t count) {
+  auto st = db_.prepare("INSERT INTO def_edge (src_def_id, dst_id, kind, count) "
+                        "VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(src_def_id, dst_id, kind) DO UPDATE SET "
+                        "  count = def_edge.count + excluded.count "
+                        "RETURNING id");
+  st.bind(1, src_def_id);
+  st.bind(2, dst_id);
+  st.bind(3, kind);
+  st.bind(4, count);
+  if (!st.step()) {
+    throw StorageError("add_def_edge: upsert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+void Storage::copy_body_edges_to_def_edge(int64_t def_id, int64_t symbol_id) {
+  // At the instant this runs (right after body_descent for one function in one
+  // TU) `edge` holds exactly THIS TU's kind-1/7 edges for the symbol
+  // (delete_edges_for_file cleared the prior TU's). Copying them keyed by this
+  // backend's def_id preserves them after a later TU re-index wipes `edge`.
+  auto st =
+      db_.prepare("INSERT INTO def_edge (src_def_id, dst_id, kind, count) "
+                  "SELECT ?, dst_id, kind, count FROM edge "
+                  "WHERE src_id = ? AND kind IN (1, 7) "
+                  "ON CONFLICT(src_def_id, dst_id, kind) DO UPDATE SET "
+                  "  count = excluded.count");
+  st.bind(1, def_id);
+  st.bind(2, symbol_id);
+  st.step_done();
+}
+
+void Storage::delete_definitions_for_file(int64_t file_id) {
+  // Keyed on definition.file_id (the actual body file), so re-indexing one
+  // backend never disturbs another backend's rows. Cascades def_edge.
+  auto st = db_.prepare("DELETE FROM definition WHERE file_id = ?");
+  st.bind(1, file_id);
+  st.step_done();
+}
+
+void Storage::set_multi_def() {
+  db_.exec("UPDATE symbol SET multi_def = 0");
+  db_.exec("UPDATE symbol SET multi_def = "
+           "  (SELECT COUNT(*) FROM definition d WHERE d.symbol_id = symbol.id) "
+           "WHERE id IN (SELECT DISTINCT symbol_id FROM definition)");
+}
+
+void Storage::materialize_possible_calls() {
+  db_.exec("DELETE FROM possible_call");
+  db_.exec("INSERT OR IGNORE INTO possible_call (src_def_id, dst_def_id, count) "
+           "SELECT de.src_def_id, td.id, SUM(de.count) "
+           "FROM def_edge de "
+           "JOIN symbol s     ON s.id = de.dst_id "
+           "JOIN definition td ON td.symbol_id = de.dst_id "
+           "WHERE de.kind = 1 AND s.multi_def > 1 "
+           "GROUP BY de.src_def_id, td.id");
+}
+
 std::vector<Edge> Storage::cross_repo_edges() {
   auto st = db_.prepare(
       "SELECT e.id, e.src_id, e.dst_id, e.kind, e.count, "
@@ -3869,6 +4053,11 @@ void Storage::materialise_entity_edges() {
 int Storage::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
   rollup_edge_counts();
+  // v27: multi-definition. definition/def_edge are already written at index
+  // time; here we count them into symbol.multi_def and fan per-body calls into
+  // possible_call. Order: possible_call needs multi_def.
+  set_multi_def();
+  materialize_possible_calls();
   // Materialise virtual-dispatch caller edges (kind 18) from calls + overrides.
   materialize_dispatch_calls();
   // Materialise Layer-1 entity_edge from the Layer-0 graph.
@@ -4054,6 +4243,65 @@ std::vector<Symbol> Storage::find_symbols(const std::string &pattern,
   std::vector<Symbol> out;
   while (st.step()) {
     out.push_back(symbol_from_offset(st, 0));
+  }
+  return out;
+}
+
+// v27 — symbols defined in >1 backend (query.py:GraphQuery.redefined)
+std::vector<Symbol> Storage::redefined_symbols(int limit) {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolColsS +
+                        " FROM symbol s WHERE s.multi_def > 1 "
+                        "ORDER BY s.multi_def DESC, s.qual_name, s.spelling "
+                        "LIMIT ?");
+  st.bind(1, static_cast<int64_t>(limit));
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from_offset(st, 0));
+  }
+  return out;
+}
+
+// v27 — the backend bodies of a symbol (query.py:GraphQuery.definitions).
+std::vector<Storage::DefinitionRow> Storage::definitions_of(int64_t symbol_id) {
+  auto st = db_.prepare(
+      "SELECT symbol_id, file_id, line, col, end_line, end_col "
+      "FROM definition WHERE symbol_id = ? ORDER BY file_id, line");
+  st.bind(1, symbol_id);
+  std::vector<DefinitionRow> out;
+  while (st.step()) {
+    DefinitionRow d;
+    d.symbol_id = st.col_int64(0);
+    d.file_id = opt_int64(st, 1);
+    d.line = opt_int64(st, 2);
+    d.col = opt_int64(st, 3);
+    d.end_line = opt_int64(st, 4);
+    d.end_col = opt_int64(st, 5);
+    out.push_back(d);
+  }
+  return out;
+}
+
+// v27 — possible-call fan-out: candidate target bodies for calls made by any of
+// this symbol's bodies (query.py:GraphQuery.possible_callees).
+std::vector<Storage::DefinitionRow>
+Storage::possible_callees_of(int64_t symbol_id) {
+  auto st = db_.prepare(
+      "SELECT td.symbol_id, td.file_id, td.line, td.col, td.end_line, td.end_col "
+      "FROM possible_call pc "
+      "JOIN definition sd ON sd.id = pc.src_def_id "
+      "JOIN definition td ON td.id = pc.dst_def_id "
+      "WHERE sd.symbol_id = ? ORDER BY td.symbol_id, td.file_id");
+  st.bind(1, symbol_id);
+  std::vector<DefinitionRow> out;
+  while (st.step()) {
+    DefinitionRow d;
+    d.symbol_id = st.col_int64(0);
+    d.file_id = opt_int64(st, 1);
+    d.line = opt_int64(st, 2);
+    d.col = opt_int64(st, 3);
+    d.end_line = opt_int64(st, 4);
+    d.end_col = opt_int64(st, 5);
+    out.push_back(d);
   }
   return out;
 }

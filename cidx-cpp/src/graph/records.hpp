@@ -53,6 +53,11 @@ struct Sym {
   std::optional<int64_t> end_line; // v25: end of the symbol's own extent at
   std::optional<int64_t> end_col;  // (line, col); nullopt for decl-only / stubs
   bool external = false; // file is a raw path in an UNREGISTERED file
+  int64_t multi_def = 0; // v27: number of definitions (bodies). >1 == redefined
+                         // per backend. Deliberately NOT in to_dict() (parity).
+
+  // Python Sym.is_redefined property (query.py)
+  bool is_redefined() const { return multi_def > 1; }
 
   // Python Sym.loc property (query.py:135-140)
   std::string loc() const {
@@ -125,6 +130,67 @@ struct Sym {
     o.push_back({"is_static", Value::of(is_static)});
     o.push_back({"is_instantiation", Value::of(is_instantiation)});
     o.push_back({"is_stub", Value::of(is_stub())});
+    return Value::obj(std::move(o));
+  }
+};
+
+// ---- Definition (v27) -----------------------------------------------------
+// One backend body of a (possibly redefined) symbol. Mirrors query.py:Definition
+// -- to_dict()/loc() byte-identical.
+struct Definition {
+  Sym sym;
+  std::optional<std::string> component;
+  std::optional<std::string> file; // abs path (resolved from file cache)
+  std::optional<int64_t> line, col, end_line, end_col;
+
+  std::string loc() const {
+    if (!file) {
+      return "<no-location>";
+    }
+    const std::string base = pathutil::basename(*file);
+    if (line && *line != 0) {
+      return base + ":" + std::to_string(*line);
+    }
+    return base;
+  }
+
+  // query.py:Definition.to_dict() -- key order EXACT.
+  json_out::Value to_dict() const {
+    using namespace json_out;
+    Object o;
+    o.push_back({"usr", Value::of(sym.usr)});
+    o.push_back({"name", Value::of(sym.name)});
+    o.push_back({"kind", Value::of(sym.kind)});
+    if (component) {
+      o.push_back({"component", Value::of(*component)});
+    } else {
+      o.push_back({"component", Value::null()});
+    }
+    if (file) {
+      o.push_back({"file", Value::of(pathutil::basename(*file))});
+    } else {
+      o.push_back({"file", Value::null()});
+    }
+    if (line) {
+      o.push_back({"line", Value::of(*line)});
+    } else {
+      o.push_back({"line", Value::null()});
+    }
+    if (col) {
+      o.push_back({"col", Value::of(*col)});
+    } else {
+      o.push_back({"col", Value::null()});
+    }
+    if (end_line) {
+      o.push_back({"end_line", Value::of(*end_line)});
+    } else {
+      o.push_back({"end_line", Value::null()});
+    }
+    if (end_col) {
+      o.push_back({"end_col", Value::of(*end_col)});
+    } else {
+      o.push_back({"end_col", Value::null()});
+    }
     return Value::obj(std::move(o));
   }
 };
