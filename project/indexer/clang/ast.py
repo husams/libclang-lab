@@ -1146,6 +1146,7 @@ def _index_cursor_template_args(
     nargs = cursor.get_num_template_arguments()
     if nargs <= 0:
         return 0
+    display_args: list[str] = []
     for ai in range(nargs):
         cx_kind = _clang_cursor_get_template_argument_kind_raw(cursor, ai)
         arg_kind = _CX_TARG_KIND_TO_ARG_KIND.get(cx_kind)
@@ -1174,13 +1175,59 @@ def _index_cursor_template_args(
                 ref_id=ref_id,
                 literal=literal,
             )
+            display_args.append(literal or "?")
         elif cx_kind == 4:
+            literal = str(cursor.get_template_argument_value(ai))
             db.add_template_arg(
-                owner_id, ai, 2, literal=str(cursor.get_template_argument_value(ai))
+                owner_id, ai, 2, literal=literal
             )
+            display_args.append(literal)
         else:
             db.add_template_arg(owner_id, ai, arg_kind)
+            display_args.append("?")
+    _update_callable_template_display_name(db, owner_id, display_args)
     return nargs
+
+
+def _update_callable_template_display_name(
+    db: Storage, owner_id: int, literals: list[str]
+) -> None:
+    """Patch a callable specialization display name with stored template args."""
+    if not literals or any(lit == "?" for lit in literals):
+        return
+    sym = db.lookup_symbol_by_id(owner_id)
+    if sym is None or not sym.display_name:
+        return
+    display = _render_callable_template_display_name(sym.display_name, literals)
+    if display != sym.display_name:
+        db.update_symbol(sym.usr, display_name=display)
+
+
+def _render_callable_template_display_name(
+    display_name: str, literals: list[str]
+) -> str:
+    rendered_args = "<" + ", ".join(literals) + ">"
+    start = display_name.find("<")
+    params = display_name.find("(")
+    if start != -1 and (params == -1 or start < params):
+        end = _matching_template_close(display_name, start)
+        if end is not None:
+            return display_name[:start] + rendered_args + display_name[end + 1 :]
+    if params != -1:
+        return display_name[:params] + rendered_args + display_name[params:]
+    return display_name + rendered_args
+
+
+def _matching_template_close(text: str, start: int) -> Optional[int]:
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
 
 
 def _method_targ_kind_from_literal(text: str) -> int:
@@ -1374,6 +1421,7 @@ def _index_method_template_args_from_tokens(
             groups.append([])  # top-level separator
             continue
         groups[-1].append(tok)
+    display_args: list[str] = []
     for pos, g in enumerate(grp for grp in groups if grp):
         literal = "".join(
             (" " if i and _needs_space(g[i - 1], g[i]) else "") + g[i]
@@ -1393,6 +1441,8 @@ def _index_method_template_args_from_tokens(
             ),
             literal=literal,
         )
+        display_args.append(literal)
+    _update_callable_template_display_name(db, owner_id, display_args)
 
 
 def _needs_space(a: str, b: str) -> bool:

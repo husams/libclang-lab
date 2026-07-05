@@ -1497,12 +1497,14 @@ TEST_SUITE("clang") {
                  "  template <class T> void reg() {}\n"
                  "  template <class T, int N> void regN() {}\n"
                  "  template <class T> void regComplex() {}\n"
+                 "  void ordinary(int) {}\n"
                  "};\n"
                  "template <class T> T identity(T v) { return v; }\n"
                  "int use(Context& c) {\n"
                  "  c.reg<MyType>();\n"
                  "  c.regN<Other, 7>();\n"
                  "  c.regComplex<Payload<Other>>();\n"
+                 "  c.ordinary(3);\n"
                  "  return identity<int>(3);\n"
                  "}\n"
                  "}\n");
@@ -1538,6 +1540,27 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"Payload<Other>"});
     CHECK(args_for("spec::identity", "function") ==
           std::vector<std::string>{"int"});
+
+    auto display_for = [&](const std::string &qual, const std::string &kind,
+                           int64_t is_instantiation) {
+      auto st = raw.prepare(
+          "SELECT s.display_name FROM symbol s "
+          "JOIN symbol_kind sk ON sk.id = s.kind "
+          "WHERE s.qual_name = ? AND sk.name = ? AND s.is_instantiation = ? "
+          "LIMIT 1");
+      st.bind(1, std::string_view{qual});
+      st.bind(2, std::string_view{kind});
+      st.bind(3, is_instantiation);
+      REQUIRE(st.step());
+      return st.col_text(0);
+    };
+
+    CHECK(display_for("spec::Context::reg", "method", 1) ==
+          "reg<MyType>()");
+    CHECK(display_for("spec::Context::regN", "method", 1) ==
+          "regN<Other, 7>()");
+    CHECK(display_for("spec::Context::ordinary", "method", 0) ==
+          "ordinary(int)");
 
     auto ref_for = [&](const std::string &qual, const std::string &literal) {
       auto st = raw.prepare(
