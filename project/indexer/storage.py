@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -450,6 +450,11 @@ CREATE TABLE IF NOT EXISTS definition (
     col          INTEGER,
     end_line     INTEGER,
     end_col      INTEGER,
+    init_text    TEXT,                     -- v28: for a (static member) VARIABLE
+                                           -- definition, its initializer source
+                                           -- text per backend (`= 5` -> '5',
+                                           -- `= seed_a()` -> 'seed_a()'); NULL for
+                                           -- functions and uninitialized vars
     -- one body per (component, file, symbol). component_id is derived from the
     -- file's owning component; both are in the key so the same relative file path
     -- in two clones/components stays distinct (matches the variant key the user
@@ -1347,6 +1352,15 @@ class Storage:
                 "ALTER TABLE symbol ADD COLUMN multi_def INTEGER NOT NULL DEFAULT 0"
             )
             changed = True
+        # v27 -> v28: per-backend initializer text on a (static member) variable
+        # definition. `definition` is created by the schema script; ALTER the
+        # existing table so a v27 DB gains the column. No backfill -- a reindex
+        # repopulates it; old rows read NULL until then.
+        if "definition" in tables:
+            dcols = {r[1] for r in self._conn.execute("PRAGMA table_info(definition)")}
+            if "init_text" not in dcols:
+                self._conn.execute("ALTER TABLE definition ADD COLUMN init_text TEXT")
+                changed = True
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(file)")}
         if "file" in tables and "driver" not in fcols:
             # No backfill possible from stored data -- re-import to populate.
@@ -3427,22 +3441,28 @@ class Storage:
         end_line: Optional[int] = None,
         end_col: Optional[int] = None,
         component_id: Optional[int] = None,
+        init_text: Optional[str] = None,
     ) -> int:
         """Return the `definition` row id for this symbol's body in this
         (component, file), creating it if new. One row per backend body -- keyed
         by (component_id, file_id, symbol_id) so Server1::reg and Server2::reg
-        (same USR, different files) stay distinct. component derived from file."""
+        (same USR, different files) stay distinct. component derived from file.
+        `init_text` is a (static member) variable's initializer source per
+        backend (NULL for functions)."""
         if component_id is None:
             component_id = self.component_id_for_file(file_id)
         cur = self._conn.execute(
             "INSERT INTO definition "
-            "(symbol_id, component_id, file_id, line, col, end_line, end_col) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "(symbol_id, component_id, file_id, line, col, end_line, end_col, "
+            " init_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(component_id, file_id, symbol_id) DO UPDATE SET "
             "  line = excluded.line, col = excluded.col, "
-            "  end_line = excluded.end_line, end_col = excluded.end_col "
+            "  end_line = excluded.end_line, end_col = excluded.end_col, "
+            "  init_text = excluded.init_text "
             "RETURNING id",
-            (symbol_id, component_id, file_id, line, col, end_line, end_col),
+            (symbol_id, component_id, file_id, line, col, end_line, end_col,
+             init_text),
         )
         row = cur.fetchone()
         if row is None:
