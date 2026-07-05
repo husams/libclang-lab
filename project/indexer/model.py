@@ -384,11 +384,14 @@ class CodeBase:
         self,
         sym: Optional[Sym],
         defn: "Optional[Definition]" = None,
+        alias_origin: "Optional[Entity]" = None,
     ) -> "Optional[Entity]":
         """Turn a low-level ``Sym`` into its concept-bearing :class:`Entity`. When
         ``defn`` is given, the entity is bound to that ONE backend body -- its
         ``location`` / ``callees`` / ``uses`` / ``initializer`` reflect that
-        backend (used by :meth:`Entity.definitions`)."""
+        backend (used by :meth:`Entity.definitions`). When ``alias_origin`` is
+        given, the entity was reached through a typedef/type-alias and its source
+        location reflects that alias declaration."""
         if sym is None:
             return None
         cls = _KIND_TO_CLASS.get(sym.kind, Entity)
@@ -401,7 +404,7 @@ class CodeBase:
                 cls = SpecializedFunction
             elif sym.kind == "method":
                 cls = SpecializedMethod
-        return cls(sym, self, defn)
+        return cls(sym, self, defn, alias_origin)
 
     def _wrap_all(self, syms: Iterable[Optional[Sym]]) -> "list[Entity]":
         out = []
@@ -767,6 +770,7 @@ class Entity:
         sym: Sym,
         cb: CodeBase,
         defn: "Optional[Definition]" = None,
+        alias_origin: "Optional[Entity]" = None,
     ):
         self.sym = sym
         self._cb = cb
@@ -774,6 +778,10 @@ class Entity:
         # `definition` row) -- location/callees/uses/initializer are per-backend.
         # None = the ordinary symbol-level entity. See definitions().
         self._defn = defn
+        # Context-only view: the target entity was reached through a typedef /
+        # type-alias. Identity stays the target symbol, but source navigation
+        # should land on the alias declaration the user traversed through.
+        self._alias_origin = alias_origin
 
     # -- identity ------------------------------------------------------------ #
 
@@ -888,6 +896,20 @@ class Entity:
         tpl = self._cb.graph.template_of(self.sym)
         return self._cb.wrap(tpl)
 
+    def _instantiation_source_entity(self) -> "Optional[Entity]":
+        """Primary-template fallback for implicit instances with no own extent."""
+        if not self.sym.is_instantiation or self.sym.end_line is not None:
+            return None
+        primary = self.template_of()
+        if primary is None or primary.id == self.id:
+            return None
+        return primary
+
+    def _source_entity(self) -> "Optional[Entity]":
+        if self._alias_origin is not None:
+            return self._alias_origin
+        return self._instantiation_source_entity()
+
     @property
     def is_stub(self) -> bool:
         return self.sym.is_stub
@@ -909,6 +931,9 @@ class Entity:
         (definition, else declaration), or ``None`` for a stub. The smart-path
         handle: ``.path`` / ``.component`` / ``.repo`` / ``.compile_options`` /
         ``.source(...)`` / ``.tu()`` / ``.walk()``."""
+        source_entity = self._source_entity()
+        if source_entity is not None:
+            return source_entity.file
         return self.sym.file
 
     @property
@@ -922,6 +947,9 @@ class Entity:
         if self._defn is not None:
             d = self._defn
             return Location(d.file, d.line, d.col, d.end_line, d.end_col)
+        source_entity = self._source_entity()
+        if source_entity is not None:
+            return source_entity.location
         return Location(
             self.sym.file,
             self.sym.line,
@@ -934,12 +962,21 @@ class Entity:
         """This entity's own source text, read straight off disk over its
         stored extent (falling back to ``default_lines`` lines from its start
         line when no extent is known). See :meth:`Sym.source`."""
+        source_entity = self._source_entity()
+        if source_entity is not None:
+            return source_entity.source(default_lines, encoding=encoding)
         return self.sym.source(default_lines, encoding=encoding)
 
     @property
     def definition(self) -> Optional[Location]:
         """Where the entity is defined, or None if only declared."""
+        if self._alias_origin is not None:
+            return self._alias_origin.definition
         defn, _ = self._locations()
+        if defn is None:
+            source_entity = self._source_entity()
+            if source_entity is not None:
+                return source_entity.definition
         return self._loc(defn) if defn else None
 
     @property
@@ -947,6 +984,9 @@ class Entity:
         """Where the entity is declared, surfaced only when it DIFFERS from the
         definition (e.g. a prototype in a header vs. the body in a .c). Returns
         None when the declaration coincides with the definition or is unknown."""
+        source_entity = self._source_entity()
+        if source_entity is not None:
+            return source_entity.declaration
         defn, decl = self._locations()
         if decl is None:
             return None
@@ -1065,6 +1105,12 @@ class Entity:
 
     def to_dict(self) -> dict:
         d = self.sym.to_dict()
+        loc = self.location
+        d["file"] = loc.path
+        d["line"] = loc.line
+        d["col"] = loc.col
+        d["end_line"] = loc.end_line
+        d["end_col"] = loc.end_col
         d["entity"] = type(self).__name__
         display = self.display_name
         if display != self.name:
@@ -2194,7 +2240,7 @@ class Typedef(Entity):
         for sym in self._cb.graph.neighbors(
             self.sym, kinds=("uses",), direction="out"
         ):
-            e = self._cb.wrap(sym)
+            e = self._cb.wrap(sym, alias_origin=self)
             if e is not None:
                 return e
         return None
