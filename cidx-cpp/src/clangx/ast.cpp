@@ -867,12 +867,76 @@ resolve_template_arg_ref_id(LibClang &lib, Storage &db,
                             const std::optional<std::string> &literal,
                             CXCursor scope_cursor);
 
+std::optional<size_t> matching_template_close(const std::string &text,
+                                              size_t start) {
+  int depth = 0;
+  for (size_t i = start; i < text.size(); ++i) {
+    if (text[i] == '<') {
+      ++depth;
+    } else if (text[i] == '>') {
+      --depth;
+      if (depth == 0) {
+        return i;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::string render_callable_template_display_name(
+    const std::string &display_name, const std::vector<std::string> &literals) {
+  std::string rendered_args = "<";
+  for (size_t i = 0; i < literals.size(); ++i) {
+    if (i != 0) {
+      rendered_args += ", ";
+    }
+    rendered_args += literals[i];
+  }
+  rendered_args += ">";
+
+  const size_t start = display_name.find('<');
+  const size_t params = display_name.find('(');
+  if (start != std::string::npos &&
+      (params == std::string::npos || start < params)) {
+    if (const auto end = matching_template_close(display_name, start)) {
+      return display_name.substr(0, start) + rendered_args +
+             display_name.substr(*end + 1);
+    }
+  }
+
+  if (params != std::string::npos) {
+    return display_name.substr(0, params) + rendered_args +
+           display_name.substr(params);
+  }
+  return display_name + rendered_args;
+}
+
+void update_callable_template_display_name(
+    Storage &db, int64_t owner_id, const std::vector<std::string> &literals) {
+  if (literals.empty()) {
+    return;
+  }
+  if (std::find(literals.begin(), literals.end(), "?") != literals.end()) {
+    return;
+  }
+  const std::optional<Symbol> sym = db.lookup_symbol_by_id(owner_id);
+  if (!sym || !sym->display_name || sym->display_name->empty()) {
+    return;
+  }
+  const std::string display =
+      render_callable_template_display_name(*sym->display_name, literals);
+  if (display != *sym->display_name) {
+    db.update_symbol(sym->usr, {{"display_name", display}});
+  }
+}
+
 int index_cursor_template_args(LibClang &lib, Storage &db, int64_t owner_id,
                                CXCursor cursor) {
   const int nargs = lib.clang_Cursor_getNumTemplateArguments(cursor);
   if (nargs <= 0) {
     return 0;
   }
+  std::vector<std::string> display_args;
   for (int ai = 0; ai < nargs; ++ai) {
     const enum CXTemplateArgumentKind tak =
         lib.clang_Cursor_getTemplateArgumentKind(cursor,
@@ -903,24 +967,30 @@ int index_cursor_template_args(LibClang &lib, Storage &db, int64_t owner_id,
       if (!ta.ref_id) {
         ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, cursor);
       }
+      display_args.push_back(ta.literal.value_or("?"));
     } else if (tak == CXTemplateArgumentKind_Integral) {
       ta.arg_kind = 2;
       ta.literal = std::to_string(lib.clang_Cursor_getTemplateArgumentValue(
           cursor, static_cast<unsigned>(ai)));
+      display_args.push_back(*ta.literal);
     } else if (tak == CXTemplateArgumentKind_Declaration ||
                tak == CXTemplateArgumentKind_NullPtr ||
                tak == CXTemplateArgumentKind_Expression) {
       ta.arg_kind = 2;
+      display_args.push_back("?");
     } else if (tak == CXTemplateArgumentKind_Template ||
                tak == CXTemplateArgumentKind_TemplateExpansion) {
       ta.arg_kind = 3;
+      display_args.push_back("?");
     } else if (tak == CXTemplateArgumentKind_Pack) {
       ta.arg_kind = 4;
+      display_args.push_back("?");
     } else {
       continue;
     }
     db.add_template_arg(ta);
   }
+  update_callable_template_display_name(db, owner_id, display_args);
   return nargs;
 }
 
@@ -1198,6 +1268,7 @@ void index_method_template_args_from_tokens(LibClang &lib, Storage &db,
     groups.back().push_back(tok);
   }
   int64_t pos = 0;
+  std::vector<std::string> display_args;
   for (const auto &g : groups) {
     if (g.empty()) {
       continue;
@@ -1227,7 +1298,9 @@ void index_method_template_args_from_tokens(LibClang &lib, Storage &db,
       ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, call_cursor);
     }
     db.add_template_arg(ta);
+    display_args.push_back(literal);
   }
+  update_callable_template_display_name(db, owner_id, display_args);
 }
 
 // Stage 2/3 core: mint a NAMED template instance `X<B>` from a CXType that is a
