@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -216,6 +216,28 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
 
+-- ---- v26: every declaration/reopen SITE of a symbol -------------------------
+-- symbol.(line,col)/decl_* keep only the winning definition + one declaration
+-- site (add_symbol collapses on usr). But an OPEN symbol -- above all a
+-- namespace, reopened `namespace ABC { ... }` across many files/components/
+-- repos -- has arbitrarily many declaration sites, and references() must list
+-- them all. decl_site records ONE row per (symbol, physical location) for every
+-- symbol (not just namespaces: a function/class declared in several headers
+-- gains multi-site references for free). Populated in the add_symbol path on
+-- every (re)index; INSERT OR IGNORE keeps it idempotent within a run and the
+-- ON DELETE CASCADE clears a symbol's sites when it is removed.
+CREATE TABLE IF NOT EXISTS decl_site (
+    symbol_id     INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    file_id       INTEGER REFERENCES file(id) ON DELETE CASCADE,
+    line          INTEGER,
+    col           INTEGER,
+    end_line      INTEGER,
+    end_col       INTEGER,
+    is_definition INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (symbol_id, file_id, line, col)
+);
+CREATE INDEX IF NOT EXISTS idx_decl_site_symbol ON decl_site(symbol_id);
+
 -- ---- v16: symbol-kind metadata (display only) ----------------------------
 -- Maps the integer stored in symbol.kind (== libclang CXCursorKind) to its
 -- string name. Purely for display/debugging -- no FK from symbol references it;
@@ -345,7 +367,11 @@ INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
   (1,'generalizes'), (2,'implements'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
-  (10,'befriends'), (11,'instantiates');
+  (10,'befriends'), (11,'instantiates'),
+  -- v26: a namespace DIRECTLY declares a member entity (record/enum/nested
+  -- namespace). Direct only -- ABC does NOT `declares` ABC::XXX's members;
+  -- ABC and ABC::XXX are distinct entities (content is not recursive).
+  (12,'declares');
 
 CREATE TABLE IF NOT EXISTS entity_edge (
     src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -392,7 +418,8 @@ INSERT OR IGNORE INTO entity_kind (id, name) VALUES
   (0,'other'),
   (1,'class'), (2,'abstract_class'), (3,'interface'),
   (4,'union'), (5,'enum'),
-  (6,'class_template'), (7,'abstract_class_template'), (8,'interface_template');
+  (6,'class_template'), (7,'abstract_class_template'), (8,'interface_template'),
+  (9,'namespace');  -- v26: namespace as a first-class entity node
 
 CREATE TABLE IF NOT EXISTS entity_node (
     id   INTEGER PRIMARY KEY REFERENCES symbol(id) ON DELETE CASCADE,
@@ -1460,6 +1487,14 @@ class Storage:
             # because the type is a pure-DB classification of existing symbols,
             # __init__ backfills it right after _SCHEMA -- no re-index/resolve.
             self._needs_entity_node_backfill = True
+            changed = True
+        if "decl_site" not in tables:
+            # v25 -> v26: per-symbol declaration/reopen sites. Created by the
+            # schema script (CREATE TABLE IF NOT EXISTS). No backfill from stored
+            # rows is possible -- only the winning site survives on the symbol
+            # row -- so a reindex repopulates every site. Bump the version so the
+            # DB is stamped v26; references() on a namespace stays empty until
+            # reindex (documented).
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -2767,6 +2802,27 @@ class Storage:
             vals,
         )
         sid = cur.fetchone()["id"]
+        # v26: record THIS cursor's own site. The symbol row keeps only the
+        # winning definition + one declaration; decl_site keeps every physical
+        # site so references() can list all reopenings of an open symbol (a
+        # namespace above all). Guard on a real (file, line): locationless stubs
+        # would otherwise fan out on the NULL-file UNIQUE (NULL != NULL). INSERT
+        # OR IGNORE is idempotent -- reindexing the same TU re-adds nothing.
+        if sym.file_id is not None and sym.line is not None:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO decl_site "
+                "(symbol_id, file_id, line, col, end_line, end_col, is_definition) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    sid,
+                    sym.file_id,
+                    sym.line,
+                    sym.col,
+                    sym.end_line,
+                    sym.end_col,
+                    1 if sym.is_definition else 0,
+                ),
+            )
         self._commit()
         return sid
 

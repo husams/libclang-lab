@@ -168,6 +168,28 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
 
+-- ---- v26: every declaration/reopen SITE of a symbol -------------------------
+-- symbol.(line,col)/decl_* keep only the winning definition + one declaration
+-- site (add_symbol collapses on usr). But an OPEN symbol -- above all a
+-- namespace, reopened `namespace ABC { ... }` across many files/components/
+-- repos -- has arbitrarily many declaration sites, and references() must list
+-- them all. decl_site records ONE row per (symbol, physical location) for every
+-- symbol (not just namespaces: a function/class declared in several headers
+-- gains multi-site references for free). Populated in the add_symbol path on
+-- every (re)index; INSERT OR IGNORE keeps it idempotent within a run and the
+-- ON DELETE CASCADE clears a symbol's sites when it is removed.
+CREATE TABLE IF NOT EXISTS decl_site (
+    symbol_id     INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    file_id       INTEGER REFERENCES file(id) ON DELETE CASCADE,
+    line          INTEGER,
+    col           INTEGER,
+    end_line      INTEGER,
+    end_col       INTEGER,
+    is_definition INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (symbol_id, file_id, line, col)
+);
+CREATE INDEX IF NOT EXISTS idx_decl_site_symbol ON decl_site(symbol_id);
+
 -- ---- v16: symbol-kind metadata (display only) ----------------------------
 -- Maps the integer stored in symbol.kind (== libclang CXCursorKind) to its
 -- string name. Purely for display/debugging -- no FK from symbol references it;
@@ -297,7 +319,11 @@ INSERT OR IGNORE INTO entity_edge_kind (id, name) VALUES
   (1,'generalizes'), (2,'implements'), (3,'specializes'),
   (4,'composes'), (5,'aggregates'), (6,'associates'),
   (7,'creates'), (8,'uses'), (9,'destroys'),
-  (10,'befriends'), (11,'instantiates');
+  (10,'befriends'), (11,'instantiates'),
+  -- v26: a namespace DIRECTLY declares a member entity (record/enum/nested
+  -- namespace). Direct only -- ABC does NOT `declares` ABC::XXX's members;
+  -- ABC and ABC::XXX are distinct entities (content is not recursive).
+  (12,'declares');
 
 CREATE TABLE IF NOT EXISTS entity_edge (
     src_id        INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -340,14 +366,15 @@ INSERT OR IGNORE INTO entity_kind (id, name) VALUES
   (0,'other'),
   (1,'class'), (2,'abstract_class'), (3,'interface'),
   (4,'union'), (5,'enum'),
-  (6,'class_template'), (7,'abstract_class_template'), (8,'interface_template');
+  (6,'class_template'), (7,'abstract_class_template'), (8,'interface_template'),
+  (9,'namespace');  -- v26: namespace as a first-class entity node
 
 CREATE TABLE IF NOT EXISTS entity_node (
     id   INTEGER PRIMARY KEY REFERENCES symbol(id) ON DELETE CASCADE,
     kind INTEGER NOT NULL   -- entity_kind.id (no FK: seed-only)
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '25');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '26');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -1115,6 +1142,14 @@ void Storage::migrate() {
   // re-index/resolve. Mirrors storage.py.
   if (!has_table("entity_node")) {
     needs_entity_node_backfill_ = true;
+    changed = true;
+  }
+  // v25 -> v26: per-symbol declaration/reopen sites (decl_site). Created by the
+  // schema script (CREATE TABLE IF NOT EXISTS). No backfill from stored rows is
+  // possible -- only the winning site survives on the symbol row -- so a reindex
+  // repopulates every site; bump the version so the DB is stamped v26. Mirrors
+  // storage.py.
+  if (!has_table("decl_site")) {
     changed = true;
   }
   if (changed) {
@@ -2252,6 +2287,26 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   }
   const int64_t sid = st.col_int64(0);
   st.step_done();
+  // v26: record THIS cursor's own site (mirrors Python add_symbol). The symbol
+  // row keeps only the winning definition + one declaration; decl_site keeps
+  // every physical site so references() can list all reopenings of an open
+  // symbol (a namespace above all). Guard on a real (file, line): locationless
+  // stubs would otherwise fan out on the NULL-file UNIQUE (NULL != NULL). INSERT
+  // OR IGNORE is idempotent -- reindexing the same TU re-adds nothing.
+  if (sym.file_id.has_value() && sym.line.has_value()) {
+    auto ds = db_.prepare(
+        "INSERT OR IGNORE INTO decl_site "
+        "(symbol_id, file_id, line, col, end_line, end_col, is_definition) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)");
+    ds.bind(1, sid);
+    bind_opt(ds, 2, sym.file_id);
+    bind_opt(ds, 3, sym.line);
+    bind_opt(ds, 4, sym.col);
+    bind_opt(ds, 5, sym.end_line);
+    bind_opt(ds, 6, sym.end_col);
+    ds.bind(7, static_cast<int64_t>(sym.is_definition ? 1 : 0));
+    ds.step_done();
+  }
   return sid;
 }
 
@@ -3733,6 +3788,54 @@ static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
     ins.bind(2, classify(sym_id, sym_kind));
     ins.step_done();
   }
+  // v26: namespaces (kind 22) are first-class entity nodes too. A single
+  // canonical node per namespace USR (already collapsed in `symbol`), so one
+  // entity_node covers all its reopenings across files/components/repos.
+  std::vector<int64_t> ns_ids;
+  {
+    auto st = db.prepare("SELECT id FROM symbol WHERE kind = 22");
+    while (st.step()) ns_ids.push_back(st.col_int64(0));
+  }
+  for (const int64_t ns_id : ns_ids) {
+    auto ins = db.prepare(
+        "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)");
+    ins.bind(1, ns_id);
+    ins.bind(2, static_cast<int64_t>(9)); // entity_kind 9 = namespace
+    ins.step_done();
+  }
+}
+
+// v26: namespace --declares--> member entity node. A `declares` entity edge
+// (kind 12) for every Layer-0 `contains`(3) edge whose SRC is a namespace
+// (symbol kind 22) and whose DST is an entity node (record/enum/class-template/
+// nested namespace -- present in entity_node). DIRECT only: `contains` is
+// already the direct lexical link, so ABC never `declares` ABC::XXX's members
+// -- ABC and ABC::XXX are distinct entities (content is not recursive). Members
+// that are not entities (free functions, variables) have no entity_node and are
+// intentionally skipped. Must run AFTER cpp_materialise_entity_nodes (reads
+// entity_node). Mirrors entity_rollup._materialise_declares.
+static void cpp_materialise_declares(cidx::SqliteDb &db) {
+  auto st = db.prepare(
+      "SELECT e.src_id, e.dst_id "
+      "FROM edge e "
+      "JOIN symbol src ON src.id = e.src_id "
+      "JOIN entity_node en ON en.id = e.dst_id "
+      "WHERE e.kind = 3 AND src.kind = 22");
+  std::vector<std::pair<int64_t, int64_t>> rows;
+  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  for (const auto &[src_id, dst_id] : rows) {
+    if (src_id == dst_id) continue;
+    auto ins = db.prepare(
+        "INSERT INTO entity_edge "
+        "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+        " access, is_virtual, create_form, partial) "
+        "VALUES (?, ?, 12, 1, NULL, 1, 0, 0, NULL, 0) "
+        "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), "
+        "COALESCE(create_form, -1)) DO NOTHING");
+    ins.bind(1, src_id);
+    ins.bind(2, dst_id);
+    ins.step_done();
+  }
 }
 
 void Storage::materialise_entity_edges() {
@@ -3758,6 +3861,7 @@ void Storage::materialise_entity_edges() {
     run("uses", cpp_materialise_uses);
     run("befriends", cpp_materialise_befriends);
     run("entity_nodes", cpp_materialise_entity_nodes);
+    run("declares", cpp_materialise_declares); // v26: needs entity_node populated
     txn.commit();
   }
 }

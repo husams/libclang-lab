@@ -38,6 +38,7 @@ _ENTITY_KIND_NAMES = {
     9: "destroys",
     10: "befriends",
     11: "instantiates",
+    12: "declares",
 }
 
 # Layer-0 edge kinds introduced by PR1
@@ -94,13 +95,13 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_25():
-    assert SCHEMA_VERSION == 25, f"Expected 25, got {SCHEMA_VERSION}"
+def test_schema_version_is_26():
+    assert SCHEMA_VERSION == 26, f"Expected 26, got {SCHEMA_VERSION}"
 
 
-def test_product_version_is_0440():
+def test_product_version_is_0450():
     from indexer import cli
-    assert cli.VERSION == "0.44.0", f"Expected '0.44.0', got {cli.VERSION!r}"
+    assert cli.VERSION == "0.45.0", f"Expected '0.45.0', got {cli.VERSION!r}"
 
 
 def test_entity_rollup_module_importable():
@@ -836,14 +837,16 @@ def test_migration_drops_nests_and_renumbers_befriends(tmp_path, stamped_version
     )
     # the nests row is gone; only befriends survives, renumbered 11 -> 10
     assert edges == [(10,)], f"expected only befriends(10); got {edges}"
-    # 11 rows: 1-10 plus the reseeded instantiates(11). The old (11,'befriends')
-    # was renumbered to 10, freeing id 11 for the schema script's INSERT OR IGNORE.
-    assert len(kinds) == 11, f"entity_edge_kind should have 11 rows; got {kinds}"
+    # 12 rows: 1-10 plus the reseeded instantiates(11) and declares(12). The old
+    # (11,'befriends') was renumbered to 10, freeing id 11 for the schema script's
+    # INSERT OR IGNORE; declares(12) is the v26 namespace-containment kind.
+    assert len(kinds) == 12, f"entity_edge_kind should have 12 rows; got {kinds}"
     names = [n for _, n in kinds]
     assert "nests" not in names, "stale 'nests' seed row still present"
     assert "realizes" not in names, "stale 'realizes' seed row was not renamed"
     assert dict(kinds)[10] == "befriends", "id 10 should be befriends after migrate"
     assert dict(kinds)[11] == "instantiates", "id 11 should be instantiates after migrate"
+    assert dict(kinds)[12] == "declares", "id 12 should be declares after migrate"
     assert dict(kinds)[2] == "implements", "id 2 should be implements after migrate"
 
 
@@ -860,10 +863,11 @@ def test_migration_nests_cleanup_is_idempotent(tmp_path):
     finally:
         conn.close()
     names = [n for _, n in kinds]
-    assert len(kinds) == 11
+    assert len(kinds) == 12
     assert "nests" not in names and "realizes" not in names
     assert dict(kinds)[2] == "implements"
     assert dict(kinds)[11] == "instantiates"
+    assert dict(kinds)[12] == "declares"
 
 
 def test_migration_entity_edge_populated_after_resolve(tmp_path):

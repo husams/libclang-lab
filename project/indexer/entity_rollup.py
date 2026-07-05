@@ -78,6 +78,7 @@ _EK_USES = 8
 _EK_DESTROYS = 9
 _EK_BEFRIENDS = 10
 _EK_INSTANTIATES = 11
+_EK_DECLARES = 12  # v26: namespace DIRECTLY declares a member entity
 
 # Layer-0 edge.kind ids
 _L0_CALLS = 1
@@ -278,6 +279,7 @@ _EK_ENUM = 5
 _EK_CLASS_TEMPLATE = 6
 _EK_ABSTRACT_CLASS_TEMPLATE = 7
 _EK_INTERFACE_TEMPLATE = 8
+_EK_NAMESPACE = 9  # v26: namespace as a first-class entity node
 
 
 def _entity_kind_id(db: "Storage", sym_id: int, sym_kind: int) -> int:
@@ -329,6 +331,16 @@ def _materialise_entity_nodes(db: "Storage") -> None:
             conn.execute(
                 "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)",
                 (sym_id, ek),
+            )
+        # v26: namespaces (kind 22) are first-class entity nodes too. A single
+        # canonical node per namespace USR (already collapsed in `symbol`), so
+        # one entity_node covers all its reopenings across files/components/repos.
+        for (ns_id,) in conn.execute(
+            "SELECT id FROM symbol WHERE kind = 22"
+        ).fetchall():
+            conn.execute(
+                "INSERT OR REPLACE INTO entity_node (id, kind) VALUES (?, ?)",
+                (ns_id, _EK_NAMESPACE),
             )
     finally:
         if owns_ctx:
@@ -546,6 +558,39 @@ def _strip_to_param_core(type_spelling: str) -> str:
 # Main materialisation pass
 # ---------------------------------------------------------------------------
 
+def _materialise_declares(db: "Storage") -> None:
+    """v26: namespace --declares--> member entity node.
+
+    A `declares` entity edge (kind 12) for every Layer-0 `contains`(3) edge
+    whose SRC is a namespace (symbol kind 22) and whose DST is an entity node
+    (record / enum / class-template / nested namespace -- i.e. present in
+    entity_node). DIRECT only: `contains` is already the direct lexical link, so
+    ABC never `declares` ABC::XXX's members -- ABC and ABC::XXX are distinct
+    entities (content is not recursive). Members that are not entities
+    (free functions, variables) have no entity_node and are intentionally
+    skipped. Must run AFTER _materialise_entity_nodes (reads entity_node)."""
+    conn = db._conn
+    rows = conn.execute(
+        "SELECT e.src_id, e.dst_id "
+        "FROM edge e "
+        "JOIN symbol src ON src.id = e.src_id "
+        "JOIN entity_node en ON en.id = e.dst_id "
+        "WHERE e.kind = 3 AND src.kind = 22"
+    ).fetchall()
+    for src_id, dst_id in rows:
+        if src_id == dst_id:
+            continue
+        conn.execute(
+            "INSERT INTO entity_edge "
+            "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+            " access, is_virtual, create_form, partial) "
+            "VALUES (?, ?, ?, 1, NULL, 1, 0, 0, NULL, 0) "
+            "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), "
+            "COALESCE(create_form, -1)) DO NOTHING",
+            (src_id, dst_id, _EK_DECLARES),
+        )
+
+
 def materialize_entity_edges(db: "Storage") -> None:
     """DELETE all entity_edge rows then re-materialise from the Layer-0 graph.
 
@@ -570,6 +615,7 @@ def materialize_entity_edges(db: "Storage") -> None:
         ("uses", _materialise_uses),
         ("befriends", _materialise_befriends),
         ("entity_nodes", _materialise_entity_nodes),
+        ("declares", _materialise_declares),  # v26: needs entity_node populated
     )
     _CTX = _RollupState(db._conn)
     try:

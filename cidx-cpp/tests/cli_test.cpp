@@ -837,7 +837,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.44.0");
+  CHECK(std::string(cli::kVersion) == "0.45.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -1822,12 +1822,13 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
       CHECK(st.col_int64(0) == 1);
       CHECK(st.col_int64(1) == 10);
     }
-    // entity_edge_kind reseeded: 11 rows (old (11,'befriends') renumbered to 10,
-    // freeing id 11 for the reseeded instantiates), id 10 = befriends, no 'nests'.
+    // entity_edge_kind reseeded: 12 rows (old (11,'befriends') renumbered to 10,
+    // freeing id 11 for the reseeded instantiates; v26 adds declares(12)), id 10
+    // = befriends, no 'nests'.
     {
       auto st = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind");
       REQUIRE(st.step());
-      CHECK(st.col_int64(0) == 11);
+      CHECK(st.col_int64(0) == 12);
     }
     {
       auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=10");
@@ -1838,6 +1839,11 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
       auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=11");
       REQUIRE(st.step());
       CHECK(st.col_text(0) == "instantiates");
+    }
+    {
+      auto st = raw.prepare("SELECT name FROM entity_edge_kind WHERE id=12");
+      REQUIRE(st.step());
+      CHECK(st.col_text(0) == "declares");
     }
     {
       auto st =

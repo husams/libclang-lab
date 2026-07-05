@@ -87,12 +87,12 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_25():
-    """SCHEMA_VERSION must be 25 after the v24→v25 symbol extent-end columns."""
+def test_schema_version_is_26():
+    """SCHEMA_VERSION must be 26 after the v25→v26 decl_site table (namespace sites)."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 25, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 25. "
-        "storage.py SCHEMA_VERSION must be bumped to 25 (symbol end_line/end_col)."
+    assert storage.SCHEMA_VERSION == 26, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 26. "
+        "storage.py SCHEMA_VERSION must be bumped to 26 (decl_site + namespace entity)."
     )
 
 
@@ -127,12 +127,13 @@ _REQUIRED_ENTITY_EDGE_KINDS = [
     (9, "destroys"),
     (10, "befriends"),
     (11, "instantiates"),
+    (12, "declares"),
 ]
 
 
 @pytest.mark.parametrize("kind_id,kind_name", _REQUIRED_ENTITY_EDGE_KINDS)
 def test_entity_edge_kind_seed_present(kind_id, kind_name):
-    """entity_edge_kind seed must include all 11 rows (P2-T1)."""
+    """entity_edge_kind seed must include all 12 rows (P2-T1 + v26 declares)."""
     storage = _import_storage()
     schema = storage._SCHEMA
     assert "entity_edge_kind" in schema, (
@@ -295,39 +296,40 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0440():
-    """Python VERSION must be 0.44.0 (alias.aliased() + Namespace accessors)."""
+def test_python_version_is_0450():
+    """Python VERSION must be 0.45.0 (namespace canonicalization: decl_site,
+    namespace uses edges, references/declaration_sites, entity node)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.44.0", (
-        f"Python VERSION is '{version}'; expected '0.44.0'. "
-        "Bump VERSION to 0.44.0 in cli.py (alias->instance uses edge)."
+    assert version == "0.45.0", (
+        f"Python VERSION is '{version}'; expected '0.45.0'. "
+        "Bump VERSION to 0.45.0 in cli.py (namespace canonicalization)."
     )
 
 
-def test_cpp_version_is_0440():
-    """C++ kVersion must be 0.44.0 (alias.aliased() + Namespace accessors)."""
+def test_cpp_version_is_0450():
+    """C++ kVersion must be 0.45.0 (namespace canonicalization)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.44.0", (
-        f"C++ kVersion is '{version}'; expected '0.44.0'. "
-        "Bump kVersion to 0.44.0 in args.hpp (alias->instance uses edge)."
+    assert version == "0.45.0", (
+        f"C++ kVersion is '{version}'; expected '0.45.0'. "
+        "Bump kVersion to 0.45.0 in args.hpp (namespace canonicalization)."
     )
 
 
-def test_cpp_schema_version_is_25():
-    """C++ kSchemaVersion must be 25 after the v24->v25 symbol extent-end columns."""
+def test_cpp_schema_version_is_26():
+    """C++ kSchemaVersion must be 26 after the v25->v26 decl_site table."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 25, (
-        f"C++ kSchemaVersion is {version}; expected 25. "
-        "Bump kSchemaVersion 24 -> 25 in storage.hpp (symbol end_line/end_col)."
+    assert version == 26, (
+        f"C++ kSchemaVersion is {version}; expected 26. "
+        "Bump kSchemaVersion 25 -> 26 in storage.hpp (decl_site + namespace entity)."
     )
 
 
@@ -448,8 +450,8 @@ def test_fresh_db_entity_edge_is_empty(tmp_path):
     )
 
 
-def test_fresh_db_entity_edge_kind_has_11_rows(tmp_path):
-    """A freshly opened Storage must seed entity_edge_kind with exactly 11 rows."""
+def test_fresh_db_entity_edge_kind_has_12_rows(tmp_path):
+    """A freshly opened Storage must seed entity_edge_kind with exactly 12 rows."""
     try:
         from indexer.storage import Storage
     except ImportError:
@@ -468,13 +470,14 @@ def test_fresh_db_entity_edge_kind_has_11_rows(tmp_path):
         rows = []
     conn.close()
     s.close()
-    assert count == 11, (
-        f"entity_edge_kind has {count} rows; expected 11 (P2-T1 seed). "
+    assert count == 12, (
+        f"entity_edge_kind has {count} rows; expected 12 (P2-T1 seed + v26 declares). "
         f"Rows found: {rows}"
     )
     expected_names = [
         "generalizes", "implements", "specializes", "composes", "aggregates",
         "associates", "creates", "uses", "destroys", "befriends", "instantiates",
+        "declares",
     ]
     actual_names = [r[1] for r in rows]
     assert actual_names == expected_names, (

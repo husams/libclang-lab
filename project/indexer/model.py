@@ -450,6 +450,27 @@ class CodeBase:
         """Exact-spelling lookup -> typed entities."""
         return self._wrap_all(self.graph.by_name(spelling, kind=kind))
 
+    def namespace(self, name: str) -> "Optional[Namespace]":
+        """The ONE canonical namespace named ``name`` (its fully-qualified name),
+        or ``None``.
+
+        A C++ namespace is *open*: it is reopened across many files, components,
+        and repos, but libclang gives every reopening the same USR, so the index
+        already holds exactly one canonical :class:`Namespace` per namespace --
+        with its members aggregated across every reopening (:meth:`Namespace.
+        members`) and every reopen site (:meth:`Entity.declaration_sites`).
+
+        Unlike :meth:`find`, this is an EXACT match on the qualified name: it
+        returns just ``ABC`` and never fuzzily pulls in the nested namespaces
+        (``ABC::XXX``) or members that share the prefix. ``ABC`` and ``ABC::XXX``
+        are DISTINCT entities -- pass the full qualified name of the one you
+        want (``cb.namespace("org::project")``)."""
+        tail = _unqualify(name)
+        for e in self._wrap_all(self.graph.by_qual_or_spelling(name, tail)):
+            if isinstance(e, Namespace) and e.name == name:
+                return e
+        return None
+
     def symbols_in_file(self, path_substr: str, limit: int = 500) -> "list[Entity]":
         return self._wrap_all(self.graph.symbols_in_file(path_substr, limit=limit))
 
@@ -903,6 +924,20 @@ class Entity:
             if peer is not None:
                 out.append(Reference(by=peer, kind=e.kind, sites=tuple(e.sites)))
         return out
+
+    def declaration_sites(self, limit: int = 500) -> list[Location]:
+        """Every declaration/reopen site of this entity (v26 ``decl_site``).
+
+        For an OPEN entity -- a :class:`Namespace` reopened ``namespace ABC {
+        ... }`` across many files/components/repos -- this is the full list of
+        reopenings, regardless of where each lives; the *declaration* half of
+        the picture, complementing the *use* sites in :meth:`references`. Most
+        other entities return their single site. Empty on a pre-v26 (un-
+        reindexed) index."""
+        return [
+            self._loc((s.file, s.line, s.col))
+            for s in self._cb.graph.declaration_sites(self.sym, limit=limit)
+        ]
 
     # -- escape / serialization --------------------------------------------- #
 
