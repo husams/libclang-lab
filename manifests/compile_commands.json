@@ -76,6 +76,11 @@
   },
   {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "c++ -std=c++17 -I. -c locals.cpp -o locals.o",
+    "file": "locals.cpp"
+  },
+  {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
     "command": "cc -std=c11 -c macros.c -o macros.o",
     "file": "macros.c"
   },
