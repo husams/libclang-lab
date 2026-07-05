@@ -381,7 +381,9 @@ class CodeBase:
     # -- factory ------------------------------------------------------------- #
 
     def wrap(
-        self, sym: Optional[Sym], defn: "Optional[Definition]" = None
+        self,
+        sym: Optional[Sym],
+        defn: "Optional[Definition]" = None,
     ) -> "Optional[Entity]":
         """Turn a low-level ``Sym`` into its concept-bearing :class:`Entity`. When
         ``defn`` is given, the entity is bound to that ONE backend body -- its
@@ -761,7 +763,10 @@ class Entity:
     """
 
     def __init__(
-        self, sym: Sym, cb: CodeBase, defn: "Optional[Definition]" = None
+        self,
+        sym: Sym,
+        cb: CodeBase,
+        defn: "Optional[Definition]" = None,
     ):
         self.sym = sym
         self._cb = cb
@@ -962,6 +967,23 @@ class Entity:
             if peer is not None:
                 out.append(Reference(by=peer, kind=e.kind, sites=tuple(e.sites)))
         return out
+
+    def aliased_by(self, limit: int = 500) -> "list[Typedef]":
+        """Type aliases / typedefs whose underlying type directly names this
+        entity.
+
+        This is the inverse of :meth:`Typedef.aliased`. For
+        ``using IntBox = Box<int>;``, calling ``aliased_by()`` on the concrete
+        ``Box<int>`` instance returns ``[Typedef('IntBox')]``. The relationship is
+        intentionally single-level: an alias of an alias appears on the
+        intermediate alias entity, not on the final record."""
+        return [
+            e
+            for e in self._cb._wrap_all(
+                self._cb.graph.aliased_by(self.sym, limit=limit)
+            )
+            if isinstance(e, Typedef)
+        ]
 
     def declaration_sites(self, limit: int = 500) -> list[Location]:
         """Every declaration/reopen site of this entity (v26 ``decl_site``).
@@ -1969,6 +1991,10 @@ class Destructor(Method):
 class Record(Entity):
     """Base for ``class`` / ``struct`` / ``union`` -- anything with members."""
 
+    def aliased_by(self, limit: int = 500) -> "list[Typedef]":
+        """Type aliases / typedefs that name this record type."""
+        return super().aliased_by(limit=limit)
+
     def _members(self, access: Optional[str] = None) -> list[Entity]:
         return self._cb._wrap_all(self._cb.graph.members(self.sym, access=access))
 
@@ -2112,6 +2138,10 @@ class Field(Entity):
 class Enum(Entity):
     """An enumeration."""
 
+    def aliased_by(self, limit: int = 500) -> "list[Typedef]":
+        """Type aliases / typedefs that name this enum type."""
+        return super().aliased_by(limit=limit)
+
     @property
     def constants(self) -> list["EnumConstant"]:
         return [
@@ -2137,6 +2167,9 @@ class Typedef(Entity):
 
     @property
     def underlying_type(self) -> Optional[Type]:
+        target = self.aliased()
+        if target is not None:
+            return Type(target.display_name, self._cb)
         return Type(self.sym.type_info, self._cb) if self.sym.type_info else None
 
     def aliased(self) -> "Optional[Entity]":

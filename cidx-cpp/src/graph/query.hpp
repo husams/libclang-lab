@@ -126,6 +126,10 @@ public:
   // calls + uses inbound.
   std::vector<Edge> references(int64_t sym_id, int limit = 500);
 
+  // Type aliases / typedefs whose underlying type directly names `sym_id`
+  // (inverse of alias --uses--> target).
+  std::vector<Sym> aliased_by(int64_t sym_id, int limit = 500);
+
   // Per-edge sites (A8, limit 200). Used by emitter for --json re-query (R8).
   std::vector<Site> sites(int64_t edge_id, int limit = 200);
 

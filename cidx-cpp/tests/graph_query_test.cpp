@@ -17,6 +17,7 @@
 //   G11 Sym.is_stub(), Sym.loc(), Sym.to_dict() key order
 //   G12 emit_edges text header + count suffix + trailer
 //   G13 emit_syms text header + depth suffix + trailer
+//   G14 aliased_by() inverse alias traversal
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
@@ -259,6 +260,32 @@ TEST_CASE("graph_query: references() = calls + uses inbound") {
   }
   CHECK(found_B);
   CHECK(found_A);
+}
+
+TEST_CASE("graph_query: aliased_by() returns typedef and type-alias users only") {
+  Storage db(":memory:");
+
+  const int64_t target_id =
+      db.add_symbol(make_sym("USR::Target", "Target", "struct"));
+  const int64_t alias_a_id =
+      db.add_symbol(make_sym("USR::AliasA", "AliasA", "type-alias"));
+  const int64_t alias_b_id =
+      db.add_symbol(make_sym("USR::AliasB", "AliasB", "typedef"));
+  const int64_t ordinary_user_id =
+      db.add_symbol(make_sym("USR::use_target", "use_target", "function"));
+
+  db.add_edge(make_edge(alias_b_id, target_id, 7));
+  db.add_edge(make_edge(ordinary_user_id, target_id, 7));
+  db.add_edge(make_edge(alias_a_id, target_id, 7));
+
+  GraphQuery g(db, ":memory:");
+  auto aliases = g.aliased_by(target_id, 50);
+
+  REQUIRE(aliases.size() == 2);
+  CHECK(aliases[0].spelling == "AliasA");
+  CHECK(aliases[0].kind == "type-alias");
+  CHECK(aliases[1].spelling == "AliasB");
+  CHECK(aliases[1].kind == "typedef");
 }
 
 // ---------------------------------------------------------------------------
