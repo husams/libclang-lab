@@ -266,13 +266,17 @@ def _to_symbol(cursor: cx.Cursor, file_id: int) -> Symbol | None:
     if parent is not None and parent.kind != cx.CursorKind.TRANSLATION_UNIT:
         parent_usr = parent.get_usr() or None
     is_def: bool = cursor.is_definition()
+    if cursor.kind in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):
+        type_info = cursor.underlying_typedef_type.spelling or None
+    else:
+        type_info = cursor.type.spelling or None
     return Symbol(
         usr=usr,
         spelling=cursor.spelling,
         qual_name=_qualified_name(cursor) or None,
         display_name=cursor.displayname or None,
         kind=kind,
-        type_info=cursor.type.spelling or None,
+        type_info=type_info,
         file_id=file_id,
         # Start of this cursor's own extent -- NOT cursor.location (which is
         # the identifying spelling location, e.g. the class/function NAME).

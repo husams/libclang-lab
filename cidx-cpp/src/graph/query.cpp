@@ -359,6 +359,29 @@ std::vector<Edge> GraphQuery::references(int64_t sym_id, int limit) {
   return edges_in(sym_id, std::vector<std::string>{"calls", "uses"}, limit);
 }
 
+std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
+  auto &raw = db_.raw_db();
+  auto st = raw.prepare(
+      "SELECT s.id FROM symbol s "
+      "JOIN edge e ON e.src_id = s.id "
+      "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
+      "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?");
+  st.bind(1, sym_id);
+  st.bind(2, edge_kinds_map().at("uses"));
+  st.bind(3, symbol_kind_id("typedef"));
+  st.bind(4, symbol_kind_id("type-alias"));
+  st.bind(5, static_cast<int64_t>(limit));
+
+  std::vector<Sym> out;
+  while (st.step()) {
+    auto sym = db_.graph_symbol_by_id(st.col_int64(0));
+    if (sym) {
+      out.push_back(make_sym_from_symbol(*sym));
+    }
+  }
+  return out;
+}
+
 std::vector<Site> GraphQuery::sites(int64_t edge_id, int limit) {
   auto rows = db_.edge_sites_one(edge_id, limit);
   std::vector<Site> out;

@@ -620,9 +620,12 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
   if (!display.empty()) {
     sym.display_name = std::move(display);
   }
-  std::string type_info =
-      CxString(lib, lib.clang_getTypeSpelling(lib.clang_getCursorType(cursor)))
-          .str();
+  const CXCursorKind ck = lib.clang_getCursorKind(cursor);
+  const CXType info_type =
+      (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl)
+          ? lib.clang_getTypedefDeclUnderlyingType(cursor)
+          : lib.clang_getCursorType(cursor);
+  std::string type_info = CxString(lib, lib.clang_getTypeSpelling(info_type)).str();
   if (!type_info.empty()) {
     sym.type_info = std::move(type_info);
   }

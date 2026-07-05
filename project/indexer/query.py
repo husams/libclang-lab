@@ -1352,6 +1352,30 @@ class GraphQuery:
         sites() for exact file:line locations."""
         return self.edges_in(sym, kinds=("calls", "uses"), limit=limit)
 
+    def aliased_by(self, sym, limit: int = 500) -> list[Sym]:
+        """Type aliases / typedefs whose underlying type directly names ``sym``.
+
+        This is the inverse of the alias ``uses`` edge consumed by the model
+        layer's ``Typedef.aliased()``. For ``using IntBox = Box<int>;`` it returns
+        the ``IntBox`` alias when called on the concrete ``Box<int>`` instance.
+
+        The relationship is direct by design: an alias-of-alias is returned for
+        the intermediate alias entity, not for the final record it eventually
+        resolves to."""
+        sid = self._resolve_id(sym)
+        alias_kinds = (
+            SYMBOL_KIND_IDS["typedef"],
+            SYMBOL_KIND_IDS["type-alias"],
+        )
+        rows = self._c.execute(
+            f"SELECT {_SYM_COLS} FROM symbol s "
+            "JOIN edge e ON e.src_id = s.id "
+            "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
+            "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?",
+            (sid, EDGE_KINDS["uses"], *alias_kinds, limit),
+        ).fetchall()
+        return [self._sym(r) for r in rows]
+
     def sites(self, edge, limit: int = 200) -> list[Site]:
         """Concrete source locations for an edge (the file:line grounding).
         Accepts an Edge or a raw edge_id."""

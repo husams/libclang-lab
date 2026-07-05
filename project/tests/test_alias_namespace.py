@@ -1,4 +1,4 @@
-"""End-to-end tests for Typedef.aliased() and the typed Namespace accessors.
+"""End-to-end tests for alias APIs and the typed Namespace accessors.
 
 Drives the REAL libclang extraction path (index_symbols + _index_edges_notxn)
 on an inline C++ TU, so it locks two behaviours together:
@@ -10,6 +10,10 @@ on an inline C++ TU, so it locks two behaviours together:
      extraction ordering fix: the TYPEDEF/TYPE_ALIAS handler must mint the
      instance BEFORE emitting the underlying-type ``uses`` edge (mirroring the
      FIELD_DECL/VAR_DECL handlers), otherwise the alias links to nothing.
+
+     Entity.aliased_by() / GraphQuery.aliased_by() expose the reverse traversal:
+     the concrete ``Box<int>`` instance can discover the ``IntBox`` alias that
+     names it.
 
   2. Namespace's typed member accessors (classes / class_templates / functions /
      function_templates / type_aliases / enums / variables / constants /
@@ -33,6 +37,7 @@ from indexer.model import (
     Typedef,
     Class,
     Struct,
+    Union,
     Enum,
     _is_top_level_const,
 )
@@ -42,6 +47,7 @@ namespace app {
 
 class Widget { int v; };
 struct Gadget { int g; };
+union Payload { int i; float f; };
 enum Color { RED, GREEN };
 
 template <class T> class Box { T item; };
@@ -56,6 +62,7 @@ const char *name = "x";           // pointer-to-const: variable is mutable
 
 typedef Widget WidgetAlias;
 using GadgetAlias = Gadget;
+using PayloadAlias = Payload;
 using ColorAlias = Color;
 using IntBox = Box<int>;           // alias of a template instance
 typedef int Integer;              // alias of a builtin (no indexed target)
@@ -113,7 +120,7 @@ def test_namespace_is_namespace(ns):
 
 def test_namespace_classes_exclude_templates_and_instances(ns):
     # plain records only -- NOT the Box template, NOT the Box<int> instance
-    assert _spellings(ns.classes()) == ["Gadget", "Widget"]
+    assert _spellings(ns.classes()) == ["Gadget", "Payload", "Widget"]
 
 
 def test_namespace_class_templates(ns):
@@ -136,6 +143,7 @@ def test_namespace_type_aliases(ns):
         "GadgetAlias",
         "IntBox",
         "Integer",
+        "PayloadAlias",
         "WidgetAlias",
     ]
 
@@ -184,6 +192,7 @@ def test_type_aliases_filter(ns):
         "AliasOfAlias",
         "ColorAlias",
         "GadgetAlias",
+        "PayloadAlias",
         "WidgetAlias",
     ]
 
@@ -219,8 +228,27 @@ def test_alias_to_struct(ns):
     assert isinstance(_alias(ns, "GadgetAlias").aliased(), Struct)
 
 
+def test_alias_to_union(ns):
+    assert isinstance(_alias(ns, "PayloadAlias").aliased(), Union)
+
+
 def test_alias_to_enum(ns):
     assert isinstance(_alias(ns, "ColorAlias").aliased(), Enum)
+
+
+@pytest.mark.parametrize(
+    "alias_name,model_type",
+    [
+        ("WidgetAlias", Class),
+        ("GadgetAlias", Struct),
+        ("PayloadAlias", Union),
+        ("ColorAlias", Enum),
+    ],
+)
+def test_concrete_type_aliased_by(ns, alias_name, model_type):
+    target = _alias(ns, alias_name).aliased()
+    assert isinstance(target, model_type)
+    assert [a.spelling for a in target.aliased_by()] == [alias_name]
 
 
 def test_alias_to_builtin_is_none(ns):
@@ -236,6 +264,59 @@ def test_alias_to_template_instance(ns):
     assert target.is_instantiation
     assert target.display_name == "app::Box<int>"
     assert [t.spelling for t in target.template_argument_types] == ["int"]
+
+
+def test_alias_forward_and_target_reverse_apis(ns):
+    alias = _alias(ns, "IntBox")
+    target = alias.aliased()
+    assert target is not None
+    assert target.display_name == "app::Box<int>"
+    assert not hasattr(alias, "alias_of")
+    assert not hasattr(target, "alias_of")
+    assert [a.spelling for a in target.aliased_by()] == ["IntBox"]
+
+
+@pytest.mark.parametrize(
+    "alias_name,underlying",
+    [
+        ("WidgetAlias", "app::Widget"),
+        ("GadgetAlias", "app::Gadget"),
+        ("PayloadAlias", "app::Payload"),
+        ("ColorAlias", "app::Color"),
+        ("IntBox", "app::Box<int>"),
+        ("Integer", "int"),
+        ("AliasOfAlias", "app::WidgetAlias"),
+    ],
+)
+def test_underlying_type_is_rhs_type_not_alias_itself(ns, alias_name, underlying):
+    typ = _alias(ns, alias_name).underlying_type
+    assert typ is not None
+    assert typ.spelling == underlying
+
+
+def test_graph_query_aliased_by_template_instance(ns):
+    """Low-level inverse: Box<int> has an incoming direct alias IntBox."""
+    target = _alias(ns, "IntBox").aliased()
+    aliases = ns._cb.graph.aliased_by(target.sym)
+    assert [(a.kind, a.spelling) for a in aliases] == [("type-alias", "IntBox")]
+
+
+def test_template_instance_aliased_by(ns):
+    """High-level inverse wraps incoming alias symbols as Typedef entities."""
+    target = _alias(ns, "IntBox").aliased()
+    aliases = target.aliased_by()
+    assert [a.spelling for a in aliases] == ["IntBox"]
+    assert all(isinstance(a, Typedef) for a in aliases)
+
+
+def test_aliased_by_is_single_level(ns):
+    """Alias reverse traversal mirrors Typedef.aliased(): it is direct only."""
+    widget_alias = _alias(ns, "WidgetAlias")
+    widget = widget_alias.aliased()
+    assert widget is not None
+
+    assert [a.spelling for a in widget.aliased_by()] == ["WidgetAlias"]
+    assert [a.spelling for a in widget_alias.aliased_by()] == ["AliasOfAlias"]
 
 
 def test_alias_of_alias_is_single_level(ns):

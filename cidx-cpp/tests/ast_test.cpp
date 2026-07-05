@@ -545,6 +545,12 @@ TEST_SUITE("clang") {
     const auto method = one_sym(f.db, "the_method");
     REQUIRE(method);
     CHECK(method->qual_name == "the_ns::the_class::the_method");
+    const auto typedef_sym = one_sym(f.db, "the_typedef", std::string("typedef"));
+    REQUIRE(typedef_sym);
+    CHECK(typedef_sym->type_info == "int");
+    const auto alias_sym = one_sym(f.db, "the_alias", std::string("type-alias"));
+    REQUIRE(alias_sym);
+    CHECK(alias_sym->type_info == "float");
   }
 
   TEST_CASE("is_static: static member function flagged; instance methods and "
@@ -1286,6 +1292,9 @@ TEST_SUITE("clang") {
 
     const auto conf = one_sym(f.db, "Conf", std::string("class"));
     REQUIRE(conf.has_value());
+    const auto conf_alias = one_sym(f.db, "ConfAlias", std::string("typedef"));
+    REQUIRE(conf_alias.has_value());
+    CHECK(conf_alias->type_info == "Conf");
 
     // Collect the qual_names of every symbol with a uses (kind=7) edge -> Conf.
     std::unordered_set<std::string> users;
