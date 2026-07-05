@@ -398,6 +398,11 @@ CREATE TABLE IF NOT EXISTS definition (
     col          INTEGER,
     end_line     INTEGER,
     end_col      INTEGER,
+    init_text    TEXT,                     -- v28: for a (static member) VARIABLE
+                                           -- definition, its initializer source
+                                           -- text per backend (`= 5` -> '5',
+                                           -- `= seed_a()` -> 'seed_a()'); NULL for
+                                           -- functions and uninitialized vars
     -- one body per (component, file, symbol). component_id is derived from the
     -- file's owning component; both are in the key so the same relative file path
     -- in two clones/components stays distinct (matches the variant key the user
@@ -434,7 +439,7 @@ CREATE TABLE IF NOT EXISTS possible_call (
 CREATE INDEX IF NOT EXISTS idx_possible_call_src ON possible_call(src_def_id);
 CREATE INDEX IF NOT EXISTS idx_possible_call_dst ON possible_call(dst_def_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '27');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '28');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -935,6 +940,15 @@ void Storage::migrate() {
     if (!has_col(cols2, "multi_def")) {
       db_.exec("ALTER TABLE symbol ADD COLUMN multi_def INTEGER NOT NULL "
                "DEFAULT 0");
+      changed = true;
+    }
+  }
+  // v27 -> v28: per-backend initializer text on a (static member) variable
+  // definition. No backfill -- a reindex repopulates it; old rows read NULL.
+  if (has_table("definition")) {
+    const auto dcols = table_columns("definition");
+    if (!has_col(dcols, "init_text")) {
+      db_.exec("ALTER TABLE definition ADD COLUMN init_text TEXT");
       changed = true;
     }
   }
@@ -2865,20 +2879,21 @@ Storage::component_id_for_file(std::optional<int64_t> file_id) {
   return cid;
 }
 
-int64_t Storage::get_or_create_definition(int64_t symbol_id,
-                                          std::optional<int64_t> file_id,
-                                          std::optional<int64_t> line,
-                                          std::optional<int64_t> col,
-                                          std::optional<int64_t> end_line,
-                                          std::optional<int64_t> end_col) {
+int64_t Storage::get_or_create_definition(
+    int64_t symbol_id, std::optional<int64_t> file_id,
+    std::optional<int64_t> line, std::optional<int64_t> col,
+    std::optional<int64_t> end_line, std::optional<int64_t> end_col,
+    const std::optional<std::string> &init_text) {
   const std::optional<int64_t> component_id = component_id_for_file(file_id);
   auto st = db_.prepare(
       "INSERT INTO definition "
-      "(symbol_id, component_id, file_id, line, col, end_line, end_col) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "(symbol_id, component_id, file_id, line, col, end_line, end_col, "
+      " init_text) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(component_id, file_id, symbol_id) DO UPDATE SET "
       "  line = excluded.line, col = excluded.col, "
-      "  end_line = excluded.end_line, end_col = excluded.end_col "
+      "  end_line = excluded.end_line, end_col = excluded.end_col, "
+      "  init_text = excluded.init_text "
       "RETURNING id");
   st.bind(1, symbol_id);
   bind_opt(st, 2, component_id);
@@ -2887,6 +2902,7 @@ int64_t Storage::get_or_create_definition(int64_t symbol_id,
   bind_opt(st, 5, col);
   bind_opt(st, 6, end_line);
   bind_opt(st, 7, end_col);
+  bind_opt(st, 8, init_text);
   if (!st.step()) {
     throw StorageError("get_or_create_definition: upsert returned no id");
   }
@@ -4264,7 +4280,7 @@ std::vector<Symbol> Storage::redefined_symbols(int limit) {
 // v27 — the backend bodies of a symbol (query.py:GraphQuery.definitions).
 std::vector<Storage::DefinitionRow> Storage::definitions_of(int64_t symbol_id) {
   auto st = db_.prepare(
-      "SELECT symbol_id, file_id, line, col, end_line, end_col "
+      "SELECT symbol_id, file_id, line, col, end_line, end_col, init_text "
       "FROM definition WHERE symbol_id = ? ORDER BY file_id, line");
   st.bind(1, symbol_id);
   std::vector<DefinitionRow> out;
@@ -4276,6 +4292,7 @@ std::vector<Storage::DefinitionRow> Storage::definitions_of(int64_t symbol_id) {
     d.col = opt_int64(st, 3);
     d.end_line = opt_int64(st, 4);
     d.end_col = opt_int64(st, 5);
+    d.init_text = opt_text(st, 6);
     out.push_back(d);
   }
   return out;
@@ -4286,7 +4303,8 @@ std::vector<Storage::DefinitionRow> Storage::definitions_of(int64_t symbol_id) {
 std::vector<Storage::DefinitionRow>
 Storage::possible_callees_of(int64_t symbol_id) {
   auto st = db_.prepare(
-      "SELECT td.symbol_id, td.file_id, td.line, td.col, td.end_line, td.end_col "
+      "SELECT td.symbol_id, td.file_id, td.line, td.col, td.end_line, "
+      "       td.end_col, td.init_text "
       "FROM possible_call pc "
       "JOIN definition sd ON sd.id = pc.src_def_id "
       "JOIN definition td ON td.id = pc.dst_def_id "
@@ -4301,6 +4319,7 @@ Storage::possible_callees_of(int64_t symbol_id) {
     d.col = opt_int64(st, 3);
     d.end_line = opt_int64(st, 4);
     d.end_col = opt_int64(st, 5);
+    d.init_text = opt_text(st, 6);
     out.push_back(d);
   }
   return out;

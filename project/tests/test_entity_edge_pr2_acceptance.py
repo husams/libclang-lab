@@ -87,10 +87,10 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_27():
+def test_schema_version_is_28():
     """SCHEMA_VERSION must be 27 after the v26→v27 multi-definition tables."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 27, (
+    assert storage.SCHEMA_VERSION == 28, (
         f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 27. "
         "storage.py SCHEMA_VERSION must be bumped to 27 (definition/def_edge/possible_call)."
     )
@@ -296,38 +296,38 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0460():
+def test_python_version_is_0470():
     """Python VERSION must be 0.46.0 (multi-definition: definition/def_edge/
     possible_call tables + multi_def, per-backend redefinitions)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.46.0", (
+    assert version == "0.47.0", (
         f"Python VERSION is '{version}'; expected '0.46.0'. "
         "Bump VERSION to 0.46.0 in cli.py (multi-definition symbols)."
     )
 
 
-def test_cpp_version_is_0460():
+def test_cpp_version_is_0470():
     """C++ kVersion must be 0.46.0 (multi-definition symbols)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.46.0", (
+    assert version == "0.47.0", (
         f"C++ kVersion is '{version}'; expected '0.46.0'. "
         "Bump kVersion to 0.46.0 in args.hpp (multi-definition symbols)."
     )
 
 
-def test_cpp_schema_version_is_27():
+def test_cpp_schema_version_is_28():
     """C++ kSchemaVersion must be 27 after the v26->v27 multi-definition tables."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 27, (
+    assert version == 28, (
         f"C++ kSchemaVersion is {version}; expected 27. "
         "Bump kSchemaVersion 26 -> 27 in storage.hpp (definition/def_edge/possible_call)."
     )
