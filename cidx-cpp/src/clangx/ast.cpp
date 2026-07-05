@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <set>
 #include <unordered_set>
 #include <vector>
@@ -2117,7 +2118,9 @@ CXChildVisitResult static_init_visitor(CXCursor cursor, CXCursor /*parent*/,
         if (!usr.empty()) {
           const auto sym = ctx->db->lookup_symbol(usr);
           if (sym) {
-            ctx->db->add_def_edge(ctx->def_id, sym->id, 1); // calls
+            // A variable does not *call*; its initializer USES (kind 7) the
+            // functions it references. Mirrors _emit_static_init_def_edges.
+            ctx->db->add_def_edge(ctx->def_id, sym->id, 7); // uses (not a call)
           }
         }
       }
@@ -2132,6 +2135,60 @@ void emit_static_init_def_edges(LibClang &lib, Storage &db, CXCursor var_cursor,
                                 int64_t def_id) {
   StaticInitCtx ctx{&lib, &db, def_id};
   lib.clang_visitChildren(var_cursor, &static_init_visitor, &ctx);
+}
+
+// v28: the initializer source text of a variable definition, per backend:
+// `int C::x = seed_a();` -> "seed_a()", `= 5` -> "5". Reads the cursor's own
+// source extent from the file and returns the text after the first '=', stripped
+// with a trailing ';' removed (no '=' -> nullopt). Exact source slice so Python
+// and C++ agree byte-for-byte. Mirrors _static_var_init_text.
+std::optional<std::string> static_var_init_text(LibClang &lib, CXCursor cursor) {
+  const CXSourceRange ext = lib.clang_getCursorExtent(cursor);
+  CXFile sfile = nullptr;
+  unsigned soff = 0, u = 0;
+  lib.clang_getExpansionLocation(lib.clang_getRangeStart(ext), &sfile, &u, &u,
+                                 &soff);
+  CXFile efile = nullptr;
+  unsigned eoff = 0;
+  lib.clang_getExpansionLocation(lib.clang_getRangeEnd(ext), &efile, &u, &u,
+                                 &eoff);
+  if (sfile == nullptr || eoff <= soff) {
+    return std::nullopt;
+  }
+  const std::string path = CxString(lib, lib.clang_getFileName(sfile)).str();
+  if (path.empty()) {
+    return std::nullopt;
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return std::nullopt;
+  }
+  in.seekg(static_cast<std::streamoff>(soff));
+  std::string raw(eoff - soff, '\0');
+  in.read(raw.data(), static_cast<std::streamsize>(eoff - soff));
+  raw.resize(static_cast<std::size_t>(in.gcount()));
+  const auto eq = raw.find('=');
+  if (eq == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto strip = [](const std::string &s) {
+    const char *ws = " \t\r\n\f\v";
+    const auto b = s.find_first_not_of(ws);
+    if (b == std::string::npos) {
+      return std::string();
+    }
+    const auto e = s.find_last_not_of(ws);
+    return s.substr(b, e - b + 1);
+  };
+  std::string val = strip(raw.substr(eq + 1));
+  while (!val.empty() && val.back() == ';') {
+    val.pop_back();
+  }
+  val = strip(val);
+  if (val.empty()) {
+    return std::nullopt;
+  }
+  return val;
 }
 
 } // namespace
@@ -2283,7 +2340,8 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                   sym->id, file_id, static_cast<int64_t>(vstart.line),
                   static_cast<int64_t>(vstart.col),
                   static_cast<int64_t>(vend.line),
-                  static_cast<int64_t>(vend.col));
+                  static_cast<int64_t>(vend.col),
+                  static_var_init_text(lib, cursor));
               emit_static_init_def_edges(lib, db_, cursor, vdef_id);
             }
           }

@@ -28,7 +28,7 @@ def test_fresh_schema_has_repository_clone_and_column():
         ver = db._conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        assert ver == str(SCHEMA_VERSION) == "27"
+        assert ver == str(SCHEMA_VERSION) == "28"
         tables = {
             r[0]
             for r in db._conn.execute(
@@ -206,7 +206,7 @@ def test_migration_recreates_dropped_repository_tables():
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            assert ver == "27"
+            assert ver == "28"
             tables = {
                 r[0]
                 for r in db._conn.execute(

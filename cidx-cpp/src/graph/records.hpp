@@ -142,6 +142,7 @@ struct Definition {
   std::optional<std::string> component;
   std::optional<std::string> file; // abs path (resolved from file cache)
   std::optional<int64_t> line, col, end_line, end_col;
+  std::optional<std::string> init_text; // v28: (static member) var initializer
 
   std::string loc() const {
     if (!file) {
@@ -190,6 +191,11 @@ struct Definition {
       o.push_back({"end_col", Value::of(*end_col)});
     } else {
       o.push_back({"end_col", Value::null()});
+    }
+    if (init_text) {
+      o.push_back({"init_text", Value::of(*init_text)});
+    } else {
+      o.push_back({"init_text", Value::null()});
     }
     return Value::obj(std::move(o));
   }

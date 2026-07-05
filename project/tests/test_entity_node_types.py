@@ -261,7 +261,7 @@ def test_v21_to_v22_migration_backfills_without_reindex():
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            assert ver == "27"  # migration now lands on the current schema
+            assert ver == "28"  # migration now lands on the current schema
             n = db._conn.execute("SELECT COUNT(*) FROM entity_node").fetchone()[0]
             assert n >= 8
             eg = EntityGraph(GraphQuery.from_connection(db._conn))

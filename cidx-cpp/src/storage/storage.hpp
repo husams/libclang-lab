@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 27;
+constexpr int kSchemaVersion = 28;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -347,12 +347,13 @@ public:
   // -- v27: multi-definition (per-backend redefinitions) ---------------------
   // Return the `definition` row id for this symbol's body in (component, file),
   // creating it if new. component derived from the file when not supplied.
-  int64_t get_or_create_definition(int64_t symbol_id,
-                                   std::optional<int64_t> file_id,
-                                   std::optional<int64_t> line = std::nullopt,
-                                   std::optional<int64_t> col = std::nullopt,
-                                   std::optional<int64_t> end_line = std::nullopt,
-                                   std::optional<int64_t> end_col = std::nullopt);
+  int64_t get_or_create_definition(
+      int64_t symbol_id, std::optional<int64_t> file_id,
+      std::optional<int64_t> line = std::nullopt,
+      std::optional<int64_t> col = std::nullopt,
+      std::optional<int64_t> end_line = std::nullopt,
+      std::optional<int64_t> end_col = std::nullopt,
+      const std::optional<std::string> &init_text = std::nullopt);
   // The component that owns this file (file -> directory -> component).
   std::optional<int64_t> component_id_for_file(std::optional<int64_t> file_id);
   // Upsert a per-body outgoing edge (src is a definition). kind reuses edge_kind
@@ -399,6 +400,7 @@ public:
     int64_t symbol_id = -1;
     std::optional<int64_t> file_id;
     std::optional<int64_t> line, col, end_line, end_col;
+    std::optional<std::string> init_text; // v28: (static member) var initializer
   };
   std::vector<Symbol> redefined_symbols(int limit);
   std::vector<DefinitionRow> definitions_of(int64_t symbol_id);

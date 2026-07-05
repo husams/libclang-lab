@@ -682,6 +682,7 @@ defs_from_rows(GraphQuery &g,
     d.col = r.col;
     d.end_line = r.end_line;
     d.end_col = r.end_col;
+    d.init_text = r.init_text;
     out.push_back(std::move(d));
   }
   return out;

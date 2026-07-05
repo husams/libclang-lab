@@ -155,6 +155,33 @@ def test_static_var_initializer_edges_are_per_backend(indexed):
     assert ("server2.cpp", "seed_b") in got
 
 
+def test_static_var_init_text_per_backend(indexed):
+    """v28: each backend body carries its own initializer source text."""
+    count = _by_spelling(indexed, "count")
+    by_file = {
+        d.file.name: d.init_text
+        for d in indexed.definitions(count)
+        if d.file
+    }
+    assert by_file["server1.cpp"] == "seed_a()"
+    assert by_file["server2.cpp"] == "seed_b()"
+
+
+def test_static_var_init_edges_are_uses_not_calls(indexed):
+    """v28: a variable's initializer references are USES (kind 7), not calls."""
+    count = _by_spelling(indexed, "count")
+    kinds = {
+        r["kind"]
+        for r in indexed._c.execute(
+            "SELECT de.kind FROM def_edge de "
+            "JOIN definition df ON df.id = de.src_def_id "
+            "WHERE df.symbol_id = ?",
+            (count.id,),
+        )
+    }
+    assert kinds == {7}  # uses only -- variables do not call
+
+
 def test_reindex_one_backend_preserves_the_other(indexed):
     """Re-indexing server2 must NOT wipe server1's def_edge (the flip-flop bug
     the index-time capture defends against)."""
