@@ -235,6 +235,121 @@ void emit_type_use(LibClang &lib, Storage &db, int64_t src_id, CXType ctype,
   }
 }
 
+// v26: cursor kinds that establish an enclosing SYMBOL for a namespace
+// reference -- the nearest such ancestor of a NAMESPACE_REF is the uses-edge
+// source. Mirrors ast.py _SCOPE_KINDS.
+bool is_scope_kind(CXCursorKind ck) {
+  switch (ck) {
+  case CXCursor_FunctionDecl:
+  case CXCursor_CXXMethod:
+  case CXCursor_Constructor:
+  case CXCursor_Destructor:
+  case CXCursor_FunctionTemplate:
+  case CXCursor_ClassDecl:
+  case CXCursor_StructDecl:
+  case CXCursor_UnionDecl:
+  case CXCursor_ClassTemplate:
+  case CXCursor_Namespace:
+  case CXCursor_VarDecl:
+  case CXCursor_FieldDecl:
+  case CXCursor_EnumDecl:
+  case CXCursor_TypedefDecl:
+  case CXCursor_TypeAliasDecl:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Collect a cursor's IMMEDIATE children (CXChildVisit_Continue = no recursion),
+// so ns_uses_descend can recurse manually with a per-node enclosing id.
+struct NsChildCollector {
+  std::vector<CXCursor> *out = nullptr;
+};
+CXChildVisitResult ns_collect_visitor(CXCursor c, CXCursor /*parent*/,
+                                      CXClientData data) noexcept {
+  static_cast<NsChildCollector *>(data)->out->push_back(c);
+  return CXChildVisit_Continue;
+}
+
+// Recursive descent for namespace `uses` edges -- mirrors ast.py
+// _emit_namespace_uses' inner descend(). Tracks the nearest enclosing indexed
+// symbol id (-1 = none) and, for each main-file NAMESPACE_REF to an indexed
+// namespace, emits a uses(7) edge enclosing->namespace + one edge_site. DESCENDS
+// INTO BODIES (unlike for_file_cursors), so a `geo::` qualifier inside a
+// function body is attributed to that function. Only main-file refs to an
+// INDEXED namespace are recorded (bare `std::` -> unindexed c:@N@std -> lookup
+// miss -> skipped), mirroring the lookup-only discipline of the other passes.
+void ns_uses_descend(LibClang &lib, Storage &db, CXCursor cursor,
+                     int64_t enclosing_id, const std::string &filename,
+                     int64_t file_id) {
+  std::vector<CXCursor> children;
+  NsChildCollector cc;
+  cc.out = &children;
+  lib.clang_visitChildren(cursor, &ns_collect_visitor, &cc);
+  for (const CXCursor &child : children) {
+    const ExpansionLoc loc = cursor_location(lib, child);
+    if (loc.file == nullptr) {
+      continue; // from no file: skip subtree
+    }
+    CXString fname_cx = lib.clang_getFileName(loc.file);
+    CxString fname_raii(lib, fname_cx);
+    const char *raw = lib.clang_getCString(fname_cx);
+    if (raw == nullptr || std::strcmp(raw, filename.c_str()) != 0) {
+      continue; // from another file: skip subtree
+    }
+    const CXCursorKind ck = lib.clang_getCursorKind(child);
+    if (ck == CXCursor_NamespaceRef) {
+      if (enclosing_id >= 0) {
+        const CXCursor ref = lib.clang_getCursorReferenced(child);
+        if (!lib.clang_Cursor_isNull(ref)) {
+          const std::string nusr =
+              CxString(lib, lib.clang_getCursorUSR(ref)).str();
+          if (!nusr.empty()) {
+            const auto nsym = db.lookup_symbol(nusr);
+            if (nsym && nsym->id != enclosing_id) {
+              Edge e;
+              e.src_id = enclosing_id;
+              e.dst_id = nsym->id;
+              e.kind = 7; // uses
+              e.count = 1;
+              const int64_t edge_id = db.add_edge(e);
+              if (loc.line != 0) {
+                EdgeSite site;
+                site.edge_id = edge_id;
+                site.file_id = file_id;
+                site.line = static_cast<int64_t>(loc.line);
+                site.col = static_cast<int64_t>(loc.col);
+                site.conditional = 0;
+                db.add_edge_site(site);
+              }
+            }
+          }
+        }
+      }
+      continue; // NAMESPACE_REF has no children worth walking
+    }
+    int64_t new_enclosing = enclosing_id;
+    if (is_scope_kind(ck)) {
+      const std::string usr = CxString(lib, lib.clang_getCursorUSR(child)).str();
+      if (!usr.empty()) {
+        const auto s = db.lookup_symbol(usr);
+        if (s) {
+          new_enclosing = s->id;
+        }
+      }
+    }
+    ns_uses_descend(lib, db, child, new_enclosing, filename, file_id);
+  }
+}
+
+// B3 driver: mirror ast.py _emit_namespace_uses(db, tu, filename, file_id).
+void emit_namespace_uses(LibClang &lib, Storage &db, const ParsedTu &tu,
+                         const std::string &filename, int64_t file_id) {
+  ns_uses_descend(lib, db, lib.clang_getTranslationUnitCursor(tu.tu), -1,
+                  filename, file_id);
+}
+
 // _linkage (ast.py:77-79) via the explicit D13 table — the stored spellings
 // are DB content shared with Python-written rows.
 std::optional<std::string> linkage_name(CXLinkageKind linkage) {
@@ -2560,6 +2675,9 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     }
     body_descent(cursor, fn_sym->id, file_id);
   });
+
+  // B3: namespace uses -- qualifiers / using-directives / using-declarations.
+  emit_namespace_uses(lib, db_, tu, filename, file_id);
 }
 
 void AstIndexer::index_edges(const ParsedTu &tu, const std::string &filename,

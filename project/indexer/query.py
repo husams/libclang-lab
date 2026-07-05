@@ -1331,6 +1331,35 @@ class GraphQuery:
             )
         return out
 
+    def declaration_sites(self, sym, limit: int = 500) -> list[Site]:
+        """Every declaration/reopen site of a symbol (v26 `decl_site`).
+
+        The symbol row keeps only the winning definition + one declaration; this
+        returns ALL physical sites. For an OPEN symbol -- a namespace reopened
+        `namespace ABC { ... }` across many files/components/repos -- this is the
+        list of reopenings, the declaration half of `references()`. Ordinary
+        symbols usually return their single site. Empty on a pre-v26 (un-
+        reindexed) DB."""
+        sid = self._resolve_id(sym)
+        files = self._files()
+        out: list[Site] = []
+        for r in self._c.execute(
+            "SELECT file_id, line, col FROM decl_site WHERE symbol_id = ? "
+            "ORDER BY file_id, line, col LIMIT ?",
+            (sid, limit),
+        ):
+            p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
+            out.append(
+                Site(
+                    file=p,
+                    line=r["line"],
+                    col=r["col"],
+                    conditional=False,
+                    args_sig=None,
+                )
+            )
+        return out
+
     # ===================================================================== #
     # 3. NAVIGATION (walk the graph)
     # ===================================================================== #

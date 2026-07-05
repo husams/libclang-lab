@@ -130,7 +130,7 @@ void check_migrated(const std::string &db_path) {
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst"});
+                                         "idx_entity_edge_dst", "idx_decl_site_symbol"});
 }
 
 } // namespace

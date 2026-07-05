@@ -402,7 +402,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
     }
   }
   // v14 adds label; v15 adds diagnostic; v17 adds entity_edge + entity_edge_kind;
-  // v23 adds repository + clone
+  // v23 adds repository + clone; v26 adds decl_site
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "symbol_kind",
                                         "edge_kind", "edge", "edge_site",
@@ -410,7 +410,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "call_arg", "label", "diagnostic",
                                         "entity_edge_kind", "entity_edge",
                                         "entity_kind", "entity_node",
-                                        "repository", "clone"});
+                                        "repository", "clone", "decl_site"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -463,7 +463,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst"});
+                                         "idx_entity_edge_dst", "idx_decl_site_symbol"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {

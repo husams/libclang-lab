@@ -1646,6 +1646,80 @@ def _mint_named_instance(db: Storage, cursor: cx.Cursor) -> None:
     _mint_instance_from_type(db, cursor.underlying_typedef_type)
 
 
+#: Cursor kinds that establish an enclosing SYMBOL for a namespace reference:
+#: the nearest such ancestor of a NAMESPACE_REF is the `uses`-edge source.
+_SCOPE_KINDS: frozenset[cx.CursorKind] = frozenset(
+    {
+        cx.CursorKind.FUNCTION_DECL,
+        cx.CursorKind.CXX_METHOD,
+        cx.CursorKind.CONSTRUCTOR,
+        cx.CursorKind.DESTRUCTOR,
+        cx.CursorKind.FUNCTION_TEMPLATE,
+        cx.CursorKind.CLASS_DECL,
+        cx.CursorKind.STRUCT_DECL,
+        cx.CursorKind.UNION_DECL,
+        cx.CursorKind.CLASS_TEMPLATE,
+        cx.CursorKind.NAMESPACE,
+        cx.CursorKind.VAR_DECL,
+        cx.CursorKind.FIELD_DECL,
+        cx.CursorKind.ENUM_DECL,
+        cx.CursorKind.TYPEDEF_DECL,
+        cx.CursorKind.TYPE_ALIAS_DECL,
+    }
+)
+
+
+def _emit_namespace_uses(
+    db: Storage, tu: cx.TranslationUnit, filename: str, file_id: int
+) -> None:
+    """Emit `uses` edges (kind=7) src -> a NAMESPACE, one edge_site per site.
+
+    Every place a namespace name is written -- a qualifier (`geo::Point`), a
+    `using namespace geo;`, or a `using geo::x;` -- lowers to a NAMESPACE_REF
+    cursor whose `.referenced` is the (USR-stable) NAMESPACE decl. This is what
+    lets `references()` on a namespace list its use sites across the codebase,
+    alongside its decl_site reopenings.
+
+    src = the nearest enclosing indexed symbol (function/record/namespace/var/
+    ...). Unlike `_file_cursors`, this walk DESCENDS INTO BODIES so a `geo::`
+    qualifier inside a function body is attributed to that function. Only
+    main-file refs to an INDEXED namespace are recorded (a bare `std::` -> the
+    unindexed `c:@N@std` -> lookup miss -> skipped), mirroring the lookup-only
+    discipline of the other edge passes. No self-edge.
+    """
+
+    def descend(cursor: cx.Cursor, enclosing_id: Optional[int]) -> None:
+        for child in cursor.get_children():
+            f = child.location.file
+            if f is None or f.name != filename:
+                continue  # from another file: skip subtree
+            ck = child.kind
+            if ck == cx.CursorKind.NAMESPACE_REF:
+                if enclosing_id is not None:
+                    ref = child.referenced
+                    nusr = ref.get_usr() if ref is not None else None
+                    if nusr:
+                        nsym = db.lookup_symbol(nusr)
+                        if nsym is not None and nsym.id != enclosing_id:
+                            eid = db.add_edge(enclosing_id, nsym.id, 7)  # uses
+                            loc = child.location
+                            if loc.line:
+                                db.add_edge_site(
+                                    eid, file_id, loc.line, loc.column
+                                )
+                continue  # NAMESPACE_REF has no children worth walking
+            new_enclosing = enclosing_id
+            if ck in _SCOPE_KINDS:
+                usr = child.get_usr()
+                if usr:
+                    s = db.lookup_symbol(usr)
+                    if s is not None:
+                        new_enclosing = s.id
+            descend(child, new_enclosing)
+
+    descend(tu.cursor, None)
+
+
 def _index_edges_notxn(
     db: Storage, tu: cx.TranslationUnit, filename: str, file_id: int
 ) -> None:
@@ -2064,6 +2138,9 @@ def _index_edges_notxn(
         _body_descent(
             db, cursor, fn_sym.id, file_id, enclosing_owner_usr=_owner_usr
         )
+
+    # B3: namespace uses -- qualifiers / using-directives / using-declarations.
+    _emit_namespace_uses(db, tu, filename, file_id)
 
 
 def index_edges(

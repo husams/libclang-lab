@@ -106,6 +106,7 @@ class EdgeKind(IntEnum):
     DESTROYS = 9
     BEFRIENDS = 10
     INSTANTIATES = 11
+    DECLARES = 12  # v26: namespace directly declares a member entity
 
     @property
     def verb(self) -> str:
@@ -148,6 +149,7 @@ _INVERSE_VERB: dict[EdgeKind, str] = {
     EdgeKind.DESTROYS: "is destroyed by",
     EdgeKind.BEFRIENDS: "is friend of",
     EdgeKind.INSTANTIATES: "is instantiated by",
+    EdgeKind.DECLARES: "is declared in",
 }
 
 _BEHAVIOURAL: frozenset[EdgeKind] = frozenset(
@@ -235,6 +237,7 @@ class EntityType(IntEnum):
     CLASS_TEMPLATE = 6
     ABSTRACT_CLASS_TEMPLATE = 7
     INTERFACE_TEMPLATE = 8
+    NAMESPACE = 9  # v26: namespace as a first-class entity node
 
     @property
     def label(self) -> str:
@@ -1603,8 +1606,14 @@ class EntityQuery:
         return self.where(lambda n: n.is_abstract)
 
     def concrete(self) -> "EntityQuery":
-        """Keep only concrete records (no pure-virtual methods)."""
-        return self.where(lambda n: n.class_kind is ClassKind.CONCRETE)
+        """Keep only concrete records (no pure-virtual methods).
+
+        A namespace is an entity node but not a record, so it is excluded from
+        this class-abstractness filter (v26)."""
+        return self.where(
+            lambda n: n.class_kind is ClassKind.CONCRETE
+            and n.entity_type is not EntityType.NAMESPACE
+        )
 
     def named(self, substring: str) -> "EntityQuery":
         """Keep only nodes whose name contains ``substring`` (case-insensitive)."""
