@@ -2,10 +2,14 @@
 // project/indexer/clang/ast.py (cited per function).
 #include "clangx/ast.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <optional>
 #include <set>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -849,6 +853,380 @@ bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
   return result;
 }
 
+// Write template_arg rows for a FUNCTION/METHOD template specialization from the
+// cursor-level libclang API. Returns the number of args written -- 0 means the
+// cursor exposed none (notably every METHOD-template specialization, where
+// clang_Cursor_getNumTemplateArguments returns -1; use the token fallback).
+// Mirrors ast.py:_index_cursor_template_args and the explicit-instantiation
+// handler's TYPE/INTEGRAL branch.
+std::optional<int64_t>
+resolve_template_arg_ref_id(LibClang &lib, Storage &db,
+                            const std::optional<std::string> &literal,
+                            CXCursor scope_cursor);
+
+int index_cursor_template_args(LibClang &lib, Storage &db, int64_t owner_id,
+                               CXCursor cursor) {
+  const int nargs = lib.clang_Cursor_getNumTemplateArguments(cursor);
+  if (nargs <= 0) {
+    return 0;
+  }
+  for (int ai = 0; ai < nargs; ++ai) {
+    const enum CXTemplateArgumentKind tak =
+        lib.clang_Cursor_getTemplateArgumentKind(cursor,
+                                                 static_cast<unsigned>(ai));
+    TemplateArg ta;
+    ta.owner_id = owner_id;
+    ta.position = static_cast<int64_t>(ai);
+    if (tak == CXTemplateArgumentKind_Type) {
+      ta.arg_kind = 1;
+      const CXType arg_type = lib.clang_Cursor_getTemplateArgumentType(
+          cursor, static_cast<unsigned>(ai));
+      const std::string spelling =
+          CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+      if (!spelling.empty()) {
+        ta.literal = spelling;
+      }
+      const CXCursor arg_decl = lib.clang_getTypeDeclaration(arg_type);
+      if (!lib.clang_Cursor_isNull(arg_decl) &&
+          !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+        const std::string ref_usr =
+            CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+        if (!ref_usr.empty()) {
+          if (const auto rsym = db.lookup_symbol(ref_usr)) {
+            ta.ref_id = rsym->id;
+          }
+        }
+      }
+      if (!ta.ref_id) {
+        ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, cursor);
+      }
+    } else if (tak == CXTemplateArgumentKind_Integral) {
+      ta.arg_kind = 2;
+      ta.literal = std::to_string(lib.clang_Cursor_getTemplateArgumentValue(
+          cursor, static_cast<unsigned>(ai)));
+    } else if (tak == CXTemplateArgumentKind_Declaration ||
+               tak == CXTemplateArgumentKind_NullPtr ||
+               tak == CXTemplateArgumentKind_Expression) {
+      ta.arg_kind = 2;
+    } else if (tak == CXTemplateArgumentKind_Template ||
+               tak == CXTemplateArgumentKind_TemplateExpansion) {
+      ta.arg_kind = 3;
+    } else if (tak == CXTemplateArgumentKind_Pack) {
+      ta.arg_kind = 4;
+    } else {
+      continue;
+    }
+    db.add_template_arg(ta);
+  }
+  return nargs;
+}
+
+// Best-effort template_arg.arg_kind for a token-derived method-template arg:
+// a bare numeric / char / bool / nullptr literal is a non-type value (2), else a
+// type (1). Reads the literal itself, not a mangled format. Mirrors
+// ast.py:_method_targ_kind_from_literal.
+int64_t method_targ_kind_from_literal(const std::string &text) {
+  if (text == "true" || text == "false" || text == "nullptr") {
+    return 2;
+  }
+  if (!text.empty() && (text.front() == '\'' || text.front() == '"')) {
+    return 2;
+  }
+  std::string head = text;
+  while (!head.empty() && (head.front() == '+' || head.front() == '-')) {
+    head.erase(head.begin());
+  }
+  if (!head.empty() &&
+      std::isdigit(static_cast<unsigned char>(head.front())) != 0) {
+    return 2;
+  }
+  return 1;
+}
+
+// Minimal spacing when re-joining tokens into a type spelling: keep
+// identifiers/keywords apart (`const int`) but hug punctuation (`int*`,
+// `Pair<int,char>`). Mirrors ast.py:_needs_space.
+bool targ_needs_space(const std::string &a, const std::string &b) {
+  if (a.empty() || b.empty()) {
+    return false;
+  }
+  const char al = a.back();
+  const char bf = b.front();
+  const bool a_word =
+      std::isalnum(static_cast<unsigned char>(al)) != 0 || al == '_';
+  const bool b_word =
+      std::isalnum(static_cast<unsigned char>(bf)) != 0 || bf == '_';
+  return a_word && b_word;
+}
+
+std::string trim_copy(std::string s) {
+  const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  return s;
+}
+
+bool starts_with(const std::string &s, const std::string &prefix) {
+  return s.size() >= prefix.size() &&
+         s.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool ends_with(const std::string &s, const std::string &suffix) {
+  return s.size() >= suffix.size() &&
+         s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string template_arg_base_name(std::string text) {
+  std::string s = trim_copy(std::move(text));
+  for (const std::string prefix :
+       {"typename ", "class ", "struct ", "enum "}) {
+    if (starts_with(s, prefix)) {
+      s = trim_copy(s.substr(prefix.size()));
+      break;
+    }
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const std::string prefix : {"const ", "volatile "}) {
+      if (starts_with(s, prefix)) {
+        s = trim_copy(s.substr(prefix.size()));
+        changed = true;
+      }
+    }
+    for (const std::string suffix : {" const", " volatile"}) {
+      if (ends_with(s, suffix)) {
+        s = trim_copy(s.substr(0, s.size() - suffix.size()));
+        changed = true;
+      }
+    }
+    for (const std::string suffix : {"&&", "&", "*"}) {
+      if (ends_with(s, suffix)) {
+        s = trim_copy(s.substr(0, s.size() - suffix.size()));
+        changed = true;
+      }
+    }
+  }
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '<') {
+      s = trim_copy(s.substr(0, i));
+      break;
+    }
+  }
+  if (starts_with(s, "::")) {
+    s = s.substr(2);
+  }
+  return s;
+}
+
+bool type_arg_symbol_kind(const std::string &kind) {
+  return kind == "class" || kind == "struct" || kind == "union" ||
+         kind == "enum" || kind == "typedef" || kind == "type-alias" ||
+         kind == "class-template";
+}
+
+std::vector<std::string> cursor_scope_qual_names(LibClang &lib,
+                                                 CXCursor cursor) {
+  std::vector<std::string> out;
+  std::set<std::string> seen;
+  if (lib.clang_Cursor_isNull(cursor)) {
+    return out;
+  }
+  CXCursor c = lib.clang_getCursorSemanticParent(cursor);
+  while (!lib.clang_Cursor_isNull(c)) {
+    const CXCursorKind kind = lib.clang_getCursorKind(c);
+    if (is_invalid_kind(kind) || kind == CXCursor_TranslationUnit) {
+      break;
+    }
+    const std::string qn = qualified_name(lib, c);
+    if (!qn.empty() && seen.insert(qn).second) {
+      out.push_back(qn);
+    }
+    c = lib.clang_getCursorSemanticParent(c);
+  }
+  return out;
+}
+
+std::vector<Symbol> type_arg_symbol_candidates(Storage &db,
+                                               const std::string &name,
+                                               bool qualified) {
+  const std::vector<Symbol> hits =
+      qualified ? db.lookup_symbols_by_qual_name(name)
+                : db.lookup_symbols_by_name(name);
+  std::vector<Symbol> out;
+  std::set<int64_t> seen;
+  for (const Symbol &sym : hits) {
+    if (type_arg_symbol_kind(sym.kind) && seen.insert(sym.id).second) {
+      out.push_back(sym);
+    }
+  }
+  return out;
+}
+
+std::optional<int64_t> pick_template_arg_symbol(
+    const std::vector<Symbol> &candidates) {
+  if (candidates.empty()) {
+    return std::nullopt;
+  }
+  std::vector<Symbol> non_inst;
+  for (const Symbol &sym : candidates) {
+    if (!sym.is_instantiation) {
+      non_inst.push_back(sym);
+    }
+  }
+  const std::vector<Symbol> &pool =
+      !non_inst.empty() ? non_inst : candidates;
+  if (pool.size() == 1) {
+    return pool[0].id;
+  }
+  return std::nullopt;
+}
+
+std::optional<int64_t>
+resolve_template_arg_ref_id(LibClang &lib, Storage &db,
+                            const std::optional<std::string> &literal,
+                            CXCursor scope_cursor) {
+  if (!literal || literal->empty()) {
+    return std::nullopt;
+  }
+  const std::string base = template_arg_base_name(*literal);
+  if (base.empty()) {
+    return std::nullopt;
+  }
+  std::vector<std::string> names;
+  if (base.find("::") != std::string::npos) {
+    names.push_back(base);
+  }
+  for (const std::string &scope : cursor_scope_qual_names(lib, scope_cursor)) {
+    names.push_back(scope + "::" + base);
+  }
+  names.push_back(base);
+  std::set<std::string> seen_names;
+  for (const std::string &name : names) {
+    if (!seen_names.insert(name).second) {
+      continue;
+    }
+    const auto ref_id =
+        pick_template_arg_symbol(type_arg_symbol_candidates(db, name, true));
+    if (ref_id) {
+      return ref_id;
+    }
+  }
+  const size_t pos = base.rfind("::");
+  const std::string tail = pos == std::string::npos ? base : base.substr(pos + 2);
+  return pick_template_arg_symbol(type_arg_symbol_candidates(db, tail, false));
+}
+
+// Token fallback for METHOD-template explicit args (`obj.m<T,...>()`). libclang's
+// cursor API returns -1 for methods, so recover the EXPLICIT `<...>` arguments
+// from the call tokens and store each as its literal source spelling -- as
+// written; TYPE args get a best-effort ref_id when their spelling resolves to an
+// indexed type in scope. Top-level commas split args; `<`/`>`
+// depth tracking (incl. `>>` closers) keeps nested args whole. Deduced calls
+// (no explicit `<...>`) yield nothing. Mirrors
+// ast.py:_index_method_template_args_from_tokens.
+void index_method_template_args_from_tokens(LibClang &lib, Storage &db,
+                                            int64_t owner_id,
+                                            CXCursor call_cursor,
+                                            const std::string &method_name) {
+  CXTranslationUnit tu = lib.clang_Cursor_getTranslationUnit(call_cursor);
+  if (tu == nullptr) {
+    return;
+  }
+  const CXSourceRange extent = lib.clang_getCursorExtent(call_cursor);
+  CXToken *tokens = nullptr;
+  unsigned n = 0;
+  lib.clang_tokenize(tu, extent, &tokens, &n);
+  if (tokens == nullptr) {
+    return;
+  }
+  std::vector<std::string> toks;
+  toks.reserve(n);
+  for (unsigned i = 0; i < n; ++i) {
+    toks.push_back(CxString(lib, lib.clang_getTokenSpelling(tu, tokens[i])).str());
+  }
+  lib.clang_disposeTokens(tu, tokens, n);
+
+  size_t ni = toks.size();
+  for (size_t i = 0; i < toks.size(); ++i) {
+    if (toks[i] == method_name) {
+      ni = i;
+      break;
+    }
+  }
+  if (ni == toks.size() || ni + 1 >= toks.size() || toks[ni + 1] != "<") {
+    return;  // no explicit template arguments at the call site
+  }
+  int depth = 0;
+  std::vector<std::vector<std::string>> groups(1);
+  for (size_t i = ni + 1; i < toks.size(); ++i) {
+    const std::string &tok = toks[i];
+    const int opens = static_cast<int>(std::count(tok.begin(), tok.end(), '<'));
+    const int closes = static_cast<int>(std::count(tok.begin(), tok.end(), '>'));
+    if (opens > 0) {
+      const int before = depth;
+      depth += opens;
+      if (before == 0) {  // outermost '<' opens the list, don't record it
+        if (opens > 1) {
+          groups.back().push_back(std::string(static_cast<size_t>(opens - 1), '<'));
+        }
+        continue;
+      }
+      groups.back().push_back(tok);
+      continue;
+    }
+    if (closes > 0) {
+      const int before = depth;
+      depth -= closes;
+      if (depth <= 0) {  // '>>' can close a nested bracket AND the outer list
+        const int inner = before - 1;
+        if (inner > 0) {
+          groups.back().push_back(std::string(static_cast<size_t>(inner), '>'));
+        }
+        break;
+      }
+      groups.back().push_back(tok);
+      continue;
+    }
+    if (depth == 1 && tok == ",") {
+      groups.emplace_back();
+      continue;
+    }
+    groups.back().push_back(tok);
+  }
+  int64_t pos = 0;
+  for (const auto &g : groups) {
+    if (g.empty()) {
+      continue;
+    }
+    std::string literal;
+    for (size_t i = 0; i < g.size(); ++i) {
+      if (i != 0 && targ_needs_space(g[i - 1], g[i])) {
+        literal += ' ';
+      }
+      literal += g[i];
+    }
+    // .strip() -- trim surrounding whitespace to match Python's join().strip()
+    const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+    literal.erase(literal.begin(),
+                  std::find_if(literal.begin(), literal.end(), not_space));
+    literal.erase(std::find_if(literal.rbegin(), literal.rend(), not_space).base(),
+                  literal.end());
+    if (literal.empty()) {
+      continue;
+    }
+    TemplateArg ta;
+    ta.owner_id = owner_id;
+    ta.position = pos++;
+    ta.arg_kind = method_targ_kind_from_literal(literal);
+    ta.literal = literal;
+    if (ta.arg_kind == 1) {
+      ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, call_cursor);
+    }
+    db.add_template_arg(ta);
+  }
+}
+
 // Stage 2/3 core: mint a NAMED template instance `X<B>` from a CXType that is a
 // class-template specialization. `X<B>` is named -- by an alias, a member, or a
 // variable -- but a plain parse mints no `X<B>` symbol; only the primary `X` and
@@ -952,6 +1330,10 @@ void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
           ta.ref_id = rsym->id;
         }
       }
+    }
+    if (!ta.ref_id) {
+      ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal,
+                                              lib.clang_getNullCursor());
     }
     db.add_template_arg(ta);
   }
@@ -1503,26 +1885,20 @@ void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
   }
 }
 
-// ADR-004: mint the X<int> type node, write its template_arg rows, and add
-// instantiates + method_of edges for an implicit template instantiation.
+// Link a callable specialization and, when applicable, mint its owner type.
 // Mirror of Python _mint_instantiation_nodes().
 //
-// ref             -- the callee reference cursor (X<int>::method)
-// member_id       -- already-minted symbol id for X<int>::method (dst_id)
-// prim_member_id  -- symbol id of the primary template method X::method
-//
-// Steps:
-//   (b) instantiates(5): member_id -> prim_member_id
-//   (c) mint X<int> TYPE node from ref's semantic parent
-//   (d) method_of(9):    member_id -> type_id
-//   (e) instantiates(5): type_id   -> class_primary_id (guarded)
-//   (f) template_arg rows on the TYPE node via clang_Type_getTemplateArgumentAsType
-//       (TYPE args only; method-template type API returns 0/null args — logged)
+// Always emits callable-specialization -> primary-template. For a class-template
+// member instantiation (X<int>::method), also mints X<int>, attaches method_of to
+// it, links X<int> -> X, and stores TYPE args on X<int>. For a method-template
+// specialization on a non-template class (Context::register<MyType>), attaches
+// method_of to the existing owner class without marking that class as an
+// instantiation. Free-function specializations have no method_of edge.
 void mint_instantiation_nodes(LibClang &lib, Storage &db,
                               const CXCursor &ref,
                               int64_t member_id,
                               int64_t prim_member_id) {
-  // (b) member instantiates -> primary method
+  // Callable specialization -> primary function/method template.
   Edge inst_b;
   inst_b.src_id = member_id;
   inst_b.dst_id = prim_member_id;
@@ -1530,10 +1906,25 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
   inst_b.count = 1;
   db.add_edge(inst_b);
 
-  // (c) mint X<int> TYPE node from semantic parent of ref
+  const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+  if (ref_kind != CXCursor_CXXMethod &&
+      ref_kind != CXCursor_Constructor &&
+      ref_kind != CXCursor_Destructor &&
+      ref_kind != CXCursor_ConversionFunction) {
+    return;
+  }
+
   const CXCursor parent = lib.clang_getCursorSemanticParent(ref);
   if (lib.clang_Cursor_isNull(parent) ||
       is_invalid_kind(lib.clang_getCursorKind(parent))) {
+    return;
+  }
+  const CXCursorKind parent_cursor_kind = lib.clang_getCursorKind(parent);
+  if (parent_cursor_kind != CXCursor_ClassDecl &&
+      parent_cursor_kind != CXCursor_StructDecl &&
+      parent_cursor_kind != CXCursor_UnionDecl &&
+      parent_cursor_kind != CXCursor_ClassTemplate &&
+      parent_cursor_kind != CXCursor_ClassTemplatePartialSpecialization) {
     return;
   }
   const std::string type_usr =
@@ -1541,6 +1932,35 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
   if (type_usr.empty()) {
     return;
   }
+
+  const CXCursor class_primary =
+      lib.clang_getSpecializedCursorTemplate(parent);
+  if (lib.clang_Cursor_isNull(class_primary) ||
+      is_invalid_kind(lib.clang_getCursorKind(class_primary))) {
+    if (const auto owner_sym = db.lookup_symbol(type_usr)) {
+      Edge mo;
+      mo.src_id = member_id;
+      mo.dst_id = owner_sym->id;
+      mo.kind = 9; // method_of
+      mo.count = 1;
+      db.add_edge(mo);
+    }
+    return;
+  }
+  const std::string class_prim_usr =
+      CxString(lib, lib.clang_getCursorUSR(class_primary)).str();
+  if (class_prim_usr.empty() || class_prim_usr == type_usr) {
+    if (const auto owner_sym = db.lookup_symbol(type_usr)) {
+      Edge mo;
+      mo.src_id = member_id;
+      mo.dst_id = owner_sym->id;
+      mo.kind = 9; // method_of
+      mo.count = 1;
+      db.add_edge(mo);
+    }
+    return;
+  }
+
   const std::string parent_spelling =
       CxString(lib, lib.clang_getCursorSpelling(parent)).str();
   const std::string parent_qual = qualified_name(lib, parent);
@@ -1562,33 +1982,23 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
   db.add_edge(mo);
 
   // (e) instantiates(5): type_id -> class primary, guarded by primary indexed
-  const CXCursor class_primary =
-      lib.clang_getSpecializedCursorTemplate(parent);
-  if (!lib.clang_Cursor_isNull(class_primary) &&
-      !is_invalid_kind(lib.clang_getCursorKind(class_primary))) {
-    const std::string class_prim_usr =
-        CxString(lib, lib.clang_getCursorUSR(class_primary)).str();
-    if (!class_prim_usr.empty() && class_prim_usr != type_usr) {
-      const auto class_prim_sym = db.lookup_symbol(class_prim_usr);
-      if (class_prim_sym) {
-        Edge inst_e;
-        inst_e.src_id = type_id;
-        inst_e.dst_id = class_prim_sym->id;
-        inst_e.kind = 5; // instantiates
-        inst_e.count = 1;
-        db.add_edge(inst_e);
-      }
-    }
+  const auto class_prim_sym = db.lookup_symbol(class_prim_usr);
+  if (class_prim_sym) {
+    Edge inst_e;
+    inst_e.src_id = type_id;
+    inst_e.dst_id = class_prim_sym->id;
+    inst_e.kind = 5; // instantiates
+    inst_e.count = 1;
+    db.add_edge(inst_e);
   }
 
   // (f) template_arg rows on TYPE node via clang_Type_getTemplateArgumentAsType
   // (TYPE args only -- same as VAR_DECL B3 pattern at ast.cpp:1280).
-  // For a method template the type API returns nargs <= 0; skip silently.
+  // For a method template on a non-template owner we returned above; its explicit
+  // args are stored on the callable specialization itself.
   const CXType parent_type = lib.clang_getCursorType(parent);
   const int nargs = lib.clang_Type_getNumTemplateArguments(parent_type);
   if (nargs <= 0) {
-    // Method-template or type API unavailable: node+edges already emitted.
-    // This is the ADR-004 §1b known limitation -- no token-extent parse here.
     return;
   }
   for (int ai = 0; ai < nargs; ++ai) {
@@ -1614,6 +2024,9 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
           ta.ref_id = rsym->id;
         }
       }
+    }
+    if (!ta.ref_id) {
+      ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, parent);
     }
     db.add_template_arg(ta);
   }
@@ -1712,6 +2125,21 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                 CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
                 stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path,
                 /*is_instantiation=*/is_inst_member);
+            // Function/method template specialization: capture the concrete
+              // template arguments. Free-function specs expose them via the cursor
+              // API (incl. non-type + nested args); METHOD specs return -1 there
+              // (libclang gap), so fall back to the explicit `<...>` call tokens,
+              // stored as-written with best-effort type ref_id linking.
+            if (is_inst_member && dst_id >= 0) {
+              const int wrote =
+                  index_cursor_template_args(lib, *ctx->db, dst_id, ref);
+              if (wrote == 0 &&
+                  lib.clang_getCursorKind(ref) == CXCursor_CXXMethod) {
+                index_method_template_args_from_tokens(
+                    lib, *ctx->db, dst_id, cursor,
+                    CxString(lib, lib.clang_getCursorSpelling(ref)).str());
+              }
+            }
           }
           if (dst_id >= 0) {
             // Phase 2: compute receiver provenance for member calls
@@ -2069,6 +2497,10 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                         ta.ref_id = rsym->id;
                       }
                     }
+                  }
+                  if (!ta.ref_id) {
+                    ta.ref_id = resolve_template_arg_ref_id(
+                        lib, *ctx->db, ta.literal, cursor);
                   }
                   ctx->db->add_template_arg(ta);
                 }
@@ -2755,6 +3187,10 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                       ta.ref_id = rsym->id;
                     }
                   }
+                }
+                if (!ta.ref_id) {
+                  ta.ref_id =
+                      resolve_template_arg_ref_id(lib, db_, ta.literal, cursor);
                 }
               } else if (tak == CXTemplateArgumentKind_Integral) {
                 ta.arg_kind = 2;

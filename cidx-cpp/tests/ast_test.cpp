@@ -1472,6 +1472,122 @@ TEST_SUITE("clang") {
     CHECK(cs.count("mm::Cache::get") == 1); // single-overload member template
   }
 
+  TEST_CASE("function and method template specializations store template args "
+            "without marking ordinary owners as instantiations") {
+    if (require_libclang() == nullptr) {
+      return;
+    }
+    IndexFixture f;
+    const std::string path = f.tmp + "/callable_specs.cpp";
+    write_file(path,
+                 "namespace spec {\n"
+                 "struct MyType {};\n"
+                 "struct Other {};\n"
+                 "template <class Inner> struct Payload { Inner value; };\n"
+                 "struct Context {\n"
+                 "  template <class T> void reg() {}\n"
+                 "  template <class T, int N> void regN() {}\n"
+                 "  template <class T> void regComplex() {}\n"
+                 "};\n"
+                 "template <class T> T identity(T v) { return v; }\n"
+                 "int use(Context& c) {\n"
+                 "  c.reg<MyType>();\n"
+                 "  c.regN<Other, 7>();\n"
+                 "  c.regComplex<Payload<Other>>();\n"
+                 "  return identity<int>(3);\n"
+                 "}\n"
+                 "}\n");
+
+    const int64_t file_id = f.add_owned_file(f.tmp, path);
+    const ParsedTu tu = f.parser.parse(path, {}, std::nullopt);
+    f.indexer.index_symbols(tu, tu.spelling, file_id);
+    f.indexer.index_edges(tu, tu.spelling, file_id);
+
+    auto &raw = f.db.raw_db();
+
+    auto args_for = [&](const std::string &qual, const std::string &kind) {
+      std::vector<std::string> out;
+      auto st = raw.prepare(
+          "SELECT ta.literal FROM template_arg ta "
+          "JOIN symbol s ON s.id = ta.owner_id "
+          "JOIN symbol_kind sk ON sk.id = s.kind "
+          "WHERE s.qual_name = ? AND s.is_instantiation = 1 AND sk.name = ? "
+          "ORDER BY ta.position");
+      st.bind(1, std::string_view{qual});
+      st.bind(2, std::string_view{kind});
+      while (st.step()) {
+        out.push_back(st.col_text(0));
+      }
+      return out;
+    };
+
+    CHECK(args_for("spec::Context::reg", "method") ==
+          std::vector<std::string>{"MyType"});
+    CHECK(args_for("spec::Context::regN", "method") ==
+          std::vector<std::string>{"Other", "7"});
+    CHECK(args_for("spec::Context::regComplex", "method") ==
+          std::vector<std::string>{"Payload<Other>"});
+    CHECK(args_for("spec::identity", "function") ==
+          std::vector<std::string>{"int"});
+
+    auto ref_for = [&](const std::string &qual, const std::string &literal) {
+      auto st = raw.prepare(
+          "SELECT ta.ref_id FROM template_arg ta "
+          "JOIN symbol s ON s.id = ta.owner_id "
+          "WHERE s.qual_name = ? AND s.is_instantiation = 1 "
+          "AND ta.literal = ? LIMIT 1");
+      st.bind(1, std::string_view{qual});
+      st.bind(2, std::string_view{literal});
+      REQUIRE(st.step());
+      return st.col_is_null(0) ? std::optional<int64_t>{}
+                               : std::optional<int64_t>{st.col_int64(0)};
+    };
+
+    const auto my_type_ref = ref_for("spec::Context::reg", "MyType");
+    REQUIRE(my_type_ref);
+    CHECK(f.db.lookup_symbol_by_id(*my_type_ref)->qual_name == "spec::MyType");
+
+    const auto other_ref = ref_for("spec::Context::regN", "Other");
+    REQUIRE(other_ref);
+    CHECK(f.db.lookup_symbol_by_id(*other_ref)->qual_name == "spec::Other");
+    CHECK_FALSE(ref_for("spec::Context::regN", "7"));
+
+    const auto payload_ref =
+        ref_for("spec::Context::regComplex", "Payload<Other>");
+    REQUIRE(payload_ref);
+    const auto payload_sym = f.db.lookup_symbol_by_id(*payload_ref);
+    REQUIRE(payload_sym);
+    CHECK(payload_sym->qual_name == "spec::Payload");
+    CHECK(payload_sym->kind == "class-template");
+
+    {
+      auto st = raw.prepare(
+          "SELECT is_instantiation FROM symbol WHERE qual_name = 'spec::Context'");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 0);
+    }
+    {
+      auto st = raw.prepare(
+          "SELECT owner.qual_name, owner.is_instantiation FROM edge e "
+          "JOIN symbol m ON m.id = e.src_id "
+          "JOIN symbol owner ON owner.id = e.dst_id "
+          "WHERE e.kind = 9 AND m.qual_name = 'spec::Context::reg' "
+          "AND m.is_instantiation = 1");
+      REQUIRE(st.step());
+      CHECK(st.col_text(0) == "spec::Context");
+      CHECK(st.col_int64(1) == 0);
+    }
+    {
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM edge e "
+          "JOIN symbol s ON s.id = e.src_id "
+          "WHERE e.kind = 9 AND s.qual_name = 'spec::identity' "
+          "AND s.is_instantiation = 1");
+      REQUIRE(st.step());
+      CHECK(st.col_int64(0) == 0);
+    }
+  }
+
   // --- cross-TU wrong-order indexing (USR-keyed stub + backfill) ----------- #
   //
   // Mirror of Python test_cross_tu_wrong_order_stub_backfill. A dependent call

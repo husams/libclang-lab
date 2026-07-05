@@ -12,7 +12,7 @@ because PR2 has not been implemented in this worktree.  Do NOT xfail or skip the
 flag failures as blockers so the developer can act on each one.
 
 Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
-  schema-1      SCHEMA_VERSION == 22
+  schema-1      SCHEMA_VERSION == 28
   schema-2      entity_edge table present in _SCHEMA
   schema-3      entity_edge_kind seed has exactly 11 rows (ids 1-11)
   schema-4      entity_edge columns: id,src_id,dst_id,kind,count,via_member_id,
@@ -21,9 +21,9 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.38.0"  (model-layer typed query selectors)
-  version-2     C++ kVersion == "0.38.0"
-  version-3     C++ kSchemaVersion == 22
+  version-1     Python VERSION == "0.48.0"  (specialized callable template args)
+  version-2     C++ kVersion == "0.48.0"
+  version-3     C++ kSchemaVersion == 28
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
   parity-1      parity_check.sh includes at least one entity_edge CLI command
@@ -296,28 +296,27 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0470():
-    """Python VERSION must be 0.46.0 (multi-definition: definition/def_edge/
-    possible_call tables + multi_def, per-backend redefinitions)."""
+def test_python_version_is_0480():
+    """Python VERSION must be 0.48.0 (specialized callable template args)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.47.0", (
-        f"Python VERSION is '{version}'; expected '0.46.0'. "
-        "Bump VERSION to 0.46.0 in cli.py (multi-definition symbols)."
+    assert version == "0.48.0", (
+        f"Python VERSION is '{version}'; expected '0.48.0'. "
+        "Bump VERSION to 0.48.0 in cli.py (specialized callable template args)."
     )
 
 
-def test_cpp_version_is_0470():
-    """C++ kVersion must be 0.46.0 (multi-definition symbols)."""
+def test_cpp_version_is_0480():
+    """C++ kVersion must be 0.48.0 (specialized callable template args)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.47.0", (
-        f"C++ kVersion is '{version}'; expected '0.46.0'. "
-        "Bump kVersion to 0.46.0 in args.hpp (multi-definition symbols)."
+    assert version == "0.48.0", (
+        f"C++ kVersion is '{version}'; expected '0.48.0'. "
+        "Bump kVersion to 0.48.0 in args.hpp (specialized callable template args)."
     )
 
 

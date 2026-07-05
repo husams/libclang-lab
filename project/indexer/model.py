@@ -84,6 +84,8 @@ __all__ = [
     "Callable",
     "Function",
     "Method",
+    "SpecializedFunction",
+    "SpecializedMethod",
     "Constructor",
     "Destructor",
     "Record",
@@ -388,6 +390,15 @@ class CodeBase:
         if sym is None:
             return None
         cls = _KIND_TO_CLASS.get(sym.kind, Entity)
+        # A function/method template specialization (is_instantiation) carries
+        # concrete template arguments -- route it to the specialization subclass
+        # so `specialized_types()` is available. (Instantiation TYPE nodes like
+        # X<int> keep their class/struct kind and are unaffected.)
+        if sym.is_instantiation:
+            if sym.kind == "function":
+                cls = SpecializedFunction
+            elif sym.kind == "method":
+                cls = SpecializedMethod
         return cls(sym, self, defn)
 
     def _wrap_all(self, syms: Iterable[Optional[Sym]]) -> "list[Entity]":
@@ -831,6 +842,15 @@ class Entity:
 
     @property
     def kind(self) -> str:
+        return self.sym.kind
+
+    @property
+    def raw_kind(self) -> str:
+        """The storage-level symbol kind (``function``, ``method``, ...).
+
+        High-level subclasses may expose a more specific semantic ``kind`` such
+        as ``specialized-method`` while preserving the raw DB kind here.
+        """
         return self.sym.kind
 
     @property
@@ -2346,6 +2366,82 @@ class FunctionTemplate(Callable, _TemplateMixin):
 
 class ClassTemplate(Record, _TemplateMixin):
     """A class template."""
+
+
+class _SpecializationMixin:
+    """Shared accessors for a concrete template *specialization* -- a function or
+    method bound to specific template arguments (``identity<int>``,
+    ``cache.get<Foo>()``)."""
+
+    def specialization_arguments(self) -> list[TemplateArg]:
+        """Concrete template arguments for this specialization.
+
+        Function/method-template specializations store arguments on the callable
+        node itself. Class-template member instantiations such as
+        ``X<int>::print`` store them on the owning ``X<int>`` type node, so this
+        falls back to that owner when the callable has no local arguments.
+        """
+        args = self.template_arguments  # type: ignore[attr-defined]
+        if args:
+            return args
+        graph = self._cb.graph  # type: ignore[attr-defined]
+        inst_type = graph.template_of_member(self.sym)  # type: ignore[attr-defined]
+        return graph.template_args(inst_type) if inst_type is not None else []
+
+    def specialized_types(self) -> list["Type"]:
+        """The concrete types/values this was specialized with, in order:
+        ``identity<int>`` -> ``[Type('int')]``; ``put<Foo, 3>`` ->
+        ``[Type('Foo'), Type('3')]`` (non-type values carry their text). For a
+        :class:`SpecializedFunction` these come from libclang's cursor
+        template-argument API and are reliable (incl. non-type + nested args);
+        for a :class:`SpecializedMethod` they are the EXPLICIT arguments as
+        written at the call site and may be empty for a deduced call."""
+        return [
+            Type(ta.literal or "", self._cb)  # type: ignore[attr-defined]
+            for ta in self.specialization_arguments()
+        ]
+
+    def specialized_type_entities(self) -> "list[Optional[Entity]]":
+        """Each specialization argument resolved to its declaring entity via the
+        stored ``ref_id``. ``None`` at a position for a builtin/unindexed type, a
+        non-type value, or an ambiguous token-derived method argument that could
+        not be resolved safely."""
+        out: list[Optional[Entity]] = []
+        graph = self._cb.graph  # type: ignore[attr-defined]
+        for ta in self.specialization_arguments():
+            sym = graph.get(ta.ref_id) if ta.ref_id is not None else None
+            out.append(self._cb.wrap(sym))  # type: ignore[attr-defined]
+        return out
+
+    def primary_template(self) -> "Optional[Entity]":
+        """The primary template this was specialized from (``identity`` for
+        ``identity<int>``)."""
+        return self.template_of()  # type: ignore[attr-defined]
+
+
+class SpecializedFunction(Function, _SpecializationMixin):
+    """A free-function template specialization (``identity<int>``,
+    ``make<5, char>()``). :meth:`specialized_types` come from libclang's cursor
+    template-argument API -- fully reliable, including non-type and nested
+    arguments, each resolvable to its declaring entity via
+    :meth:`specialized_type_entities`."""
+
+    @property
+    def kind(self) -> str:
+        return "specialized-function"
+
+
+class SpecializedMethod(Method, _SpecializationMixin):
+    """A method-template specialization (``cache.get<Foo>()``). libclang exposes
+    NO semantic template-argument accessor for methods, so
+    :meth:`specialized_types` reflect the EXPLICIT ``<...>`` arguments exactly as
+    written at the call site. :meth:`specialized_type_entities` resolves those
+    token-derived type spellings only when they match one indexed type symbol in
+    scope; ambiguous/unindexed args and deduced calls remain unresolved."""
+
+    @property
+    def kind(self) -> str:
+        return "specialized-method"
 
 
 # --------------------------------------------------------------------------- #

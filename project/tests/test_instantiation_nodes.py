@@ -12,7 +12,7 @@ Drives the REAL libclang extractor over small C++ sources and asserts:
   * query.callers(X::print, include_instantiations=True) rolls up
   * query.callees(caller_int, include_instantiations=False) == direct only
   * Method-template Y::print<int>: node+instantiates+method_of present,
-    template_args == [] (ADR-004 §1b known limitation)
+    template_args == [int]
   * Migration: a v12 DB (no is_instantiation column) upgrades to v14 correctly
   * Blast-radius guard: std::vector<int> mints NO instance node
     (primary unindexed -> guard holds)
@@ -35,7 +35,12 @@ from _helpers import clang_args  # noqa: E402
 
 from indexer.storage import Storage  # noqa: E402
 from indexer.query import CallerWithContext, GraphQuery  # noqa: E402
-from indexer.model import CallerWithContextModel, CodeBase  # noqa: E402
+from indexer.model import (  # noqa: E402
+    CallerWithContextModel,
+    CodeBase,
+    SpecializedFunction,
+    SpecializedMethod,
+)
 from indexer.clang import ast as A  # noqa: E402
 
 
@@ -44,6 +49,13 @@ from indexer.clang import ast as A  # noqa: E402
 # ---------------------------------------------------------------------------
 
 SOURCE_CLASS_TEMPLATE = """
+struct MyType {};
+
+template <typename Inner>
+struct Payload {
+    Inner value;
+};
+
 template <typename T>
 struct X {
     void print() {}
@@ -54,9 +66,19 @@ struct Y {
     void print() {}
 };
 
+struct Z {
+    template <typename T>
+    void reg() {}
+};
+
+template <typename T>
+T identity(T v) { return v; }
+
 void caller_int()    { X<int>    xi; xi.print(); }
 void caller_double() { X<double> xd; xd.print(); }
 void caller_y()      { Y y; y.print<int>(); }
+void caller_z()      { Z z; z.reg<Payload<MyType>>(); }
+int caller_identity(){ return identity<int>(1); }
 """
 
 SOURCE_STD_BLAST = """
@@ -362,13 +384,13 @@ def test_callees_rollup_default_unchanged(g):
 
 
 # ---------------------------------------------------------------------------
-# Method-template: Y::print<int> node + instantiates + method_of, targs=[]
+# Method-template: Y::print<int> node + instantiates + method_of, targs=[int]
 # ---------------------------------------------------------------------------
 
 
 def test_method_template_node_and_edges_present(g):
     """Y::print<int> node is minted with is_instantiation=1, has instantiates
-    and method_of edges; template_args == [] (§1b gap, no cursor targs)."""
+    and method_of edges; template_args carries the explicit method arg."""
     y_print_inst = [s for s in g.find("print") if s.is_instantiation and "Y" in s.usr]
     if not y_print_inst:
         pytest.skip("Y::print<int> not indexed (may not appear in this build)")
@@ -378,15 +400,95 @@ def test_method_template_node_and_edges_present(g):
         inst_targets = g.neighbors(node, kinds=("instantiates",), direction="out")
         assert inst_targets, f"Y::print<int> missing instantiates edge; node={node}"
 
-        # method_of edge outgoing to Y type node
+        # method_of edge outgoing to the existing Y owner, not a fabricated
+        # instantiation type node.
         mo_targets = g.neighbors(node, kinds=("method_of",), direction="out")
         assert mo_targets, f"Y::print<int> missing method_of edge; node={node}"
+        assert any(
+            t.spelling == "Y" and not t.is_instantiation for t in mo_targets
+        ), f"Y::print<int> should attach to the non-instantiation Y owner: {mo_targets}"
 
-        # template_args == [] (method-template targs unavailable from cursor API)
+        # Method-template targs: libclang's cursor API returns -1 for methods, so
+        # the EXPLICIT `<int>` at the call site is recovered from the call tokens
+        # and stored as its as-written spelling. Builtins still have no ref_id.
         targs = g.template_args(node)
-        assert targs == [], (
-            f"Y::print<int> should have no targs (ADR-004 §1b gap); got {targs}"
+        assert [t.literal for t in targs] == ["int"], (
+            f"Y::print<int> should carry token-derived targ 'int'; got {targs}"
         )
+        assert all(t.ref_id is None for t in targs), (
+            "builtin method-template targs should not resolve to a ref_id"
+        )
+
+
+def test_method_template_owner_not_marked_instantiation(g):
+    owners = [s for s in g.find("Y") if s.spelling == "Y" and s.kind == "struct"]
+    assert owners, "Y owner record not indexed"
+    assert all(not s.is_instantiation for s in owners)
+
+
+def test_function_template_specialization_node_and_model(g, cb):
+    nodes = [s for s in g.find("identity") if s.is_instantiation]
+    assert nodes, "identity<int> specialization not indexed"
+    for node in nodes:
+        assert [a.literal for a in g.template_args(node)] == ["int"]
+        primary = g.template_of(node)
+        assert primary is not None
+        assert primary.kind == "function-template"
+
+    entities = [e for e in cb.find("identity") if isinstance(e, SpecializedFunction)]
+    assert entities, "identity<int> did not wrap as SpecializedFunction"
+    entity = entities[0]
+    assert entity.kind == "specialized-function"
+    assert entity.raw_kind == "function"
+    assert [t.spelling for t in entity.specialized_types()] == ["int"]
+    assert entity.primary_template() is not None
+
+
+def test_method_template_specialization_model(cb):
+    entities = [
+        e for e in cb.find("print") if isinstance(e, SpecializedMethod) and "Y" in e.usr
+    ]
+    assert entities, "Y::print<int> did not wrap as SpecializedMethod"
+    entity = entities[0]
+    assert entity.kind == "specialized-method"
+    assert entity.raw_kind == "method"
+    assert [t.spelling for t in entity.specialized_types()] == ["int"]
+    assert entity.primary_template() is not None
+
+
+def test_method_template_token_type_arg_resolves_entity(g, cb):
+    node = None
+    targs = []
+    for candidate in [s for s in g.find("reg") if s.is_instantiation]:
+        candidate_args = g.template_args(candidate)
+        if [t.literal for t in candidate_args] == ["Payload<MyType>"]:
+            node = candidate
+            targs = candidate_args
+            break
+    assert node is not None, "Z::reg<Payload<MyType>> specialization not indexed"
+    assert [t.literal for t in targs] == ["Payload<MyType>"]
+    assert targs[0].ref_id is not None
+    ref = g.get(targs[0].ref_id)
+    assert ref is not None
+    assert ref.kind == "class-template"
+    assert ref.name == "Payload"
+
+    entity = cb.get(node)
+    assert isinstance(entity, SpecializedMethod)
+    assert [t.spelling for t in entity.specialized_types()] == ["Payload<MyType>"]
+    resolved = entity.specialized_type_entities()
+    assert resolved and resolved[0] is not None
+    assert resolved[0].name == "Payload"
+
+
+def test_class_template_member_specialized_types_fall_back_to_owner(cb):
+    seen = {
+        tuple(t.spelling for t in e.specialized_types())
+        for e in cb.find("print")
+        if isinstance(e, SpecializedMethod) and e.is_instantiation
+    }
+    assert ("int",) in seen
+    assert ("double",) in seen
 
 
 # ---------------------------------------------------------------------------
@@ -738,9 +840,7 @@ def test_callers_optin_via_instantiation_is_instantiation_node(g):
 
 def test_callers_optin_method_template_node_present(g):
     """Y::print<int> (method-template) node: rolling up callers of Y::print
-    must not crash even when the instantiation TYPE node has no stored template
-    args (the §1b gap — method-template targs are not available from the cursor
-    API).  via_template_args must be [] (not an error)."""
+    must carry the explicit method-template args from the specialization node."""
     y_print_primaries = [
         s for s in g.find("print") if not s.is_instantiation and "Y" in s.usr
     ]
@@ -750,8 +850,9 @@ def test_callers_optin_method_template_node_present(g):
         result = g.callers(primary, include_instantiations=True)
         for r in result:
             assert isinstance(r, CallerWithContext)
-            # via_template_args may be [] for method-template nodes — that is fine.
             assert isinstance(r.via_template_args, list)
+            if r.via_instantiation is not None:
+                assert [a.literal for a in r.via_template_args] == ["int"]
 
 
 # ---------------------------------------------------------------------------

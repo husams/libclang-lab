@@ -1706,6 +1706,21 @@ class GraphQuery:
         ).fetchone()
         return self._sym(row) if row else None
 
+    def _instantiation_template_args(self, inst_member: Sym) -> list[TemplateArg]:
+        """Concrete args for an instantiation/specialization member.
+
+        Class-template member instantiations store args on the owner type node
+        (``X<int>::print`` -> ``X<int>``). Function/method-template
+        specializations store args on the callable specialization itself
+        (``identity<int>``, ``Context::register<MyType>``). Prefer callable-local
+        args, then fall back to the owner type node for ADR-004 class instances.
+        """
+        direct = self.template_args(inst_member)
+        if direct:
+            return direct
+        inst_type = self.template_of_member(inst_member)
+        return self.template_args(inst_type) if inst_type is not None else []
+
     @overload
     def callers(
         self,
@@ -1757,8 +1772,10 @@ class GraphQuery:
             the intermediate step (``X<int>::print``); ``None`` for direct
             callers of the primary.
           * ``.via_template_args`` — concrete template arguments from the
-            instantiation TYPE node (e.g. ``[int]`` for ``X<int>``); empty
-            for direct callers or when the type node has no stored args.
+            callable specialization itself (``register<MyType>``) or, for
+            class-template member instantiations, the owner TYPE node
+            (``X<int>::print`` -> ``[int]``); empty for direct callers or when no
+            args are stored.
 
         A caller that calls ``X<int>::print`` **and** a different caller that
         calls ``X<double>::print`` both appear, each tagged with their own
@@ -1782,11 +1799,7 @@ class GraphQuery:
         # instance member via multiple sites appears exactly once per instance.
         seen_pairs: set[tuple[int, int]] = {(s.id, -1) for s in direct}
         for inst_member in self.instantiations(sym, limit=limit):
-            # Resolve the template args from the instantiation TYPE node.
-            inst_type = self.template_of_member(inst_member)
-            targs: list[TemplateArg] = (
-                self.template_args(inst_type) if inst_type is not None else []
-            )
+            targs = self._instantiation_template_args(inst_member)
             for caller in self._peers(inst_member, ("calls",), "in", limit):
                 pair = (caller.id, inst_member.id)
                 if pair not in seen_pairs:
@@ -1854,10 +1867,7 @@ class GraphQuery:
         ]
         seen_pairs: set[tuple[int, int]] = {(s.id, -1) for s in direct}
         for inst_member in self.instantiations(sym, limit=limit):
-            inst_type = self.template_of_member(inst_member)
-            targs: list[TemplateArg] = (
-                self.template_args(inst_type) if inst_type is not None else []
-            )
+            targs = self._instantiation_template_args(inst_member)
             for callee in self._peers(inst_member, ("calls",), "out", limit):
                 pair = (callee.id, inst_member.id)
                 if pair not in seen_pairs:
