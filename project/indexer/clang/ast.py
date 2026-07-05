@@ -64,6 +64,27 @@ _lib.clang_Type_getNumTemplateArguments.argtypes = [cx.Type]
 _lib.clang_Type_getTemplateArgumentAsType.restype = cx.Type
 _lib.clang_Type_getTemplateArgumentAsType.argtypes = [cx.Type, ctypes.c_uint]
 
+# NOTE: cursor-level template-argument type/value access is reached through the
+# clang.cindex bindings. For the argument *kind*, use a separate CFUNCTYPE below:
+# re-declaring `_lib.clang_Cursor_getTemplateArgumentKind.restype` would MUTATE
+# the shared clang.cindex library object and clobber the binding's enum converter.
+_clang_cursor_get_template_argument_kind_raw = ctypes.CFUNCTYPE(
+    ctypes.c_int, cx.Cursor, ctypes.c_uint
+)(("clang_Cursor_getTemplateArgumentKind", _lib))
+
+# CXTemplateArgumentKind (clang-c/Index.h) -> template_arg.arg_kind
+# (1=type, 2=non-type value, 3=template-template, 4=pack).
+_CX_TARG_KIND_TO_ARG_KIND: dict[int, int] = {
+    1: 1,  # Type
+    2: 2,  # Declaration
+    3: 2,  # NullPtr
+    4: 2,  # Integral
+    5: 3,  # Template
+    6: 3,  # TemplateExpansion
+    7: 2,  # Expression
+    8: 4,  # Pack
+}
+
 
 def _get_overridden_cursors(cursor: cx.Cursor) -> list[cx.Cursor]:
     """Return the list of cursors that `cursor` overrides (may be empty)."""
@@ -110,6 +131,16 @@ _KIND_MAP: dict[cx.CursorKind, str] = {
     cx.CursorKind.NAMESPACE: "namespace",
     cx.CursorKind.MACRO_DEFINITION: "macro",
 }
+
+_TYPE_ARG_SYMBOL_KINDS: tuple[str, ...] = (
+    "class",
+    "struct",
+    "union",
+    "enum",
+    "typedef",
+    "type-alias",
+    "class-template",
+)
 
 _ACCESS: dict[cx.AccessSpecifier, str] = {
     cx.AccessSpecifier.PUBLIC: "public",
@@ -956,45 +987,83 @@ def _mint_instantiation_nodes(
     member_id: int,
     prim_member_id: int,
 ) -> None:
-    """ADR-004: mint the X<int> type node, write its template_arg rows, and add
-    instantiates + method_of edges for an implicit template instantiation.
+    """Link a callable specialization and, when applicable, mint its owner type.
 
-    Called from _body_descent when the callee `ref` is an instantiation member
-    (clang_getSpecializedCursorTemplate returned a valid primary method).
+    Called from _body_descent when the callee ``ref`` has a specialized primary
+    (``clang_getSpecializedCursorTemplate`` returned a distinct cursor).
 
-    `member_id`      -- already-minted symbol id for X<int>::method (dst_id).
-    `prim_member_id` -- symbol id of the primary template method X::method.
+    ``member_id`` is the already-minted callable specialization symbol id, such
+    as ``identity<int>`` or ``X<int>::method``. ``prim_member_id`` is the primary
+    function/method template symbol id.
 
-    Steps:
-      (b) add instantiates(5) edge:  member_id -> prim_member_id
-      (c) mint the X<int> TYPE node from ref.semantic_parent
-      (d) add method_of(9) edge:     member_id -> type_id
-      (e) add instantiates(5) edge:  type_id   -> class_primary_id
-          (guarded: class primary must already be indexed)
-      (f) write template_arg rows on the TYPE node from
-          parent.type.get_template_argument_type(i)
-          (TYPE args only via the type API; INTEGRAL/other are skipped here
-           since clang.Type has no get_template_argument_kind/value; see
-           ADR-004 §1b known limitation for method-template targs)
+    For every callable specialization:
+      (a) add instantiates(5): callable specialization -> primary template.
+
+    For class-template member instantiations (``X<int>::method``) only:
+      (b) mint the ``X<int>`` TYPE node from ``ref.semantic_parent``;
+      (c) add method_of(9):    callable specialization -> ``X<int>``;
+      (d) add instantiates(5): ``X<int>`` -> class primary;
+      (e) write TYPE template_arg rows on ``X<int>``.
+
+    For a method-template specialization on a non-template class
+    (``Context::register<MyType>``), no type instance exists. The method is
+    attached to the existing owner class instead, and its own template_arg rows
+    are recorded by ``_index_cursor_template_args`` / token fallback.
     """
-    # (b) member instantiates -> primary method
+    # (a) callable specialization -> primary function/method template.
     db.add_edge(member_id, prim_member_id, 5)
 
-    # (c) mint X<int> TYPE node
+    # Only record method_of for actual methods. Free-function specializations have
+    # a namespace semantic parent, which must not be minted as an instantiation.
+    ref_kind = ref.kind
+    if ref_kind not in (
+        cx.CursorKind.CXX_METHOD,
+        cx.CursorKind.CONSTRUCTOR,
+        cx.CursorKind.DESTRUCTOR,
+        cx.CursorKind.CONVERSION_FUNCTION,
+    ):
+        return
+
     parent = ref.semantic_parent
     if parent is None:
+        return
+    parent_kind = parent.kind
+    if parent_kind not in (
+        cx.CursorKind.CLASS_DECL,
+        cx.CursorKind.STRUCT_DECL,
+        cx.CursorKind.UNION_DECL,
+        cx.CursorKind.CLASS_TEMPLATE,
+        cx.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+    ):
         return
     type_usr = parent.get_usr()
     if not type_usr:
         return
-    parent_kind = _KIND_MAP.get(parent.kind, "struct")
+
+    # Method-template specialization on a non-template class: attach to the
+    # existing owner record, but do not turn that owner into an instantiation.
+    class_primary = _lib.clang_getSpecializedCursorTemplate(parent)
+    if _invalid_cursor(class_primary):
+        owner_sym = db.lookup_symbol(type_usr)
+        if owner_sym is not None:
+            db.add_edge(member_id, owner_sym.id, 9)
+        return
+
+    class_prim_usr = class_primary.get_usr()
+    if not class_prim_usr or class_prim_usr == type_usr:
+        owner_sym = db.lookup_symbol(type_usr)
+        if owner_sym is not None:
+            db.add_edge(member_id, owner_sym.id, 9)
+        return
+
+    parent_kind_name = _KIND_MAP.get(parent_kind, "struct")
     _tdfid, _tdln, _tdcol, _tdpath = _ref_decl_loc(db, parent)
     type_id = db.mint_symbol_id(
         type_usr,
         parent.spelling,
         _qualified_name(parent),
         parent.displayname,
-        parent_kind,
+        parent_kind_name,
         decl_file_id=_tdfid,
         decl_line=_tdln,
         decl_col=_tdcol,
@@ -1006,13 +1075,9 @@ def _mint_instantiation_nodes(
     db.add_edge(member_id, type_id, 9)
 
     # (e) instantiates(5): type_id -> class primary, guarded by primary indexed
-    class_primary = _lib.clang_getSpecializedCursorTemplate(parent)
-    if not _invalid_cursor(class_primary):
-        class_prim_usr = class_primary.get_usr()
-        if class_prim_usr and class_prim_usr != type_usr:
-            class_prim_sym = db.lookup_symbol(class_prim_usr)
-            if class_prim_sym is not None:
-                db.add_edge(type_id, class_prim_sym.id, 5)
+    class_prim_sym = db.lookup_symbol(class_prim_usr)
+    if class_prim_sym is not None:
+        db.add_edge(type_id, class_prim_sym.id, 5)
 
     # (f) template_arg rows on the TYPE node (TYPE args only via type API)
     # clang.Type has get_template_argument_type(i) but no
@@ -1048,8 +1113,292 @@ def _mint_instantiation_nodes(
                 rsym = db.lookup_symbol(arg_usr)
                 if rsym is not None:
                     ref_id = rsym.id
+        if ref_id is None:
+            ref_id = _resolve_template_arg_ref_id(db, arg_spelling, parent)
         # All args from the type API are TYPE args (arg_kind=1)
         db.add_template_arg(type_id, ai, 1, ref_id=ref_id, literal=arg_spelling)
+
+
+def _index_cursor_template_args(
+    db: Storage, owner_id: int, cursor: cx.Cursor
+) -> int:
+    """Write ``template_arg`` rows for a FUNCTION/METHOD template specialization.
+
+    Reads the concrete template arguments off ``cursor`` (the specialization
+    decl) via the cursor-level libclang API and stores one row per argument on
+    ``owner_id`` (the minted specialization symbol). TYPE args carry the type
+    spelling as ``literal`` (+ ``ref_id`` when the type's decl is indexed);
+    non-type (integral) args carry their value as ``literal``. This complements
+    :func:`_mint_instantiation_nodes`, which handles class-template TYPE args via
+    the Type API; the Type API returns -1 for function/method specializations.
+
+    Returns the number of rows written -- 0 means the cursor exposed no
+    cursor-level template args (notably every METHOD-template specialization,
+    where libclang's cursor API returns -1; use the token fallback there).
+
+    Mirrors the TYPE/INTEGRAL branch of the explicit-instantiation handler. The
+    kind value is read through a local raw function pointer so newer libclang enum
+    cases (e.g. PACK) do not trip clang.cindex's older enum converter."""
+    nargs = cursor.get_num_template_arguments()
+    if nargs <= 0:
+        return 0
+    for ai in range(nargs):
+        cx_kind = _clang_cursor_get_template_argument_kind_raw(cursor, ai)
+        arg_kind = _CX_TARG_KIND_TO_ARG_KIND.get(cx_kind)
+        if arg_kind is None:
+            continue
+        if arg_kind == 1:
+            arg_type = cursor.get_template_argument_type(ai)
+            ref_id: Optional[int] = None
+            arg_decl = arg_type.get_declaration() if arg_type is not None else None
+            literal = (arg_type.spelling or None) if arg_type is not None else None
+            if arg_decl is not None and arg_decl.kind not in (
+                cx.CursorKind.NO_DECL_FOUND,
+                cx.CursorKind.INVALID_FILE,
+            ):
+                arg_usr = arg_decl.get_usr()
+                if arg_usr:
+                    rsym = db.lookup_symbol(arg_usr)
+                    if rsym is not None:
+                        ref_id = rsym.id
+            if ref_id is None:
+                ref_id = _resolve_template_arg_ref_id(db, literal, cursor)
+            db.add_template_arg(
+                owner_id,
+                ai,
+                1,
+                ref_id=ref_id,
+                literal=literal,
+            )
+        elif cx_kind == 4:
+            db.add_template_arg(
+                owner_id, ai, 2, literal=str(cursor.get_template_argument_value(ai))
+            )
+        else:
+            db.add_template_arg(owner_id, ai, arg_kind)
+    return nargs
+
+
+def _method_targ_kind_from_literal(text: str) -> int:
+    """Best-effort template_arg.arg_kind for a token-derived method-template arg.
+
+    Only distinguishes non-type *value* args (a bare numeric / char / bool /
+    nullptr literal -> arg_kind=2) from everything else (arg_kind=1, type). This
+    reads the literal itself, not a mangled format -- it is not a USR decode."""
+    t = text.strip()
+    if t in ("true", "false", "nullptr"):
+        return 2
+    if t[:1] in ("'", '"'):
+        return 2
+    head = t.lstrip("+-")
+    if head[:1].isdigit():
+        return 2
+    return 1
+
+
+def _template_arg_base_name(text: str) -> str:
+    """Best-effort declaring-name peel for a token/type-spelled template arg.
+
+    ``Payload<Other>`` resolves through the declaring ``Payload`` symbol; ``const
+    ns::Thing&`` resolves through ``ns::Thing``. This is intentionally a lookup
+    helper only -- the original literal is still stored unchanged.
+    """
+    s = text.strip()
+    for prefix in ("typename ", "class ", "struct ", "enum "):
+        if s.startswith(prefix):
+            s = s[len(prefix) :].strip()
+            break
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("const ", "volatile "):
+            if s.startswith(prefix):
+                s = s[len(prefix) :].strip()
+                changed = True
+        for suffix in (" const", " volatile"):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)].strip()
+                changed = True
+        for suffix in ("&&", "&", "*"):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)].strip()
+                changed = True
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "<":
+            if depth == 0:
+                s = s[:i].strip()
+                break
+            depth += 1
+        elif ch == ">":
+            depth = max(0, depth - 1)
+    return s[2:] if s.startswith("::") else s
+
+
+def _cursor_scope_qual_names(cursor: Optional[cx.Cursor]) -> list[str]:
+    """Qualified semantic scopes, innermost first, for resolving token args."""
+    out: list[str] = []
+    seen: set[str] = set()
+    c: Optional[cx.Cursor] = None
+    try:
+        c = cursor.semantic_parent if cursor is not None else None
+        while c is not None and c.kind != cx.CursorKind.TRANSLATION_UNIT:
+            qn = _qualified_name(c)
+            if qn and qn not in seen:
+                out.append(qn)
+                seen.add(qn)
+            c = c.semantic_parent
+    except (AttributeError, ValueError):
+        pass
+    return out
+
+
+def _type_arg_symbol_candidates(
+    db: Storage, name: str, *, qualified: bool
+) -> list[Symbol]:
+    out: list[Symbol] = []
+    for kind in _TYPE_ARG_SYMBOL_KINDS:
+        hits = (
+            db.lookup_symbols_by_qual_name(name, kind)
+            if qualified
+            else db.lookup_symbols_by_name(name, kind)
+        )
+        out.extend(h for h in hits if h.id is not None)
+    # De-duplicate rows reached through multiple aliases while preserving order.
+    by_id: dict[int, Symbol] = {}
+    for sym in out:
+        by_id.setdefault(sym.id, sym)
+    return list(by_id.values())
+
+
+def _pick_template_arg_symbol(candidates: list[Symbol]) -> Optional[int]:
+    if not candidates:
+        return None
+    non_inst = [s for s in candidates if not s.is_instantiation]
+    pool = non_inst or candidates
+    return pool[0].id if len(pool) == 1 else None
+
+
+def _resolve_template_arg_ref_id(
+    db: Storage, literal: Optional[str], scope_cursor: Optional[cx.Cursor] = None
+) -> Optional[int]:
+    """Resolve a template-argument spelling to an indexed type symbol.
+
+    Token-derived method-template args do not come with a USR. This resolver
+    links common type literals back to graph nodes when the answer is exact or
+    unambiguous in the current semantic scope. Ambiguous names deliberately stay
+    unresolved instead of guessing.
+    """
+    if not literal:
+        return None
+    base = _template_arg_base_name(literal)
+    if not base:
+        return None
+    qualified = "::" in base
+    names: list[str] = []
+    if qualified:
+        names.append(base)
+    for scope in _cursor_scope_qual_names(scope_cursor):
+        # Try the enclosing scopes; a function scope candidate will simply miss.
+        names.append(f"{scope}::{base}")
+    names.append(base)
+    seen_names: set[tuple[str, bool]] = set()
+    for name in names:
+        key = (name, True)
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        ref_id = _pick_template_arg_symbol(
+            _type_arg_symbol_candidates(db, name, qualified=True)
+        )
+        if ref_id is not None:
+            return ref_id
+    tail = base.rsplit("::", 1)[-1]
+    return _pick_template_arg_symbol(
+        _type_arg_symbol_candidates(db, tail, qualified=False)
+    )
+
+
+def _index_method_template_args_from_tokens(
+    db: Storage, owner_id: int, call_cursor: cx.Cursor, method_name: str
+) -> None:
+    """Token fallback for METHOD-template explicit args (`obj.m<T,...>()`).
+
+    libclang's cursor API returns -1 for method-template specializations (the
+    args survive only in the source tokens or the mangled USR). We recover the
+    EXPLICIT `<...>` args from the call's tokens and store each as its literal
+    source spelling -- exactly as written. TYPE args get a best-effort ``ref_id``
+    when that spelling resolves to one indexed type symbol in scope; ambiguous
+    names stay unresolved. Args are split on top-level commas with `<`/`>` depth
+    tracking so nested template args stay whole. Deduced calls (no explicit
+    `<...>`) yield nothing."""
+    toks = [t.spelling for t in call_cursor.get_tokens()]
+    # Locate the method name, then the '<' that opens its explicit arg list.
+    try:
+        ni = toks.index(method_name)
+    except ValueError:
+        return
+    if ni + 1 >= len(toks) or toks[ni + 1] != "<":
+        return  # no explicit template arguments at the call site
+    depth = 0
+    groups: list[list[str]] = [[]]
+    for tok in toks[ni + 1 :]:
+        opens = tok.count("<")
+        closes = tok.count(">")
+        if opens:  # '<' never co-occurs with '>' in a real token here
+            before = depth
+            depth += opens
+            if before == 0:  # outermost '<' opens the list, don't record it
+                if opens > 1:
+                    groups[-1].append("<" * (opens - 1))
+                continue
+            groups[-1].append(tok)  # nested opener, part of this arg
+            continue
+        if closes:
+            before = depth
+            depth -= closes
+            if depth <= 0:
+                # a '>>'-style token can close a nested bracket AND the outer
+                # list at once: record the inner closes, then stop.
+                inner = before - 1
+                if inner > 0:
+                    groups[-1].append(">" * inner)
+                break
+            groups[-1].append(tok)  # nested closer, part of this arg
+            continue
+        if depth == 1 and tok == ",":
+            groups.append([])  # top-level separator
+            continue
+        groups[-1].append(tok)
+    for pos, g in enumerate(grp for grp in groups if grp):
+        literal = "".join(
+            (" " if i and _needs_space(g[i - 1], g[i]) else "") + g[i]
+            for i in range(len(g))
+        ).strip()
+        if not literal:
+            continue
+        arg_kind = _method_targ_kind_from_literal(literal)
+        db.add_template_arg(
+            owner_id,
+            pos,
+            arg_kind,
+            ref_id=(
+                _resolve_template_arg_ref_id(db, literal, call_cursor)
+                if arg_kind == 1
+                else None
+            ),
+            literal=literal,
+        )
+
+
+def _needs_space(a: str, b: str) -> bool:
+    """Minimal spacing rule when re-joining tokens into a type spelling: keep
+    identifiers/keywords apart (``const int``) but hug punctuation (``int*``,
+    ``Pair<int,char>``)."""
+    def wordish(s: str) -> bool:
+        return s[-1:].isalnum() or s[-1:] == "_"
+
+    return wordish(a) and (b[:1].isalnum() or b[:1] == "_")
 
 
 def _body_descent(
@@ -1158,6 +1507,18 @@ def _body_descent(
                             decl_path=_dpath,
                             is_instantiation=_is_inst_member,
                         )
+                        # Function/method template specialization: capture the
+                        # concrete template arguments. Free-function specs expose
+                        # them via the cursor API (`identity<int>`, incl. non-type
+                        # + nested args). METHOD specs return -1 there (libclang
+                        # gap), so fall back to the explicit `<...>` call tokens,
+                        # stored as-written with best-effort type ref_id linking.
+                        if _is_inst_member and dst_id is not None:
+                            _wrote = _index_cursor_template_args(db, dst_id, ref)
+                            if _wrote == 0 and ref.kind == cx.CursorKind.CXX_METHOD:
+                                _index_method_template_args_from_tokens(
+                                    db, dst_id, child, ref.spelling
+                                )
                     if dst_id is not None:
                         edge_id = db.add_edge(src_id, dst_id, 1)  # calls
                         loc = child.location
@@ -1634,8 +1995,11 @@ def _mint_instance_from_type(db: Storage, type_obj: Optional[cx.Type]) -> None:
                 rsym = db.lookup_symbol(ref_usr)
                 if rsym is not None:
                     ref_id = rsym.id
+        literal = arg_type.spelling or None
+        if ref_id is None:
+            ref_id = _resolve_template_arg_ref_id(db, literal)
         db.add_template_arg(
-            inst_id, ai, 1, ref_id=ref_id, literal=arg_type.spelling or None
+            inst_id, ai, 1, ref_id=ref_id, literal=literal
         )
 
 
@@ -2161,6 +2525,7 @@ def _index_edges_notxn(
                     arg_type = cursor.get_template_argument_type(ai)
                     arg_decl = arg_type.get_declaration()
                     ref_id: Optional[int] = None
+                    literal = arg_type.spelling or None
                     if (
                         arg_decl is not None
                         and arg_decl.kind != cx.CursorKind.NO_DECL_FOUND
@@ -2170,12 +2535,14 @@ def _index_edges_notxn(
                             rsym = db.lookup_symbol(ref_usr)
                             if rsym is not None:
                                 ref_id = rsym.id
+                    if ref_id is None:
+                        ref_id = _resolve_template_arg_ref_id(db, literal, cursor)
                     db.add_template_arg(
                         spec_sym.id,
                         ai,
                         1,
                         ref_id=ref_id,
-                        literal=arg_type.spelling or None,
+                        literal=literal,
                     )
                 elif tak == cx.TemplateArgumentKind.INTEGRAL:
                     literal = str(cursor.get_template_argument_value(ai))
