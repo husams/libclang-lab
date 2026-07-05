@@ -86,6 +86,22 @@ bool is_function_like(CXCursorKind kind) {
          kind == CXCursor_FunctionTemplate;
 }
 
+// Body-scoped named type declarations that ARE indexed as symbols even though
+// they live inside a function/method body (or a local record within one) --
+// mirrors ast.py:_LOCAL_SYMBOL_KINDS. Local VARIABLES are absent: they are
+// reference-site sources only (index_edges body descent), not symbols. C++
+// forbids block-scope templates and local-class static data members, so no
+// template/variable kinds belong here. Every kind here is also a kind_name()
+// key, so to_symbol maps it without special-casing.
+bool is_local_symbol_kind(CXCursorKind kind) {
+  return kind == CXCursor_TypedefDecl || kind == CXCursor_TypeAliasDecl ||
+         kind == CXCursor_EnumDecl || kind == CXCursor_EnumConstantDecl ||
+         kind == CXCursor_StructDecl || kind == CXCursor_ClassDecl ||
+         kind == CXCursor_UnionDecl || kind == CXCursor_FieldDecl ||
+         kind == CXCursor_CXXMethod || kind == CXCursor_Constructor ||
+         kind == CXCursor_Destructor;
+}
+
 // Python's Cursor.from_result turns the null/invalid cursor into None; the
 // invalid-kind range is the C-API equivalent (cursor walks stop there).
 bool is_invalid_kind(CXCursorKind kind) {
@@ -488,6 +504,61 @@ CXChildVisitResult walk_visitor_p(CXCursor cursor, CXCursor parent,
   }
 }
 
+// Visitor context for for_body_local_symbols. Mirrors ast.py:_body_local_symbols
+// -- a depth-first walk of a function-like DEFINITION's subtree that streams
+// only body-scoped named type declarations. Callbacks into libclang are
+// noexcept (D23); the exception is stashed and rethrown by the caller.
+struct BodyLocalCtx {
+  LibClang *lib = nullptr;
+  const std::string *filename = nullptr;
+  const std::function<void(CXCursor)> *fn = nullptr;
+  std::exception_ptr error;
+};
+
+CXChildVisitResult body_local_visitor(CXCursor cursor, CXCursor /*parent*/,
+                                      CXClientData data) noexcept {
+  auto *ctx = static_cast<BodyLocalCtx *>(data);
+  try {
+    LibClang &lib = *ctx->lib;
+    const ExpansionLoc loc = cursor_location(lib, cursor);
+    if (loc.file == nullptr) {
+      return CXChildVisit_Continue;
+    }
+    CXString fname_cx = lib.clang_getFileName(loc.file);
+    CxString fname_raii(lib, fname_cx);
+    const char *raw = lib.clang_getCString(fname_cx);
+    if (raw == nullptr || std::strcmp(raw, ctx->filename->c_str()) != 0) {
+      return CXChildVisit_Continue; // cursor from another file: skip subtree
+    }
+    if (is_local_symbol_kind(lib.clang_getCursorKind(cursor))) {
+      (*ctx->fn)(cursor);
+    }
+    // Descend through EVERYTHING (mirrors ast.py's unconditional recursion), so
+    // a local class in the body and the local declarations inside ITS methods'
+    // bodies are all reached from one walk of the enclosing function.
+    return CXChildVisit_Recurse;
+  } catch (...) {
+    ctx->error = std::current_exception();
+    return CXChildVisit_Break;
+  }
+}
+
+// Walk a function-like DEFINITION's body, streaming its body-scoped named type
+// declarations to fn (ast.py:_body_local_symbols). Rethrows any error stashed
+// by the noexcept visitor.
+void for_body_local_symbols(CXCursor fn_cursor, const std::string &filename,
+                            const std::function<void(CXCursor)> &fn) {
+  LibClang &lib = LibClang::instance();
+  BodyLocalCtx ctx;
+  ctx.lib = &lib;
+  ctx.filename = &filename;
+  ctx.fn = &fn;
+  lib.clang_visitChildren(fn_cursor, &body_local_visitor, &ctx);
+  if (ctx.error) {
+    std::rethrow_exception(ctx.error);
+  }
+}
+
 // One transitive inclusion of the TU, copied out as plain data inside the
 // (noexcept) inclusion visitor. The CXFile handle stays valid for the TU's
 // lifetime and is only consulted while the ParsedTu is alive.
@@ -684,13 +755,33 @@ std::pair<int, int> AstIndexer::index_file_notxn(const ParsedTu &tu,
   int skipped = 0;
   for_file_cursors(tu, filename, [&](CXCursor cursor) {
     const std::optional<Symbol> sym = to_symbol(cursor, file_id);
-    if (!sym) {
-      return;
+    if (sym) {
+      if (store(*sym)) {
+        ++stored;
+      } else {
+        ++skipped;
+      }
     }
-    if (store(*sym)) {
-      ++stored;
-    } else {
-      ++skipped;
+    // for_file_cursors stops at function bodies, so body-scoped named type
+    // declarations (local using/typedef/enum/record + local-record members)
+    // are unreachable above. Descend into each function/method DEFINITION to
+    // pick them up (ast.py:_index_file_notxn). Definitions only -- a bare
+    // prototype has no body. Local variables are NOT emitted (they feed
+    // reference sites via index_edges, not the symbol table).
+    LibClang &lib = LibClang::instance();
+    const CXCursorKind ck = lib.clang_getCursorKind(cursor);
+    if (is_function_like(ck) && lib.clang_isCursorDefinition(cursor) != 0) {
+      for_body_local_symbols(cursor, filename, [&](CXCursor local) {
+        const std::optional<Symbol> lsym = to_symbol(local, file_id);
+        if (!lsym) {
+          return;
+        }
+        if (store(*lsym)) {
+          ++stored;
+        } else {
+          ++skipped;
+        }
+      });
     }
   });
   return {stored, skipped};

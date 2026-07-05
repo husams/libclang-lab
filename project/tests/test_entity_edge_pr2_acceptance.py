@@ -21,8 +21,8 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-seed-2    EDGE_KINDS / EDGE_NAMES in query.py include the 7 new ids
   pr1-fixture-1 Dashboard::refresh() method exists in pipeline.hpp (P1-FX)
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
-  version-1     Python VERSION == "0.48.0"  (specialized callable template args)
-  version-2     C++ kVersion == "0.48.0"
+  version-1     Python VERSION == "0.49.0"  (body-local type declarations indexed)
+  version-2     C++ kVersion == "0.49.0"
   version-3     C++ kSchemaVersion == 28
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
@@ -296,27 +296,27 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 # ---------------------------------------------------------------------------
 
 
-def test_python_version_is_0480():
-    """Python VERSION must be 0.48.0 (specialized callable template args)."""
+def test_python_version_is_0490():
+    """Python VERSION must be 0.49.0 (body-local type declarations indexed)."""
     cli_src = _read(_CLI_PY)
     match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
     assert match is not None, "VERSION not found in cli.py."
     version = match.group(1)
-    assert version == "0.48.0", (
-        f"Python VERSION is '{version}'; expected '0.48.0'. "
-        "Bump VERSION to 0.48.0 in cli.py (specialized callable template args)."
+    assert version == "0.49.0", (
+        f"Python VERSION is '{version}'; expected '0.49.0'. "
+        "Bump VERSION to 0.49.0 in cli.py (body-local type declarations indexed)."
     )
 
 
-def test_cpp_version_is_0480():
-    """C++ kVersion must be 0.48.0 (specialized callable template args)."""
+def test_cpp_version_is_0490():
+    """C++ kVersion must be 0.49.0 (body-local type declarations indexed)."""
     args_src = _read(_ARGS_HPP)
     match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
     assert match is not None, "kVersion not found in args.hpp."
     version = match.group(1)
-    assert version == "0.48.0", (
-        f"C++ kVersion is '{version}'; expected '0.48.0'. "
-        "Bump kVersion to 0.48.0 in args.hpp (specialized callable template args)."
+    assert version == "0.49.0", (
+        f"C++ kVersion is '{version}'; expected '0.49.0'. "
+        "Bump kVersion to 0.49.0 in args.hpp (body-local type declarations indexed)."
     )
 
 

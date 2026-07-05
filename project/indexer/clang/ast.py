@@ -160,6 +160,31 @@ _FUNCTION_KINDS: frozenset[cx.CursorKind] = frozenset(
     }
 )
 
+#: Body-scoped named declarations that ARE indexed as symbols even though they
+#: live inside a function/method body (or a local record within one). The
+#: file-cursor walk prunes function bodies, so these would otherwise be lost --
+#: a `using`/`typedef`/local `enum`/local record and, for a local record, its
+#: fields and methods. Local VARIABLES are deliberately absent: they are
+#: reference-site sources only (index_edges body descent), not symbols. C++
+#: forbids block-scope templates and local-class static data members, so no
+#: template/variable kinds belong here. Every kind here is also a `_KIND_MAP`
+#: key, so `_to_symbol` maps it without special-casing.
+_LOCAL_SYMBOL_KINDS: frozenset[cx.CursorKind] = frozenset(
+    {
+        cx.CursorKind.TYPEDEF_DECL,
+        cx.CursorKind.TYPE_ALIAS_DECL,
+        cx.CursorKind.ENUM_DECL,
+        cx.CursorKind.ENUM_CONSTANT_DECL,
+        cx.CursorKind.STRUCT_DECL,
+        cx.CursorKind.CLASS_DECL,
+        cx.CursorKind.UNION_DECL,
+        cx.CursorKind.FIELD_DECL,
+        cx.CursorKind.CXX_METHOD,
+        cx.CursorKind.CONSTRUCTOR,
+        cx.CursorKind.DESTRUCTOR,
+    }
+)
+
 
 def _file_cursors(tu: cx.TranslationUnit, filename: str) -> Iterator[cx.Cursor]:
     """Pre-order walk yielding only cursors located in `filename`."""
@@ -174,6 +199,34 @@ def _file_cursors(tu: cx.TranslationUnit, filename: str) -> Iterator[cx.Cursor]:
                 yield from walk(child)
 
     yield from walk(tu.cursor)
+
+
+def _body_local_symbols(fn_cursor: cx.Cursor, filename: str) -> Iterator[cx.Cursor]:
+    """Yield body-scoped named type declarations under a function-like cursor.
+
+    `_file_cursors` prunes function bodies, so a local `using`/`typedef`, a
+    local `enum` (and its constants), a local record (and its fields/methods)
+    -- everything reachable only by entering a body -- is never seen by the
+    symbol pass. This walks the whole body subtree and yields exactly the
+    indexable local declarations (kinds in `_LOCAL_SYMBOL_KINDS`); statements,
+    expressions and local variables yield nothing. The descent is unconditional
+    (`yield from walk(child)` for every child), so a local class defined in the
+    body and the local declarations inside ITS methods' bodies are all reached
+    from one call on the enclosing function -- no separate pass per nested body.
+    Cursors from another file (macro/include expansion) prune their subtree,
+    mirroring `_file_cursors`.
+    """
+
+    def walk(cursor: cx.Cursor) -> Iterator[cx.Cursor]:
+        for child in cursor.get_children():
+            f = child.location.file
+            if f is None or f.name != filename:
+                continue  # cursor from another file: skip subtree
+            if child.kind in _LOCAL_SYMBOL_KINDS:
+                yield child
+            yield from walk(child)
+
+    yield from walk(fn_cursor)
 
 
 def _file_cursors_p(
@@ -328,16 +381,30 @@ def _index_file_notxn(
     definition) is counted as stored.
     """
     stored = skipped = 0
-    for cursor in _file_cursors(tu, filename):
-        sym = _to_symbol(cursor, file_id)
+
+    def _emit(cur: cx.Cursor) -> None:
+        nonlocal stored, skipped
+        sym = _to_symbol(cur, file_id)
         if sym is None:
-            continue
+            return
         existing = db.lookup_symbol(sym.usr)
         db.add_symbol(sym)
         if existing is not None and existing.resolved:
             skipped += 1
         else:
             stored += 1
+
+    for cursor in _file_cursors(tu, filename):
+        _emit(cursor)
+        # _file_cursors stops at function bodies, so body-scoped named type
+        # declarations (local using/typedef/enum/record + local-record members)
+        # are unreachable above. Descend into each function/method DEFINITION to
+        # pick them up. Definitions only -- a bare prototype has no body. Local
+        # variables are NOT emitted here (see _LOCAL_SYMBOL_KINDS); they feed
+        # reference sites via index_edges, not the symbol table.
+        if cursor.kind in _FUNCTION_DEF_KINDS and cursor.is_definition():
+            for local in _body_local_symbols(cursor, filename):
+                _emit(local)
     return stored, skipped
 
 
