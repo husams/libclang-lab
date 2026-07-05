@@ -1738,10 +1738,11 @@ def _emit_static_init_def_edges(
 ) -> None:
     """Record what a static member variable's INITIALIZER calls, per backend.
 
-    A variable has no function-body descent, so `int C::x = seed();` would
-    otherwise drop the `seed` dependency. Walk the initializer subtree and add a
-    def_edge (calls, kind 1) for every resolved call to an indexed symbol, keyed
-    to THIS backend's definition."""
+    A variable does not *call* anything; its initializer *depends on* (uses) the
+    functions it names. `int C::x = seed();` would otherwise drop the `seed`
+    dependency, so walk the initializer subtree and add a def_edge as a USE
+    (kind 7) -- NOT a call -- for every resolved function it references, keyed to
+    THIS backend's definition."""
     for node in var_cursor.walk_preorder():
         if node == var_cursor:
             continue
@@ -1752,7 +1753,28 @@ def _emit_static_init_def_edges(
                 if usr:
                     sym = db.lookup_symbol(usr)
                     if sym is not None:
-                        db.add_def_edge(def_id, sym.id, 1)  # calls
+                        db.add_def_edge(def_id, sym.id, 7)  # uses (not a call)
+
+
+def _static_var_init_text(cursor: cx.Cursor) -> Optional[str]:
+    """The initializer source text of a variable definition, per backend:
+    ``int C::x = seed_a();`` -> ``'seed_a()'``, ``= 5`` -> ``'5'``. Reads the
+    cursor's own extent from source and returns the text after the first ``=``
+    (brace-init / no-initializer -> None). Exact source slice so Python and C++
+    agree byte-for-byte."""
+    ext = cursor.extent
+    f = ext.start.file
+    if f is None:
+        return None
+    try:
+        with open(f.name, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    raw = data[ext.start.offset : ext.end.offset].decode("utf-8", "replace")
+    if "=" not in raw:
+        return None
+    return raw.split("=", 1)[1].strip().rstrip(";").strip() or None
 
 
 def _index_edges_notxn(
@@ -1869,6 +1891,7 @@ def _index_edges_notxn(
                             col=cursor.extent.start.column,
                             end_line=cursor.extent.end.line,
                             end_col=cursor.extent.end.column,
+                            init_text=_static_var_init_text(cursor),
                         )
                         _emit_static_init_def_edges(db, cursor, _v_def_id)
         elif ck in (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL):

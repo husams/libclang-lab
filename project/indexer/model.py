@@ -52,6 +52,7 @@ from .entity_graph import ClassKind
 from .query import (
     CallArg,
     CallerWithContext,
+    Definition,
     DispatchSite,
     Edge,
     File,
@@ -377,12 +378,17 @@ class CodeBase:
 
     # -- factory ------------------------------------------------------------- #
 
-    def wrap(self, sym: Optional[Sym]) -> "Optional[Entity]":
-        """Turn a low-level ``Sym`` into its concept-bearing :class:`Entity`."""
+    def wrap(
+        self, sym: Optional[Sym], defn: "Optional[Definition]" = None
+    ) -> "Optional[Entity]":
+        """Turn a low-level ``Sym`` into its concept-bearing :class:`Entity`. When
+        ``defn`` is given, the entity is bound to that ONE backend body -- its
+        ``location`` / ``callees`` / ``uses`` / ``initializer`` reflect that
+        backend (used by :meth:`Entity.definitions`)."""
         if sym is None:
             return None
         cls = _KIND_TO_CLASS.get(sym.kind, Entity)
-        return cls(sym, self)
+        return cls(sym, self, defn)
 
     def _wrap_all(self, syms: Iterable[Optional[Sym]]) -> "list[Entity]":
         out = []
@@ -743,9 +749,15 @@ class Entity:
     and ``references()``. ``self.sym`` is the escape hatch to the low-level value.
     """
 
-    def __init__(self, sym: Sym, cb: CodeBase):
+    def __init__(
+        self, sym: Sym, cb: CodeBase, defn: "Optional[Definition]" = None
+    ):
         self.sym = sym
         self._cb = cb
+        # v27/28: when set, this entity is BOUND to one backend body (a
+        # `definition` row) -- location/callees/uses/initializer are per-backend.
+        # None = the ordinary symbol-level entity. See definitions().
+        self._defn = defn
 
     # -- identity ------------------------------------------------------------ #
 
@@ -878,7 +890,13 @@ class Entity:
     def location(self) -> Location:
         """Best-known location (definition, else declaration). Carries the
         entity's extent end (``end_line``/``end_col``), so ``.location.span``
-        gives the ``file:line-end_line`` range that slices the whole entity."""
+        gives the ``file:line-end_line`` range that slices the whole entity.
+
+        When this entity is bound to a backend body (see :meth:`definitions`),
+        this is THAT backend's location (server1 vs server2)."""
+        if self._defn is not None:
+            d = self._defn
+            return Location(d.file, d.line, d.col, d.end_line, d.end_col)
         return Location(
             self.sym.file,
             self.sym.line,
@@ -937,6 +955,68 @@ class Entity:
         return [
             self._loc((s.file, s.line, s.col))
             for s in self._cb.graph.declaration_sites(self.sym, limit=limit)
+        ]
+
+    # -- multi-definition (per-backend redefinitions, v27) ------------------ #
+
+    @property
+    def is_redefined(self) -> bool:
+        """True when this entity has more than one definition -- the same symbol
+        reimplemented per backend (a library method left undefined, each server
+        providing its own body)."""
+        return self.sym.is_redefined
+
+    @property
+    def initializer(self) -> Optional[str]:
+        """For a (static member) VARIABLE bound to a backend body, its
+        initializer source text there: ``count`` in server1 -> ``'seed_a()'``,
+        server2 -> ``'seed_b()'`` (``= 5`` -> ``'5'``). None for functions,
+        uninitialized vars, or an unbound entity."""
+        return self._defn.init_text if self._defn is not None else None
+
+    def uses(self, limit: int = 500) -> "list[Entity]":
+        """Entities this one uses. When bound to a backend body, THAT body's own
+        uses (a variable's initializer dependencies -- ``seed_a`` vs ``seed_b``);
+        otherwise the symbol-level uses."""
+        if self._defn is not None:
+            return self._cb._wrap_all(
+                self._cb.graph.uses_of_definition(self._defn, limit=limit)
+            )
+        return self._cb._wrap_all(
+            self._cb.graph._peers(self.sym, ("uses",), "out", limit)
+        )
+
+    def definitions(self) -> "list[Entity]":
+        """Every backend body of this entity, each as a TYPED entity
+        (:class:`Method` / :class:`Variable` / ...) **bound to that backend** --
+        several when :attr:`is_redefined`, one otherwise. On each, ``.location``,
+        ``.callees()``, ``.uses()``, ``.initializer`` reflect that backend, so
+        server1's body is told apart from server2's."""
+        return [
+            e
+            for d in self._cb.graph.definitions(self.sym)
+            if (e := self._cb.wrap(d.sym, defn=d)) is not None
+        ]
+
+    def possible_callees(self) -> "list[Entity]":
+        """The candidate target bodies a call through this entity may reach at
+        run time: for every redefined callee, each of its backend bodies (the
+        v27 ``possible_call`` fan-out), as backend-bound typed entities."""
+        return [
+            e
+            for d in self._cb.graph.possible_callees(self.sym)
+            if (e := self._cb.wrap(d.sym, defn=d)) is not None
+        ]
+
+    def referencing_definitions(self) -> "list[Entity]":
+        """The backend BODIES whose own calls/uses target this entity -- the
+        per-backend "who references me" (reverse of a body's :meth:`callees` /
+        :meth:`uses`). E.g. ``helper_b.referencing_definitions()`` ->
+        [Server2's ``Context::reg`` body]. Backend-bound typed entities."""
+        return [
+            e
+            for d in self._cb.graph.referencing_definitions(self.sym)
+            if (e := self._cb.wrap(d.sym, defn=d)) is not None
         ]
 
     # -- escape / serialization --------------------------------------------- #
@@ -1488,7 +1568,15 @@ class Callable(Entity):
         opt-in path (rolled-up callee sets span multiple instantiation bodies).
 
         See :meth:`callers` for a description of the
-        :class:`CallerWithContextModel` fields."""
+        :class:`CallerWithContextModel` fields.
+
+        When bound to a backend body (see :meth:`Entity.definitions`), returns
+        THAT body's own calls (server1's ``helper_a`` vs server2's ``helper_b``)
+        -- the per-backend view."""
+        if self._defn is not None:
+            return self._cb._wrap_all(
+                self._cb.graph.callees_of_definition(self._defn, limit=limit)
+            )
         if include_instantiations:
             return self._cb._wrap_cwc(
                 self._cb.graph.callees(

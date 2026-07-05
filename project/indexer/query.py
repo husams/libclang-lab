@@ -472,6 +472,12 @@ class Definition:
     col: Optional[int]
     end_line: Optional[int] = None
     end_col: Optional[int] = None
+    init_text: Optional[str] = None  # v28: a (static member) variable's
+    # initializer source text for THIS backend (`= seed_a()` -> 'seed_a()'); None
+    # for functions and uninitialized variables.
+    def_id: int = -1  # `definition` row id -- the handle for this body's own
+    # per-backend call/use edges (GraphQuery.callees_of_definition). NOT in
+    # to_dict (keeps the JSON view byte-identical to the C++ port).
 
     @property
     def loc(self) -> str:
@@ -490,6 +496,7 @@ class Definition:
             "col": self.col,
             "end_line": self.end_line,
             "end_col": self.end_col,
+            "init_text": self.init_text,
         }
 
 
@@ -1886,6 +1893,7 @@ class GraphQuery:
             if sym is None:
                 continue
             path, comp = files.get(r["file_id"], (None, None))
+            keys = r.keys()
             out.append(
                 Definition(
                     sym=sym,
@@ -1895,6 +1903,8 @@ class GraphQuery:
                     col=r["col"],
                     end_line=r["end_line"],
                     end_col=r["end_col"],
+                    init_text=r["init_text"] if "init_text" in keys else None,
+                    def_id=r["def_id"] if "def_id" in keys else -1,
                 )
             )
         return out
@@ -1904,7 +1914,8 @@ class GraphQuery:
         normal symbol has one; a redefined one has several."""
         sid = self._resolve_id(sym)
         return self._definition_rows(
-            "SELECT symbol_id, file_id, line, col, end_line, end_col "
+            "SELECT id AS def_id, symbol_id, file_id, line, col, end_line, "
+            "       end_col, init_text "
             "FROM definition WHERE symbol_id = ? ORDER BY file_id, line",
             (sid,),
         )
@@ -1916,14 +1927,53 @@ class GraphQuery:
         "possible call" fan-out -- e.g. ``do()`` -> {Server1::reg, Server2::reg}."""
         sid = self._resolve_id(sym)
         return self._definition_rows(
-            "SELECT td.symbol_id AS symbol_id, td.file_id AS file_id, "
+            "SELECT td.id AS def_id, td.symbol_id AS symbol_id, "
+            "       td.file_id AS file_id, "
             "       td.line AS line, td.col AS col, "
-            "       td.end_line AS end_line, td.end_col AS end_col "
+            "       td.end_line AS end_line, td.end_col AS end_col, "
+            "       td.init_text AS init_text "
             "FROM possible_call pc "
             "JOIN definition sd ON sd.id = pc.src_def_id "
             "JOIN definition td ON td.id = pc.dst_def_id "
             "WHERE sd.symbol_id = ? ORDER BY td.symbol_id, td.file_id",
             (sid,),
+        )
+
+    def _definition_edge_syms(self, definition, kind: int, limit: int) -> list[Sym]:
+        """dst symbols of this ONE body's def_edge rows of `kind` (1 calls / 7 uses)."""
+        def_id = definition.def_id if isinstance(definition, Definition) else int(definition)
+        rows = self._c.execute(
+            f"SELECT {_SYM_COLS} FROM def_edge de JOIN symbol s ON s.id = de.dst_id "
+            "WHERE de.src_def_id = ? AND de.kind = ? "
+            "ORDER BY s.qual_name, s.spelling LIMIT ?",
+            (def_id, kind, limit),
+        ).fetchall()
+        return [self._sym(r) for r in rows]
+
+    def callees_of_definition(self, definition, limit: int = 500) -> list[Sym]:
+        """What THIS backend body calls -- its own outgoing calls (def_edge kind 1),
+        separate from any other backend's body. Pass a Definition (from
+        definitions()) or a raw definition-row id."""
+        return self._definition_edge_syms(definition, 1, limit)
+
+    def uses_of_definition(self, definition, limit: int = 500) -> list[Sym]:
+        """What THIS backend body uses (def_edge kind 7)."""
+        return self._definition_edge_syms(definition, 7, limit)
+
+    def referencing_definitions(self, sym, limit: int = 500) -> list[Definition]:
+        """The backend BODIES whose own calls/uses target `sym` -- the
+        per-backend "who references me" (reverse of callees_of_definition). E.g.
+        ``helper_b`` -> [Server2's ``Context::reg`` body]. Distinct from the
+        symbol-level references() (which is the same for every backend)."""
+        sid = self._resolve_id(sym)
+        return self._definition_rows(
+            "SELECT DISTINCT d.id AS def_id, d.symbol_id AS symbol_id, "
+            "       d.file_id AS file_id, d.line AS line, d.col AS col, "
+            "       d.end_line AS end_line, d.end_col AS end_col, "
+            "       d.init_text AS init_text "
+            "FROM def_edge de JOIN definition d ON d.id = de.src_def_id "
+            "WHERE de.dst_id = ? ORDER BY d.symbol_id, d.file_id LIMIT ?",
+            (sid, limit),
         )
 
     # ===================================================================== #
