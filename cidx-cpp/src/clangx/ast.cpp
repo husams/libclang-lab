@@ -1459,12 +1459,20 @@ void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
       inst_dl.path, /*is_instantiation=*/true, /*is_named_instance=*/true);
 
   const RefDeclLoc prim_dl = ref_decl_loc(lib, db, primary);
+  // Mirror ast.py:2096 -- `_KIND_MAP.get(primary.kind, "class-template")`: the
+  // primary of a class-template instantiation defaults to "class-template", NOT
+  // stub_kind()'s generic "function" fallback.  This matters when `primary` is a
+  // CLASS_TEMPLATE_PARTIAL_SPECIALIZATION cursor (an instantiation that matches a
+  // partial spec), whose kind has no kind_name() entry -- otherwise C++ stored
+  // the stub as "function" while Python stored "class-template" (parity break).
+  const char *prim_kn = kind_name(lib.clang_getCursorKind(primary));
+  const std::string prim_kind =
+      prim_kn != nullptr ? std::string(prim_kn) : std::string("class-template");
   const int64_t prim_id = db.mint_symbol_id(
       prim_usr, CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
       qualified_name(lib, primary),
-      CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
-      stub_kind(lib, primary), prim_dl.file_id, prim_dl.line, prim_dl.col,
-      prim_dl.path);
+      CxString(lib, lib.clang_getCursorDisplayName(primary)).str(), prim_kind,
+      prim_dl.file_id, prim_dl.line, prim_dl.col, prim_dl.path);
   Edge e;
   e.src_id = inst_id;
   e.dst_id = prim_id;
@@ -2972,10 +2980,17 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // Derived class is the enclosing record from the walk parent, NOT from
     // semantic_parent (which is NULL — spec §1.4 gotcha).
     if (ck == CXCursor_CXXBaseSpecifier) {
-      // walk_parent is the CLASS_DECL / STRUCT_DECL cursor that contains this
-      // base-specifier; its USR is the derived class.
+      // walk_parent is the record cursor that contains this base-specifier; its
+      // USR is the derived class.  That record can be a plain CLASS/STRUCT_DECL
+      // OR a class template / its partial specialization -- libclang emits the
+      // CXX_BASE_SPECIFIER as a direct child of the CLASS_TEMPLATE cursor.
+      // Missing the template kinds here dropped `inherits` edges for every
+      // class template with a concrete (non-dependent) base
+      // (e.g. `template <class T> class D : public Base`).
       const CXCursorKind pk = lib.clang_getCursorKind(walk_parent);
-      if (pk != CXCursor_ClassDecl && pk != CXCursor_StructDecl) {
+      if (pk != CXCursor_ClassDecl && pk != CXCursor_StructDecl &&
+          pk != CXCursor_ClassTemplate &&
+          pk != CXCursor_ClassTemplatePartialSpecialization) {
         return; // unexpected parent; skip
       }
       const std::string derived_usr =
@@ -2992,9 +3007,31 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       if (base_usr.empty()) {
         return;
       }
+      // A CLASS_TEMPLATE_PARTIAL_SPECIALIZATION is not indexed by index_symbols
+      // (its cursor kind is not a top-level SYMBOL kind) and may only be minted
+      // later in this same edge pass (named-instance / instantiates path), so
+      // lookup can miss it here.  Mint it now -- symmetric with the base (dst)
+      // mint below -- so the `inherits` edge is recorded regardless of ordering.
+      // mint_symbol_id upserts by USR, so a later mint of the same partial spec
+      // is a no-op merge.  kind_name() has every other accepted parent kind, so
+      // the "class-template" default only ever applies to the partial spec.
       const auto src_sym = db_.lookup_symbol(derived_usr);
-      if (!src_sym) {
-        return;
+      int64_t src_id = 0;
+      if (src_sym) {
+        src_id = src_sym->id;
+      } else {
+        const RefDeclLoc derived_dl = ref_decl_loc(lib, db_, walk_parent);
+        const char *derived_kn = kind_name(lib.clang_getCursorKind(walk_parent));
+        const std::string derived_kind = derived_kn != nullptr
+                                             ? std::string(derived_kn)
+                                             : std::string("class-template");
+        src_id = db_.mint_symbol_id(
+            derived_usr,
+            CxString(lib, lib.clang_getCursorSpelling(walk_parent)).str(),
+            qualified_name(lib, walk_parent),
+            CxString(lib, lib.clang_getCursorDisplayName(walk_parent)).str(),
+            derived_kind, derived_dl.file_id, derived_dl.line, derived_dl.col,
+            derived_dl.path);
       }
       const RefDeclLoc base_dl = ref_decl_loc(lib, db_, base_ref);
       const int64_t dst_id = db_.mint_symbol_id(
@@ -3005,7 +3042,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
           stub_kind(lib, base_ref), base_dl.file_id, base_dl.line, base_dl.col,
           base_dl.path);
       Edge e;
-      e.src_id = src_sym->id;
+      e.src_id = src_id;
       e.dst_id = dst_id;
       e.kind = 2; // inherits
       e.count = 1;

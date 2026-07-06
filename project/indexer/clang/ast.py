@@ -2406,7 +2406,18 @@ def _index_edges_notxn(
         # from semantic_parent (which is NULL — spec §1.4 gotcha).
         if ck == cx.CursorKind.CXX_BASE_SPECIFIER:
             pk = walk_parent.kind
-            if pk not in (cx.CursorKind.CLASS_DECL, cx.CursorKind.STRUCT_DECL):
+            # A base specifier can hang off a plain record (CLASS/STRUCT_DECL)
+            # OR a class template / its partial specialization -- libclang emits
+            # the CXX_BASE_SPECIFIER as a direct child of the CLASS_TEMPLATE
+            # cursor.  Missing the template kinds here dropped `inherits` edges
+            # for every class template with a concrete (non-dependent) base
+            # (e.g. `template <class T> class D : public Base`).
+            if pk not in (
+                cx.CursorKind.CLASS_DECL,
+                cx.CursorKind.STRUCT_DECL,
+                cx.CursorKind.CLASS_TEMPLATE,
+                cx.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+            ):
                 continue  # unexpected parent; skip
             derived_usr = walk_parent.get_usr()
             if not derived_usr:
@@ -2418,8 +2429,31 @@ def _index_edges_notxn(
             if not base_usr:
                 continue
             src_sym = db.lookup_symbol(derived_usr)
-            if src_sym is None:
-                continue
+            if src_sym is not None:
+                src_id = src_sym.id
+            else:
+                # A CLASS_TEMPLATE_PARTIAL_SPECIALIZATION is not indexed by
+                # index_symbols (its cursor kind is not a top-level SYMBOL kind),
+                # and may only be minted later in this same edge pass (via the
+                # named-instance / instantiates path), so lookup can miss it here.
+                # Mint it now -- symmetric with how the base (dst) is minted just
+                # below -- so the `inherits` edge is recorded regardless of pass
+                # ordering.  mint_symbol_id upserts by USR, so a later mint of the
+                # same partial spec is a no-op merge.  _KIND_MAP has every other
+                # accepted parent kind, so the "class-template" default only ever
+                # applies to the partial specialization.
+                _sfid, _sln, _scol, _spath = _ref_decl_loc(db, walk_parent)
+                src_id = db.mint_symbol_id(
+                    derived_usr,
+                    walk_parent.spelling,
+                    _qualified_name(walk_parent),
+                    walk_parent.displayname,
+                    _KIND_MAP.get(walk_parent.kind, "class-template"),
+                    decl_file_id=_sfid,
+                    decl_line=_sln,
+                    decl_col=_scol,
+                    decl_path=_spath,
+                )
             _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, ref)
             dst_id = db.mint_symbol_id(
                 base_usr,
@@ -2440,7 +2474,7 @@ def _index_edges_notxn(
             base_access: Optional[int] = acc_map.get(cursor.access_specifier)
             is_virtual: Optional[int] = 1 if _lib.clang_isVirtualBase(cursor) else 0
             db.add_edge(
-                src_sym.id,
+                src_id,
                 dst_id,
                 2,  # inherits
                 base_access=base_access,
