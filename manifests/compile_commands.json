@@ -10,6 +10,11 @@
     "file": "geometry.cpp"
   },
   {
+    "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests",
+    "command": "c++ -std=c++17 -I. -c template_inherit.cpp -o template_inherit.o",
+    "file": "template_inherit.cpp"
+  },
+  {
     "directory": "/Users/husam/workspace/qemu-vms/libclang-lab/manifests/graphlab",
     "command": "c++ -std=c++17 -I. -c UseCache.cpp -o UseCache.o",
     "file": "UseCache.cpp"
