@@ -104,6 +104,18 @@ set_tests_properties(ast_clang_test PROPERTIES
   LABELS "clang"
   SKIP_RETURN_CODE 77)
 
+# --- astgraph_test — per-TU AST->SQLite graph dumper (src/astgraph/) ----------
+# Every case performs a real parse on temp-dir sources: single "clang"
+# registration, SKIP-77 when no libclang loads.
+add_executable(astgraph_test astgraph_test.cpp)
+target_compile_options(astgraph_test PRIVATE -Wall -Wextra)
+target_link_libraries(astgraph_test PRIVATE cidx_core)
+
+add_test(NAME astgraph_clang_test COMMAND astgraph_test --test-suite=clang)
+set_tests_properties(astgraph_clang_test PROPERTIES
+  LABELS "clang"
+  SKIP_RETURN_CODE 77)
+
 # --- S07: cli_test — one exe, two ctest registrations -------------------------
 # Args-grammar, format, add-source, and query-golden cases are hermetic
 # ("default" label); the cmd_import cases need CompileDb::load
