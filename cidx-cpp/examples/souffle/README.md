@@ -27,6 +27,7 @@ C++ dump (`manifests/geometry.cpp`).
 | `05_oop.dl` | C++: direct + transitive class hierarchy (CXX_BASE_SPECIFIER→references), methods per class via `semantic_parent` (finds out-of-line definitions), override pairs + leaf overriders, who-constructs-what, template `specializes` links |
 | `06_metrics.dl` | aggregation: AST body size, param count, fan-in/out, branchiness (if/switch/loops), line span — pipe through `sort -t$'\t' -k2 -nr` for rankings |
 | `07_writeback.dl` | **materialize** `calls`/`reach` back into `ast.db` via `.output IO=sqlite`, then consume with plain SQL: reason once, query cheap forever |
+| `08_dataflow.dl` | flow-insensitive **value flow**: initialization, argument→parameter binding (rank-computed ordinals), return values; transitive `influences` closure + a taint-style `parameter_influence` query. Plain `a = b` assignments are NOT tracked — the dump has no binary-operator opcodes (candidate schema v3 field) |
 
 ## Cheat sheet
 
