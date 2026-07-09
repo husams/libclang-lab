@@ -6,16 +6,16 @@
 #include "ast_prelude.dl"
 
 // Record definitions (class/struct), including class templates.
-.decl klass(id:number, name:symbol)
-klass(id, n) :- node(id, ClassDecl,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
-klass(id, n) :- node(id, StructDecl,     _, _, n, _, _, _, _, _, 1, _, _, _, _).
-klass(id, n) :- node(id, ClassTemplate, _, _, n, _, _, _, _, _, 1, _, _, _, _).
+.decl class_definition(id:number, name:symbol)
+class_definition(id, n) :- node(id, ClassDecl,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
+class_definition(id, n) :- node(id, StructDecl,     _, _, n, _, _, _, _, _, 1, _, _, _, _).
+class_definition(id, n) :- node(id, ClassTemplate, _, _, n, _, _, _, _, _, 1, _, _, _, _).
 
 // DIRECT inheritance: a CXX_BASE_SPECIFIER child whose `references` edge
 // resolves the base class.
 .decl derives(derived:symbol, base:symbol)
 derives(dn, bn) :-
-    klass(d, dn), edge(d, bs, Child, _),
+    class_definition(d, dn), edge(d, bs, Child, _),
     node(bs, CXXBaseSpecifier, _, _, _, _, _, _, _, _, _, _, _, _, _),
     edge(bs, b, References, _),
     node(b, _, _, _, bn, _, _, _, _, _, _, _, _, _, _).
@@ -30,7 +30,7 @@ ancestor(d, b) :- derives(d, k), ancestor(k, b).
 .decl method_of(class:symbol, method:symbol, access:number)
 method_of(cn, mn, acc) :-
     node(m, CXXMethod, _, _, mn, _, _, _, _, _, _, acc, _, _, _),
-    edge(m, c, SemanticParent, _), klass(c, cn).
+    edge(m, c, SemanticParent, _), class_definition(c, cn).
 
 // Override pairs and the transitive override closure — "if I change the
 // base virtual, which implementations are involved?"
@@ -55,7 +55,7 @@ leaf_override(cn, mn) :-
 // Who constructs which class (CALL_EXPR resolving to a CONSTRUCTOR).
 .decl constructs(f:symbol, class:symbol, line:number)
 constructs(fn, cn, ln) :-
-    direct_call(f, ctor, ln), fn_def(f, fn),
+    direct_call(f, ctor, ln), function_definition(f, fn),
     node(ctor, Constructor, _, _, cn, _, _, _, _, _, _, _, _, _, _).
 
 // Template specializations/instantiation links present in the dump.

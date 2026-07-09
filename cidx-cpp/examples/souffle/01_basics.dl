@@ -6,17 +6,17 @@
 // Function definitions declared in the TU's MAIN file, with their location.
 .decl main_functions(name:symbol, line:number)
 main_functions(n, ln) :-
-    fn_def(id, n),
+    function_definition(id, n),
     node(id, _, _, _, _, fid, ln, _, _, _, _, _, _, _, _),
     file(fid, _, 1).
 
 // Every record (struct/class/union) DEFINED in the main file.
 .decl main_records(kind:symbol, name:symbol, line:number)
-main_records("struct", n, ln) :- rec(StructDecl, n, ln).
-main_records("class",  n, ln) :- rec(ClassDecl,  n, ln).
-main_records("union",  n, ln) :- rec(UnionDecl,  n, ln).
-.decl rec(k:number, name:symbol, line:number)
-rec(k, n, ln) :-
+main_records("struct", n, ln) :- record_definition(StructDecl, n, ln).
+main_records("class",  n, ln) :- record_definition(ClassDecl,  n, ln).
+main_records("union",  n, ln) :- record_definition(UnionDecl,  n, ln).
+.decl record_definition(k:number, name:symbol, line:number)
+record_definition(k, n, ln) :-
     node(_, k, _, _, n, fid, ln, _, _, _, 1, _, _, _, _),
     (k = StructDecl ; k = ClassDecl ; k = UnionDecl),
     file(fid, _, 1).

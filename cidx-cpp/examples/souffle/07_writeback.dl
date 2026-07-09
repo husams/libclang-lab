@@ -11,7 +11,7 @@
 
 .decl calls(caller:symbol, callee:symbol, line:number)
 calls(cn, en, ln) :-
-    direct_call(f, callee, ln), fn_def(f, cn),
+    direct_call(f, callee, ln), function_definition(f, cn),
     node(callee, _, _, _, en, _, _, _, _, _, _, _, _, _, _).
 
 .decl reach(caller:symbol, callee:symbol)

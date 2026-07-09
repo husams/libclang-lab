@@ -94,11 +94,11 @@ descendant(a, n) :- edge(a, n, Child, _).
 descendant(a, n) :- descendant(a, m), edge(m, n, Child, _).
 
 // Function-like DEFINITIONS (free functions, methods, ctors, dtors).
-.decl fn_def(id:number, name:symbol)
-fn_def(id, n) :- node(id, FunctionDecl,    _, _, n, _, _, _, _, _, 1, _, _, _, _).
-fn_def(id, n) :- node(id, CXXMethod,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
-fn_def(id, n) :- node(id, Constructor, _, _, n, _, _, _, _, _, 1, _, _, _, _).
-fn_def(id, n) :- node(id, Destructor,  _, _, n, _, _, _, _, _, 1, _, _, _, _).
+.decl function_definition(id:number, name:symbol)
+function_definition(id, n) :- node(id, FunctionDecl,    _, _, n, _, _, _, _, _, 1, _, _, _, _).
+function_definition(id, n) :- node(id, CXXMethod,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
+function_definition(id, n) :- node(id, Constructor, _, _, n, _, _, _, _, _, 1, _, _, _, _).
+function_definition(id, n) :- node(id, Destructor,  _, _, n, _, _, _, _, _, 1, _, _, _, _).
 
 // Type-space nodes, and reachability over the type graph (reflexive), i.e.
 // "type a mentions type b" through sugar, pointers, arrays, results, args,
@@ -106,15 +106,15 @@ fn_def(id, n) :- node(id, Destructor,  _, _, n, _, _, _, _, _, 1, _, _, _, _).
 .decl typenode(t:number)
 typenode(t) :- node(t, k, _, _, _, _, _, _, _, _, _, _, _, _, _), k >= 1000.
 
-.decl treach(a:number, b:number)
-treach(t, t) :- typenode(t).
-treach(a, b) :- treach(a, k), edge(k, b, CanonicalType, _).
-treach(a, b) :- treach(a, k), edge(k, b, Pointee, _).
-treach(a, b) :- treach(a, k), edge(k, b, ElementType, _).
-treach(a, b) :- treach(a, k), edge(k, b, ResultType, _).
-treach(a, b) :- treach(a, k), edge(k, b, ArgType, _).
-treach(a, b) :- treach(a, k), edge(k, b, NamedType, _).
-treach(a, b) :- treach(a, k), edge(k, b, TemplateArg, _).
+.decl type_reach(a:number, b:number)
+type_reach(t, t) :- typenode(t).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, CanonicalType, _).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, Pointee, _).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, ElementType, _).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, ResultType, _).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, ArgType, _).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, NamedType, _).
+type_reach(a, b) :- type_reach(a, k), edge(k, b, TemplateArg, _).
 
 // A declaration is referenced — directly, or through a sibling declaration
 // that its definition/canonical edges connect it to.
@@ -126,6 +126,6 @@ referenced(d) :- edge(_, p, References, _), edge(p, d, Canonical, _).
 // Direct call: a CALL_EXPR inside f's body, resolved via `references`.
 .decl direct_call(f:number, callee:number, line:number)
 direct_call(f, callee, ln) :-
-    fn_def(f, _), descendant(f, c),
+    function_definition(f, _), descendant(f, c),
     node(c, CallExpr, _, _, _, _, ln, _, _, _, _, _, _, _, _),
     edge(c, callee, References, _).
