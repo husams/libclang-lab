@@ -22,6 +22,7 @@ language** lowers to rules like these; a controlled-English **query language** l
 | `cidx.dl`        | example reasoning script (`#include "cidx_base.dl"` + `.output`s) — copy as a template |
 | `run.sh`         | create views + seed in place → run Soufflé (writes results into the same `index.db`) |
 | `query.sh`       | **per-symbol** front-end for the three canonical questions — **read-only SQL** (recursive CTEs over the existing `edge`/`entity_edge`), no Soufflé, no writes |
+| `astgraph_example.dl` | reasoning over a **`cidx-astgraph` per-TU dump** (`<TU>.db`, raw libclang AST — cursors, types, child/references/… edges) instead of the resolved index. No adapter views needed: astgraph writes NULL-free tables whose names match the `.decl`s. `cp <TU>.db ast.db && souffle astgraph_example.dl` |
 
 ## Run
 ```bash

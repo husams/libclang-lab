@@ -1,0 +1,51 @@
+// astgraph_example.dl — Datalog reasoning over a cidx-astgraph per-TU dump.
+//
+// Usage:
+//   cidx-astgraph <source>            # produces <source-name>.db
+//   cp <source-name>.db ast.db        # souffle dbnames are fixed strings
+//   souffle astgraph_example.dl
+//
+// The <TU>.db tables ARE the EDB — no adapter views needed: astgraph writes
+// NULL-free tables whose names/arities match the .decl blocks below.
+// Kind ids: node_kind.id = CXCursorKind (1..999) or 1000+CXTypeKind;
+// relation ids: 1=child 2=references 3=definition ... (see relation_kind).
+
+// ---- EDB: the astgraph tables, read in place --------------------------------
+.decl edge(src:number, dst:number, rel:number, pos:number)
+.input edge(IO=sqlite, dbname="ast.db")
+
+.decl node(id:number, kind_id:number, symbol_id:number, spelling:symbol,
+           file_id:number, line:number, col:number,
+           end_line:number, end_col:number, is_definition:number,
+           access:number, is_const:number, is_volatile:number,
+           is_restrict:number)
+.input node(IO=sqlite, dbname="ast.db")
+
+// ---- IDB: derived relations --------------------------------------------------
+// Structural containment closure (rel 1 = child).
+.decl descendant(anc:number, dec:number)
+descendant(a, b) :- edge(a, b, 1, _).
+descendant(a, b) :- edge(a, k, 1, _), descendant(k, b).
+
+// Function definitions (CXCursor_FunctionDecl = 8, CXCursor_CXXMethod = 21).
+.decl fn(id:number, name:symbol)
+fn(id, n) :- node(id, 8, _, n, _, _, _, _, _, 1, _, _, _, _).
+fn(id, n) :- node(id, 21, _, n, _, _, _, _, _, 1, _, _, _, _).
+
+// Direct calls, DERIVED from AST primitives alone: a CALL_EXPR (103) inside
+// a function body, resolved through its `references` edge (rel 2).
+.decl calls(caller:symbol, callee:symbol)
+calls(cn, en) :-
+    fn(f, cn),
+    descendant(f, c),
+    node(c, 103, _, _, _, _, _, _, _, _, _, _, _, _),
+    edge(c, target, 2, _),
+    node(target, _, _, en, _, _, _, _, _, _, _, _, _, _).
+
+// Transitive call reachability.
+.decl reach(a:symbol, b:symbol)
+reach(a, b) :- calls(a, b).
+reach(a, b) :- calls(a, k), reach(k, b).
+
+.output calls(IO=stdout)
+.output reach(IO=stdout)

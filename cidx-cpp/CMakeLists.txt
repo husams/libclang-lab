@@ -269,6 +269,7 @@ add_library(cidx_core STATIC
   src/cli/commands.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
+  src/astgraph/astgraph.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )
@@ -308,6 +309,23 @@ endif()
 # but misleading).
 if(NOT _cidx_libclang_static)
   set_target_properties(cidx PROPERTIES
+    BUILD_RPATH "${_cidx_libclang_dir}"
+    INSTALL_RPATH "${_cidx_libclang_dir}"
+    INSTALL_RPATH_USE_LINK_PATH ON
+  )
+endif()
+
+# cidx-astgraph: dump one TU's AST into <TU>.db for Soufflé/Datalog reasoning
+# (src/astgraph/). Shares cidx configuration: compile args come from the same
+# index.db, the parse goes through the same Toolchain/Parser as `cidx index`.
+add_executable(cidx-astgraph src/astgraph/main.cpp)
+target_compile_options(cidx-astgraph PRIVATE -Wall -Wextra)
+target_link_libraries(cidx-astgraph PRIVATE cidx_core)
+if(CIDX_STATIC AND NOT APPLE)
+  target_link_options(cidx-astgraph PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+if(NOT _cidx_libclang_static)
+  set_target_properties(cidx-astgraph PROPERTIES
     BUILD_RPATH "${_cidx_libclang_dir}"
     INSTALL_RPATH "${_cidx_libclang_dir}"
     INSTALL_RPATH_USE_LINK_PATH ON
