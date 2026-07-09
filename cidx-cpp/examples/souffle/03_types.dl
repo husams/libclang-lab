@@ -18,16 +18,16 @@ decl_type(n, t) :-
 // any other type.
 .decl touches_shape(f:symbol)
 touches_shape(fn) :-
-    fn_def(fid, fn), descendant(fid, n),
+    function_definition(fid, fn), descendant(fid, n),
     node(n, _, _, t, _, _, _, _, _, _, _, _, _, _, _), t != 0,
-    treach(t, s),
+    type_reach(t, s),
     node(s, RecordType, _, _, sp, _, _, _, _, _, _, _, _, _, _),
     match(".*Shape.*", sp).
 
 // Functions RETURNING a pointer: fn type -> result_type edge -> Pointer.
 .decl returns_pointer(f:symbol, ret:symbol)
 returns_pointer(fn, rt) :-
-    fn_def(fid, fn),
+    function_definition(fid, fn),
     node(fid, _, _, ft, _, _, _, _, _, _, _, _, _, _, _),
     edge(ft, r, ResultType, _),
     node(r, PointerType, _, _, rt, _, _, _, _, _, _, _, _, _, _).
@@ -35,12 +35,12 @@ returns_pointer(fn, rt) :-
 // Pointer depth of every pointer type (char** = 2, char* = 1 ...).
 .decl has_pointee(t:number)
 has_pointee(t) :- edge(t, _, Pointee, _).
-.decl pdepth(t:number, d:number)
-pdepth(t, 0) :- typenode(t), !has_pointee(t).
-pdepth(t, d + 1) :- edge(t, p, Pointee, _), pdepth(p, d).
+.decl pointer_depth(t:number, d:number)
+pointer_depth(t, 0) :- typenode(t), !has_pointee(t).
+pointer_depth(t, d + 1) :- edge(t, p, Pointee, _), pointer_depth(p, d).
 .decl deep_pointers(type:symbol, depth:number)
 deep_pointers(sp, d) :-
-    pdepth(t, d), d >= 2,
+    pointer_depth(t, d), d >= 2,
     node(t, PointerType, _, _, sp, _, _, _, _, _, _, _, _, _, _).
 
 // De-sugar every typedef used in the main file: alias -> canonical spelling.
@@ -48,17 +48,17 @@ deep_pointers(sp, d) :-
 typedef_resolves(a, c) :-
     node(td, TypedefDecl, _, _, a, fid, _, _, _, _, _, _, _, _, _),
     file(fid, _, 1),
-    edge(td, u, UnderlyingType, _), treach(u, ct),
+    edge(td, u, UnderlyingType, _), type_reach(u, ct),
     node(ct, ck, _, _, c, _, _, _, _, _, _, _, _, _, _),
     ck >= 1000, ck != TypedefType, ck != ElaboratedType.
 
 // Const-qualified pointee parameters ("this function promises not to write
 // through the pointer") — uses the is_const column on type nodes.
-.decl readonly_ptr_param(f:symbol, param:symbol)
-readonly_ptr_param(fn, pn) :-
-    fn_def(fid, fn), descendant(fid, p),
+.decl readonly_pointer_param(f:symbol, param:symbol)
+readonly_pointer_param(fn, pn) :-
+    function_definition(fid, fn), descendant(fid, p),
     node(p, ParmDecl, _, pt, pn, _, _, _, _, _, _, _, _, _, _),
-    edge(pt, pointee, Pointee, _), treach(pointee, q),
+    edge(pt, pointee, Pointee, _), type_reach(pointee, q),
     node(q, _, _, _, _, _, _, _, _, _, _, _, 1, _, _).
 
 .output decl_type(IO=stdout)
@@ -66,4 +66,4 @@ readonly_ptr_param(fn, pn) :-
 .output returns_pointer(IO=stdout)
 .output deep_pointers(IO=stdout)
 .output typedef_resolves(IO=stdout)
-.output readonly_ptr_param(IO=stdout)
+.output readonly_pointer_param(IO=stdout)

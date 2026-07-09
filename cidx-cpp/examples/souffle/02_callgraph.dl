@@ -7,7 +7,7 @@
 // Name-level call edges (with the call site's line).
 .decl calls(caller:symbol, callee:symbol, line:number)
 calls(cn, en, ln) :-
-    direct_call(f, callee, ln), fn_def(f, cn),
+    direct_call(f, callee, ln), function_definition(f, cn),
     node(callee, _, _, _, en, _, _, _, _, _, _, _, _, _, _).
 
 // Transitive reachability — "if I change B, who is affected?"
@@ -31,11 +31,11 @@ recursive(f) :- reach(f, f).
 // Entry points: defined here, call others, but nothing in this TU calls them.
 .decl entry_point(f:symbol)
 entry_point(f) :-
-    fn_def(id, f), calls(f, _, _), !referenced(id).
+    function_definition(id, f), calls(f, _, _), !referenced(id).
 
 // Fan-out ranking material (sort with: sort -t'\t' -k2 -nr).
 .decl fan_out(f:symbol, n:number)
-fan_out(f, n) :- fn_def(_, f), n = count : { calls(f, _, _) }, n > 0.
+fan_out(f, n) :- function_definition(_, f), n = count : { calls(f, _, _) }, n > 0.
 
 .output calls(IO=stdout)
 .output reach(IO=stdout)
