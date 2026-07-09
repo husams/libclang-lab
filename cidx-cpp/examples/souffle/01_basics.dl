@@ -1,0 +1,39 @@
+// 01_basics.dl — first contact with a dump: what's in this TU?
+//
+//   cp <TU>.db ast.db && souffle 01_basics.dl
+#include "ast_prelude.dl"
+
+// Function definitions declared in the TU's MAIN file, with their location.
+.decl main_functions(name:symbol, line:number)
+main_functions(n, ln) :-
+    fn_def(id, n),
+    node(id, _, _, _, _, fid, ln, _, _, _, _, _, _, _, _),
+    file(fid, _, 1).
+
+// Every record (struct/class/union) DEFINED in the main file.
+.decl main_records(kind:symbol, name:symbol, line:number)
+main_records("struct", n, ln) :- rec(K_STRUCT, n, ln).
+main_records("class",  n, ln) :- rec(K_CLASS,  n, ln).
+main_records("union",  n, ln) :- rec(K_UNION,  n, ln).
+.decl rec(k:number, name:symbol, line:number)
+rec(k, n, ln) :-
+    node(_, k, _, _, n, fid, ln, _, _, _, 1, _, _, _, _),
+    (k = K_STRUCT ; k = K_CLASS ; k = K_UNION),
+    file(fid, _, 1).
+
+// Global variables (VAR_DECL directly under the TU root, node id 1) and
+// their type spelling — the node.type_id column in action.
+.decl globals(name:symbol, type:symbol)
+globals(n, t) :-
+    edge(1, v, R_CHILD, _),
+    node(v, K_VAR, _, tid, n, _, _, _, _, _, _, _, _, _, _),
+    node(tid, _, _, _, t, _, _, _, _, _, _, _, _, _, _).
+
+// Which headers did this TU pull in?
+.decl included_files(path:symbol)
+included_files(p) :- file(_, p, 0).
+
+.output main_functions(IO=stdout)
+.output main_records(IO=stdout)
+.output globals(IO=stdout)
+.output included_files(IO=stdout)

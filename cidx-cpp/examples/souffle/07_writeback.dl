@@ -1,0 +1,22 @@
+// 07_writeback.dl — MATERIALIZE derived relations back INTO ast.db so later
+// consumers (plain SQL, Python, another tool) just SELECT them — the
+// "reason once, query cheap forever" pattern from the cidx concept-DSL
+// design.  Writes create tables `calls` and `reach` in ast.db (plus
+// Soufflé's __SymbolTable); re-running replaces them.
+//
+//   cp <TU>.db ast.db && souffle 07_writeback.dl
+//   sqlite3 ast.db 'SELECT * FROM calls LIMIT 5;'
+//   sqlite3 ast.db "SELECT caller FROM reach WHERE callee='shape_area';"
+#include "ast_prelude.dl"
+
+.decl calls(caller:symbol, callee:symbol, line:number)
+calls(cn, en, ln) :-
+    direct_call(f, callee, ln), fn_def(f, cn),
+    node(callee, _, _, _, en, _, _, _, _, _, _, _, _, _, _).
+
+.decl reach(caller:symbol, callee:symbol)
+reach(a, b) :- calls(a, b, _).
+reach(a, b) :- calls(a, k, _), reach(k, b).
+
+.output calls(IO=sqlite, dbname="ast.db")
+.output reach(IO=sqlite, dbname="ast.db")

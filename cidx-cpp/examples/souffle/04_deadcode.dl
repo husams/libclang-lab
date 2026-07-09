@@ -1,0 +1,58 @@
+// 04_deadcode.dl — negation-driven checks: things DECLARED but never USED.
+// All verdicts are TU-scoped ("dead in this translation unit") — for
+// repo-wide truth, join the symbol's USR against cidx index.db.
+//
+//   cp <TU>.db ast.db && souffle 04_deadcode.dl
+#include "ast_prelude.dl"
+
+// Functions defined here that nothing in this TU references.
+.decl dead_function(f:symbol, line:number)
+dead_function(fn, ln) :-
+    fn_def(id, fn),
+    node(id, _, _, _, _, fid, ln, _, _, _, _, _, _, _, _),
+    file(fid, _, 1),
+    !referenced(id), fn != "main".
+
+// Parameters never read inside their function's body.
+.decl unused_param(f:symbol, param:symbol)
+unused_param(fn, pn) :-
+    fn_def(fid, fn), descendant(fid, p),
+    node(p, K_PARM, _, _, pn, _, _, _, _, _, _, _, _, _, _), pn != "",
+    !referenced(p).
+
+// Local/global variables never referenced after declaration.
+.decl unused_var(f:symbol, var:symbol, line:number)
+unused_var(fn, vn, ln) :-
+    fn_def(fid, fn), descendant(fid, v),
+    node(v, K_VAR, _, _, vn, _, ln, _, _, _, _, _, _, _, _), vn != "",
+    !referenced(v).
+
+// Typedefs declared in the main file that nothing uses: no TYPE_REF cursor
+// references them, and no cursor's type chain passes through their Typedef
+// type node.
+.decl typedef_used(td:number)
+typedef_used(td) :- referenced(td).
+typedef_used(td) :-
+    node(c, k, _, t, _, _, _, _, _, _, _, _, _, _, _), k < 1000, t != 0,
+    c != td, treach(t, u), edge(u, td, R_TYPE_DECL, _).
+.decl unused_typedef(name:symbol, line:number)
+unused_typedef(n, ln) :-
+    node(td, K_TYPEDEF, _, _, n, fid, ln, _, _, _, _, _, _, _, _),
+    file(fid, _, 1),
+    !typedef_used(td).
+
+// Prototypes with NO definition in this TU (extern API surface — or a
+// missing implementation).
+.decl has_def(p:number)
+has_def(p) :- edge(p, _, R_DEFINITION, _).
+.decl undefined_prototype(f:symbol, line:number)
+undefined_prototype(fn, ln) :-
+    node(p, K_FUNCTION, _, _, fn, fid, ln, _, _, _, 0, _, _, _, _),
+    file(fid, _, 1),
+    !has_def(p).
+
+.output dead_function(IO=stdout)
+.output unused_param(IO=stdout)
+.output unused_var(IO=stdout)
+.output unused_typedef(IO=stdout)
+.output undefined_prototype(IO=stdout)

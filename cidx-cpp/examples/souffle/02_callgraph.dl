@@ -1,0 +1,46 @@
+// 02_callgraph.dl — derive a call graph from AST primitives, then reason
+// over it: reachability, impact, recursion, entry points, fan-out ranking.
+//
+//   cp <TU>.db ast.db && souffle 02_callgraph.dl
+#include "ast_prelude.dl"
+
+// Name-level call edges (with the call site's line).
+.decl calls(caller:symbol, callee:symbol, line:number)
+calls(cn, en, ln) :-
+    direct_call(f, callee, ln), fn_def(f, cn),
+    node(callee, _, _, _, en, _, _, _, _, _, _, _, _, _, _).
+
+// Transitive reachability — "if I change B, who is affected?"
+.decl reach(a:symbol, b:symbol)
+reach(a, b) :- calls(a, b, _).
+reach(a, b) :- calls(a, k, _), reach(k, b).
+
+// IMPACT of one function: everything that can transitively reach it.
+// Change the name to the symbol you are probing.
+.decl impacted_by_shape_area(caller:symbol)
+impacted_by_shape_area(c) :- reach(c, "shape_area").
+
+// Direct + transitive callees of main — the program's live cone.
+.decl main_cone(callee:symbol)
+main_cone(c) :- reach("main", c).
+
+// (Mutually) recursive functions: they reach themselves.
+.decl recursive(f:symbol)
+recursive(f) :- reach(f, f).
+
+// Entry points: defined here, call others, but nothing in this TU calls them.
+.decl entry_point(f:symbol)
+entry_point(f) :-
+    fn_def(id, f), calls(f, _, _), !referenced(id).
+
+// Fan-out ranking material (sort with: sort -t'\t' -k2 -nr).
+.decl fan_out(f:symbol, n:number)
+fan_out(f, n) :- fn_def(_, f), n = count : { calls(f, _, _) }, n > 0.
+
+.output calls(IO=stdout)
+.output reach(IO=stdout)
+.output impacted_by_shape_area(IO=stdout)
+.output main_cone(IO=stdout)
+.output recursive(IO=stdout)
+.output entry_point(IO=stdout)
+.output fan_out(IO=stdout)

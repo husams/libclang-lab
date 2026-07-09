@@ -1,0 +1,57 @@
+// 06_metrics.dl — aggregation: size/complexity numbers per function.
+// Sort any output with e.g.:  souffle 06_metrics.dl | sort -t$'\t' -k2 -nr
+//
+//   cp <TU>.db ast.db && souffle 06_metrics.dl
+#include "ast_prelude.dl"
+
+// Main-file functions only (metrics over <vector> internals are noise).
+.decl main_fn(id:number, name:symbol)
+main_fn(id, n) :-
+    fn_def(id, n), node(id, _, _, _, _, fid, _, _, _, _, _, _, _, _, _),
+    file(fid, _, 1).
+
+// AST body size — a decent complexity proxy (counts every descendant node).
+.decl body_size(f:symbol, nodes:number)
+body_size(n, c) :- main_fn(id, n), c = count : { descendant(id, _) }.
+
+// Parameter count.
+.decl param_count(f:symbol, params:number)
+param_count(n, c) :-
+    main_fn(id, n),
+    c = count : { edge(id, p, R_CHILD, _),
+                  node(p, K_PARM, _, _, _, _, _, _, _, _, _, _, _, _, _) }.
+
+// Fan-out (distinct call SITES) and fan-in (times called in this TU).
+.decl fan_out(f:symbol, calls_out:number)
+fan_out(n, c) :- main_fn(id, n), c = count : { direct_call(id, _, _) }.
+
+.decl fan_in(f:symbol, called:number)
+fan_in(n, c) :-
+    main_fn(id, n), c = count : { edge(_, id, R_REFERENCES, _) }.
+
+// Branchiness: IF(205) / SWITCH(206) / WHILE(207) / DO(208) / FOR(209)
+// statements per function — a cyclomatic-complexity stand-in.  (Soufflé
+// forbids disjunction INSIDE an aggregate, so `branch` is hoisted out.)
+.decl branch(s:number)
+branch(s) :- node(s, 205, _, _, _, _, _, _, _, _, _, _, _, _, _).
+branch(s) :- node(s, 206, _, _, _, _, _, _, _, _, _, _, _, _, _).
+branch(s) :- node(s, 207, _, _, _, _, _, _, _, _, _, _, _, _, _).
+branch(s) :- node(s, 208, _, _, _, _, _, _, _, _, _, _, _, _, _).
+branch(s) :- node(s, 209, _, _, _, _, _, _, _, _, _, _, _, _, _).
+.decl branchiness(f:symbol, branches:number)
+branchiness(n, c) :-
+    main_fn(id, n),
+    c = count : { descendant(id, s), branch(s) }.
+
+// Widest function span in source lines.
+.decl line_span(f:symbol, lines:number)
+line_span(n, e - s + 1) :-
+    main_fn(id, n),
+    node(id, _, _, _, _, _, s, _, e, _, _, _, _, _, _), e >= s.
+
+.output body_size(IO=stdout)
+.output param_count(IO=stdout)
+.output fan_out(IO=stdout)
+.output fan_in(IO=stdout)
+.output branchiness(IO=stdout)
+.output line_span(IO=stdout)
