@@ -1,0 +1,74 @@
+// 05_oop.dl — C++ object model: class hierarchy, methods, overrides,
+// construction sites.  Run on a C++ dump (e.g. geometry.cpp.db).
+//
+//   cidx-astgraph manifests/geometry.cpp && cp geometry.cpp.db ast.db
+//   souffle 05_oop.dl
+#include "ast_prelude.dl"
+
+// Record definitions (class/struct), including class templates.
+.decl klass(id:number, name:symbol)
+klass(id, n) :- node(id, K_CLASS,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
+klass(id, n) :- node(id, K_STRUCT,     _, _, n, _, _, _, _, _, 1, _, _, _, _).
+klass(id, n) :- node(id, K_CLASS_TMPL, _, _, n, _, _, _, _, _, 1, _, _, _, _).
+
+// DIRECT inheritance: a CXX_BASE_SPECIFIER child whose `references` edge
+// resolves the base class.
+.decl derives(derived:symbol, base:symbol)
+derives(dn, bn) :-
+    klass(d, dn), edge(d, bs, R_CHILD, _),
+    node(bs, K_BASE_SPEC, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    edge(bs, b, R_REFERENCES, _),
+    node(b, _, _, _, bn, _, _, _, _, _, _, _, _, _, _).
+
+// Full ancestry (transitive).
+.decl ancestor(derived:symbol, base:symbol)
+ancestor(d, b) :- derives(d, b).
+ancestor(d, b) :- derives(d, k), ancestor(k, b).
+
+// Methods per class, via the semantic_parent edge (works for methods
+// DEFINED out-of-line too — lexical placement is irrelevant).
+.decl method_of(class:symbol, method:symbol, access:number)
+method_of(cn, mn, acc) :-
+    node(m, K_METHOD, _, _, mn, _, _, _, _, _, _, acc, _, _, _),
+    edge(m, c, R_SEM_PARENT, _), klass(c, cn).
+
+// Override pairs and the transitive override closure — "if I change the
+// base virtual, which implementations are involved?"
+.decl overrides(derived_m:symbol, in_class:symbol, base_m:symbol, of_class:symbol)
+overrides(mn, cn, bn, bcn) :-
+    edge(m, b, R_OVERRIDES, _),
+    node(m, _, _, _, mn, _, _, _, _, _, _, _, _, _, _),
+    node(b, _, _, _, bn, _, _, _, _, _, _, _, _, _, _),
+    edge(m, c, R_SEM_PARENT, _), node(c, _, _, _, cn, _, _, _, _, _, _, _, _, _, _),
+    edge(b, bc, R_SEM_PARENT, _), node(bc, _, _, _, bcn, _, _, _, _, _, _, _, _, _, _).
+
+// Leaf overriders: implementations nothing further overrides (the concrete
+// dispatch targets of a hierarchy).
+.decl overridden_by_someone(b:number)
+overridden_by_someone(b) :- edge(_, b, R_OVERRIDES, _).
+.decl leaf_override(class:symbol, method:symbol)
+leaf_override(cn, mn) :-
+    edge(m, _, R_OVERRIDES, _), !overridden_by_someone(m),
+    node(m, _, _, _, mn, _, _, _, _, _, _, _, _, _, _),
+    edge(m, c, R_SEM_PARENT, _), node(c, _, _, _, cn, _, _, _, _, _, _, _, _, _, _).
+
+// Who constructs which class (CALL_EXPR resolving to a CONSTRUCTOR).
+.decl constructs(f:symbol, class:symbol, line:number)
+constructs(fn, cn, ln) :-
+    direct_call(f, ctor, ln), fn_def(f, fn),
+    node(ctor, K_CONSTRUCTOR, _, _, cn, _, _, _, _, _, _, _, _, _, _).
+
+// Template specializations/instantiation links present in the dump.
+.decl specializes(what:symbol, template:symbol)
+specializes(sn, tn) :-
+    edge(s, t, R_SPECIALIZES, _),
+    node(s, _, _, _, sn, _, _, _, _, _, _, _, _, _, _),
+    node(t, _, _, _, tn, _, _, _, _, _, _, _, _, _, _), sn != "".
+
+.output derives(IO=stdout)
+.output ancestor(IO=stdout)
+.output method_of(IO=stdout)
+.output overrides(IO=stdout)
+.output leaf_override(IO=stdout)
+.output constructs(IO=stdout)
+.output specializes(IO=stdout)
