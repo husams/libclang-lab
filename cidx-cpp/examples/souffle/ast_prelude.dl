@@ -34,55 +34,55 @@
 // node_kind ids: 1..999 = CXCursorKind, 1000+k = CXTypeKind k.
 // ---------------------------------------------------------------------------
 // relations
-#define R_CHILD        1
-#define R_REFERENCES   2
-#define R_DEFINITION   3
-#define R_CANONICAL    4
-#define R_SEM_PARENT   5
-#define R_LEX_PARENT   6
-#define R_SPECIALIZES  7
-#define R_OVERRIDES    8
+#define Child                1
+#define References           2
+#define Definition           3
+#define Canonical            4
+#define SemanticParent       5
+#define LexicalParent        6
+#define Specializes          7
+#define Overrides            8
 /* 9 = has_type, retired in schema v2: the node.type_id column */
-#define R_TYPE_DECL    10
-#define R_CANON_TYPE   11
-#define R_POINTEE      12
-#define R_ELEMENT      13
-#define R_RESULT       14
-#define R_ARG          15
-#define R_NAMED        16
-#define R_UNDERLYING   17
-#define R_TARG         18
-#define R_CLASSTYPE    19
+#define TypeDecl             10
+#define CanonicalType        11
+#define Pointee              12
+#define ElementType          13
+#define ResultType           14
+#define ArgType              15
+#define NamedType            16
+#define UnderlyingType       17
+#define TemplateArg          18
+#define ClassType            19
 
 // cursor kinds (CXCursorKind)
-#define K_STRUCT       2
-#define K_UNION        3
-#define K_CLASS        4
-#define K_ENUM         5
-#define K_FIELD        6
-#define K_ENUM_CONST   7
-#define K_FUNCTION     8
-#define K_VAR          9
-#define K_PARM         10
-#define K_TYPEDEF      20
-#define K_METHOD       21
-#define K_NAMESPACE    22
-#define K_CONSTRUCTOR  24
-#define K_DESTRUCTOR   25
-#define K_CLASS_TMPL   31
-#define K_BASE_SPEC    44
-#define K_DECL_REF     101
-#define K_MEMBER_REF   102
-#define K_CALL         103
+#define StructDecl           2
+#define UnionDecl            3
+#define ClassDecl            4
+#define EnumDecl             5
+#define FieldDecl            6
+#define EnumConstantDecl     7
+#define FunctionDecl         8
+#define VarDecl              9
+#define ParmDecl             10
+#define TypedefDecl          20
+#define CXXMethod            21
+#define NamespaceDecl        22
+#define Constructor          24
+#define Destructor           25
+#define ClassTemplate        31
+#define CXXBaseSpecifier     44
+#define DeclRefExpr          101
+#define MemberRefExpr        102
+#define CallExpr             103
 
 // type kinds (1000 + CXTypeKind)
-#define T_POINTER      1101
-#define T_LVALUE_REF   1103
-#define T_RECORD       1105
-#define T_ENUM         1106
-#define T_TYPEDEF      1107
-#define T_FUNC_PROTO   1111
-#define T_ELABORATED   1119
+#define PointerType          1101
+#define LValueReferenceType  1103
+#define RecordType           1105
+#define EnumType             1106
+#define TypedefType          1107
+#define FunctionProtoType    1111
+#define ElaboratedType       1119
 
 // ---------------------------------------------------------------------------
 // Common closures / concepts (the reusable IDB layer)
@@ -90,15 +90,15 @@
 
 // Structural containment: everything inside a subtree (rel = child).
 .decl descendant(anc:number, n:number)
-descendant(a, n) :- edge(a, n, R_CHILD, _).
-descendant(a, n) :- descendant(a, m), edge(m, n, R_CHILD, _).
+descendant(a, n) :- edge(a, n, Child, _).
+descendant(a, n) :- descendant(a, m), edge(m, n, Child, _).
 
 // Function-like DEFINITIONS (free functions, methods, ctors, dtors).
 .decl fn_def(id:number, name:symbol)
-fn_def(id, n) :- node(id, K_FUNCTION,    _, _, n, _, _, _, _, _, 1, _, _, _, _).
-fn_def(id, n) :- node(id, K_METHOD,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
-fn_def(id, n) :- node(id, K_CONSTRUCTOR, _, _, n, _, _, _, _, _, 1, _, _, _, _).
-fn_def(id, n) :- node(id, K_DESTRUCTOR,  _, _, n, _, _, _, _, _, 1, _, _, _, _).
+fn_def(id, n) :- node(id, FunctionDecl,    _, _, n, _, _, _, _, _, 1, _, _, _, _).
+fn_def(id, n) :- node(id, CXXMethod,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
+fn_def(id, n) :- node(id, Constructor, _, _, n, _, _, _, _, _, 1, _, _, _, _).
+fn_def(id, n) :- node(id, Destructor,  _, _, n, _, _, _, _, _, 1, _, _, _, _).
 
 // Type-space nodes, and reachability over the type graph (reflexive), i.e.
 // "type a mentions type b" through sugar, pointers, arrays, results, args,
@@ -108,24 +108,24 @@ typenode(t) :- node(t, k, _, _, _, _, _, _, _, _, _, _, _, _, _), k >= 1000.
 
 .decl treach(a:number, b:number)
 treach(t, t) :- typenode(t).
-treach(a, b) :- treach(a, k), edge(k, b, R_CANON_TYPE, _).
-treach(a, b) :- treach(a, k), edge(k, b, R_POINTEE, _).
-treach(a, b) :- treach(a, k), edge(k, b, R_ELEMENT, _).
-treach(a, b) :- treach(a, k), edge(k, b, R_RESULT, _).
-treach(a, b) :- treach(a, k), edge(k, b, R_ARG, _).
-treach(a, b) :- treach(a, k), edge(k, b, R_NAMED, _).
-treach(a, b) :- treach(a, k), edge(k, b, R_TARG, _).
+treach(a, b) :- treach(a, k), edge(k, b, CanonicalType, _).
+treach(a, b) :- treach(a, k), edge(k, b, Pointee, _).
+treach(a, b) :- treach(a, k), edge(k, b, ElementType, _).
+treach(a, b) :- treach(a, k), edge(k, b, ResultType, _).
+treach(a, b) :- treach(a, k), edge(k, b, ArgType, _).
+treach(a, b) :- treach(a, k), edge(k, b, NamedType, _).
+treach(a, b) :- treach(a, k), edge(k, b, TemplateArg, _).
 
 // A declaration is referenced — directly, or through a sibling declaration
 // that its definition/canonical edges connect it to.
 .decl referenced(d:number)
-referenced(d) :- edge(_, d, R_REFERENCES, _).
-referenced(d) :- edge(_, p, R_REFERENCES, _), edge(p, d, R_DEFINITION, _).
-referenced(d) :- edge(_, p, R_REFERENCES, _), edge(p, d, R_CANONICAL, _).
+referenced(d) :- edge(_, d, References, _).
+referenced(d) :- edge(_, p, References, _), edge(p, d, Definition, _).
+referenced(d) :- edge(_, p, References, _), edge(p, d, Canonical, _).
 
 // Direct call: a CALL_EXPR inside f's body, resolved via `references`.
 .decl direct_call(f:number, callee:number, line:number)
 direct_call(f, callee, ln) :-
     fn_def(f, _), descendant(f, c),
-    node(c, K_CALL, _, _, _, _, ln, _, _, _, _, _, _, _, _),
-    edge(c, callee, R_REFERENCES, _).
+    node(c, CallExpr, _, _, _, _, ln, _, _, _, _, _, _, _, _),
+    edge(c, callee, References, _).

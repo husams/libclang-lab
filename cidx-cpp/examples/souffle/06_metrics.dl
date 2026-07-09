@@ -18,8 +18,8 @@ body_size(n, c) :- main_fn(id, n), c = count : { descendant(id, _) }.
 .decl param_count(f:symbol, params:number)
 param_count(n, c) :-
     main_fn(id, n),
-    c = count : { edge(id, p, R_CHILD, _),
-                  node(p, K_PARM, _, _, _, _, _, _, _, _, _, _, _, _, _) }.
+    c = count : { edge(id, p, Child, _),
+                  node(p, ParmDecl, _, _, _, _, _, _, _, _, _, _, _, _, _) }.
 
 // Fan-out (distinct call SITES) and fan-in (times called in this TU).
 .decl fan_out(f:symbol, calls_out:number)
@@ -27,7 +27,7 @@ fan_out(n, c) :- main_fn(id, n), c = count : { direct_call(id, _, _) }.
 
 .decl fan_in(f:symbol, called:number)
 fan_in(n, c) :-
-    main_fn(id, n), c = count : { edge(_, id, R_REFERENCES, _) }.
+    main_fn(id, n), c = count : { edge(_, id, References, _) }.
 
 // Branchiness: IF(205) / SWITCH(206) / WHILE(207) / DO(208) / FOR(209)
 // statements per function — a cyclomatic-complexity stand-in.  (Soufflé
