@@ -27,15 +27,20 @@ namespace cidx {
 namespace astgraph {
 
 // On-disk schema version of <TU>.db (meta key "schema_version").
-constexpr int kSchemaVersion = 1;
+// v2 (2026-07-09): node.type_id column added — a cursor's own type is a
+// PROPERTY of the node (mirroring clang_getCursorType being a cursor
+// accessor), not an edge; the has_type relation (old id 9) is retired.
+constexpr int kSchemaVersion = 2;
 
 // CXTypeKind k is stored in node_kind / node.kind_id as kTypeKindBase + k so
 // the two libclang enum spaces never collide (CXCursorKind tops out < 1000).
 constexpr int kTypeKindBase = 1000;
 
-// The fixed relation catalog.  1-8 relate cursor-nodes, 9 crosses cursor→type,
-// 10 crosses type→cursor, 11-19 relate type-nodes.  `ord` carries sibling /
-// argument / template-argument position where noted, else 0.
+// The fixed relation catalog.  1-8 relate cursor-nodes, 10 crosses
+// type→cursor, 11-19 relate type-nodes.  Id 9 (has_type) is RETIRED as of
+// schema v2: a cursor's own type is the `node.type_id` column, not an edge
+// (clang_getCursorType is a cursor property in the libclang API).  `ord`
+// carries sibling / argument / template-argument position where noted.
 enum RelKind : int {
   kRelChild = 1,          // structural AST containment (ord = child position)
   kRelReferences = 2,     // clang_getCursorReferenced
@@ -45,7 +50,7 @@ enum RelKind : int {
   kRelLexicalParent = 6,  // clang_getCursorLexicalParent (decls only)
   kRelSpecializes = 7,    // clang_getSpecializedCursorTemplate
   kRelOverrides = 8,      // clang_getOverriddenCursors (ord = list position)
-  kRelHasType = 9,        // clang_getCursorType (cursor -> type node)
+  // 9 = has_type, retired in schema v2 (see node.type_id)
   kRelTypeDecl = 10,      // clang_getTypeDeclaration (type -> cursor node)
   kRelCanonicalType = 11, // clang_getCanonicalType
   kRelPointee = 12,       // clang_getPointeeType

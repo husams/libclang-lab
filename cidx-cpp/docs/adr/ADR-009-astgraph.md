@@ -1,6 +1,6 @@
 # ADR-009 — cidx-astgraph: per-TU AST → SQLite graph for Soufflé reasoning
 
-Date: 2026-07-09 · Status: accepted · Version: cidx 0.51.0
+Date: 2026-07-09 · Status: accepted · Version: cidx 0.52.0 (schema v2)
 
 ## Context
 
@@ -21,7 +21,7 @@ run through the exact `cidx index` pipeline (`CompileDb::sanitize` →
 `resolve_options` → `Toolchain`/`Parser`). `--db PATH` overrides the index;
 `INDEXER_CACHE` is honoured via `resolve_cache_dir()`.
 
-### Schema (user-approved 2026-07-09, `meta.schema_version = 1`)
+### Schema (user-approved 2026-07-09, `meta.schema_version = 2`)
 
 **Unified node space** — cursors AND types are rows of `node`; every relation
 is a row of `edge`. All columns NOT NULL: `0`/`''` are the "none" sentinels
@@ -34,13 +34,14 @@ is a row of `edge`. All columns NOT NULL: `0`/`''` are the "none" sentinels
 | `node_kind` | id, name, category | **1..999 = CXCursorKind** (name = Python `CursorKind.name` via `cli::kind_name`, category = decl/ref/expr/stmt/attr/preproc/tu/other), **1000+k = CXTypeKind k** (name = `clang_getTypeKindSpelling`, category = `type`). Seeded on first use; the id scheme is the fixed catalog |
 | `relation_kind` | id, name | fixed 19-row catalog (below) |
 | `symbol` | id, usr UNIQUE, name, kind_id, linkage | deduped by USR; **joins `index.db` symbol.usr** |
-| `node` | id, kind_id, symbol_id, spelling, file_id, line, col, end_line, end_col, is_definition, access, is_const, is_volatile, is_restrict | one row per distinct cursor (clang_equalCursors) or type (kind,data0,data1); type nodes have no location/symbol |
+| `node` | id, kind_id, symbol_id, **type_id**, spelling, file_id, line, col, end_line, end_col, is_definition, access, is_const, is_volatile, is_restrict | one row per distinct cursor (clang_equalCursors) or type (kind,data0,data1); `type_id` = the cursor's own type as a node PROPERTY (schema v2 — mirrors `clang_getCursorType` being a cursor accessor); type nodes have no location/symbol/type_id |
 | `edge` | src_id, dst_id, rel_id, ord | UNIQUE(...) ON CONFLICT IGNORE; `ord` = child/arg/template-arg position |
 
 ### Fixed relation catalog (astgraph.hpp `RelKind`)
 
 1 child · 2 references · 3 definition · 4 canonical · 5 semantic_parent ·
-6 lexical_parent · 7 specializes · 8 overrides · 9 has_type (cursor→type) ·
+6 lexical_parent · 7 specializes · 8 overrides · *(9 has_type RETIRED in
+schema v2 — the cursor's type is the `node.type_id` column)* ·
 10 type_decl (type→cursor) · 11 canonical_type · 12 pointee · 13 element_type ·
 14 result_type · 15 arg_type · 16 named_type · 17 underlying_type ·
 18 template_arg · 19 class_type

@@ -74,6 +74,8 @@ CREATE TABLE node (
   id            INTEGER PRIMARY KEY,
   kind_id       INTEGER NOT NULL REFERENCES node_kind(id),
   symbol_id     INTEGER NOT NULL DEFAULT 0,  -- 0 = no USR
+  type_id       INTEGER NOT NULL DEFAULT 0,  -- clang_getCursorType (0 = none
+                                             -- or this row IS a type node)
   spelling      TEXT NOT NULL DEFAULT '',
   file_id       INTEGER NOT NULL DEFAULT 0,  -- 0 = no location (type nodes)
   line          INTEGER NOT NULL DEFAULT 0,
@@ -112,7 +114,6 @@ constexpr RelName kRelNames[] = {
     {kRelLexicalParent, "lexical_parent"},
     {kRelSpecializes, "specializes"},
     {kRelOverrides, "overrides"},
-    {kRelHasType, "has_type"},
     {kRelTypeDecl, "type_decl"},
     {kRelCanonicalType, "canonical_type"},
     {kRelPointee, "pointee"},
@@ -235,11 +236,14 @@ public:
     std::string usr = cxs(::clang_getCursorUSR(c));
     if (!usr.empty())
       symbol_id = intern_symbol(std::move(usr), spelling, c, kind);
+    // The cursor's own type is a node PROPERTY (clang_getCursorType is a
+    // cursor accessor in the libclang API), stored inline — not an edge.
+    const int64_t type_id = intern_type(::clang_getCursorType(c));
 
-    run("INSERT INTO node(id, kind_id, symbol_id, spelling, file_id, line, "
-        "col, end_line, end_col, is_definition, access, is_const, "
-        "is_volatile, is_restrict) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        {id, static_cast<int64_t>(kind), symbol_id, spelling, file_id,
+    run("INSERT INTO node(id, kind_id, symbol_id, type_id, spelling, file_id, "
+        "line, col, end_line, end_col, is_definition, access, is_const, "
+        "is_volatile, is_restrict) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        {id, static_cast<int64_t>(kind), symbol_id, type_id, spelling, file_id,
          static_cast<int64_t>(line), static_cast<int64_t>(col),
          static_cast<int64_t>(end_line), static_cast<int64_t>(end_col),
          static_cast<int64_t>(::clang_isCursorDefinition(c) != 0 ? 1 : 0),
@@ -261,12 +265,12 @@ public:
     const int64_t id = next_node_++;
     type_ids_.emplace(key, id);
     seed_type_kind(t.kind);
-    run("INSERT INTO node(id, kind_id, symbol_id, spelling, file_id, line, "
-        "col, end_line, end_col, is_definition, access, is_const, "
-        "is_volatile, is_restrict) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    run("INSERT INTO node(id, kind_id, symbol_id, type_id, spelling, file_id, "
+        "line, col, end_line, end_col, is_definition, access, is_const, "
+        "is_volatile, is_restrict) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         {id, static_cast<int64_t>(kTypeKindBase + t.kind), int64_t{0},
-         cxs(::clang_getTypeSpelling(t)), int64_t{0}, int64_t{0}, int64_t{0},
-         int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0},
+         int64_t{0}, cxs(::clang_getTypeSpelling(t)), int64_t{0}, int64_t{0},
+         int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0},
          static_cast<int64_t>(::clang_isConstQualifiedType(t) != 0 ? 1 : 0),
          static_cast<int64_t>(::clang_isVolatileQualifiedType(t) != 0 ? 1 : 0),
          static_cast<int64_t>(::clang_isRestrictQualifiedType(t) != 0 ? 1
@@ -362,7 +366,6 @@ private:
     if (overridden != nullptr)
       ::clang_disposeOverriddenCursors(overridden);
 
-    add_edge(id, intern_type(::clang_getCursorType(c)), kRelHasType, 0);
     if (kind == CXCursor_TypedefDecl || kind == CXCursor_TypeAliasDecl)
       add_edge(id, intern_type(::clang_getTypedefDeclUnderlyingType(c)),
                kRelUnderlyingType, 0);

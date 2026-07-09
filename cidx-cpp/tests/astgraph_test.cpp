@@ -130,9 +130,11 @@ TEST_CASE("astgraph: schema, catalogs and no-NULL sentinels") {
   CHECK(q_text(db, "SELECT value FROM meta WHERE key='schema_version'") ==
         std::to_string(ag::kSchemaVersion));
   CHECK(q_text(db, "SELECT value FROM meta WHERE key='main_only'") == "0");
-  // fixed relation catalog: 19 rows, ids 1..19
-  CHECK(q_int(db, "SELECT COUNT(*) FROM relation_kind") == 19);
+  // fixed relation catalog: 18 rows (id 9 has_type retired in schema v2 —
+  // the cursor's type is the node.type_id column)
+  CHECK(q_int(db, "SELECT COUNT(*) FROM relation_kind") == 18);
   CHECK(q_int(db, "SELECT MAX(id) FROM relation_kind") == ag::kRelClassType);
+  CHECK(q_int(db, "SELECT COUNT(*) FROM relation_kind WHERE id=9") == 0);
   CHECK(q_text(db, "SELECT name FROM relation_kind WHERE id=1") == "child");
   // node_kind namespacing: cursor kinds < 1000, type kinds >= 1000
   CHECK(q_int(db, "SELECT COUNT(*) FROM node_kind WHERE id < 1000") > 0);
@@ -173,13 +175,16 @@ TEST_CASE("astgraph: semantic cross-reference edges are present") {
               "WHERE e.rel_id=3 AND s.spelling='probe' AND "
               "t.spelling='probe' AND s.id != t.id AND "
               "s.is_definition=0 AND t.is_definition=1") >= 1);
-  // has_type: every VarDecl carries a type edge to a type-space node
+  // type_id: every VarDecl's node carries its type inline, pointing at a
+  // type-space node (clang_getCursorType is a cursor property, schema v2)
   CHECK(q_int(db,
               "SELECT COUNT(*) FROM node v "
               "WHERE v.kind_id=9 AND NOT EXISTS (" // 9 = VAR_DECL
-              "  SELECT 1 FROM edge e JOIN node t ON t.id=e.dst_id "
-              "  WHERE e.src_id=v.id AND e.rel_id=9 AND "
+              "  SELECT 1 FROM node t WHERE t.id=v.type_id AND "
               "        t.kind_id >= 1000)") == 0);
+  // ...and type nodes themselves have no type_id
+  CHECK(q_int(db, "SELECT COUNT(*) FROM node WHERE kind_id >= 1000 AND "
+                  "type_id != 0") == 0);
   // underlying_type: the BasePtr typedef points at a pointer type node
   CHECK(q_int(db,
               "SELECT COUNT(*) FROM edge e "
