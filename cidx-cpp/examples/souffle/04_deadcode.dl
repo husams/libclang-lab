@@ -17,14 +17,14 @@ dead_function(fn, ln) :-
 .decl unused_param(f:symbol, param:symbol)
 unused_param(fn, pn) :-
     fn_def(fid, fn), descendant(fid, p),
-    node(p, K_PARM, _, _, pn, _, _, _, _, _, _, _, _, _, _), pn != "",
+    node(p, ParmDecl, _, _, pn, _, _, _, _, _, _, _, _, _, _), pn != "",
     !referenced(p).
 
 // Local/global variables never referenced after declaration.
 .decl unused_var(f:symbol, var:symbol, line:number)
 unused_var(fn, vn, ln) :-
     fn_def(fid, fn), descendant(fid, v),
-    node(v, K_VAR, _, _, vn, _, ln, _, _, _, _, _, _, _, _), vn != "",
+    node(v, VarDecl, _, _, vn, _, ln, _, _, _, _, _, _, _, _), vn != "",
     !referenced(v).
 
 // Typedefs declared in the main file that nothing uses: no TYPE_REF cursor
@@ -34,20 +34,20 @@ unused_var(fn, vn, ln) :-
 typedef_used(td) :- referenced(td).
 typedef_used(td) :-
     node(c, k, _, t, _, _, _, _, _, _, _, _, _, _, _), k < 1000, t != 0,
-    c != td, treach(t, u), edge(u, td, R_TYPE_DECL, _).
+    c != td, treach(t, u), edge(u, td, TypeDecl, _).
 .decl unused_typedef(name:symbol, line:number)
 unused_typedef(n, ln) :-
-    node(td, K_TYPEDEF, _, _, n, fid, ln, _, _, _, _, _, _, _, _),
+    node(td, TypedefDecl, _, _, n, fid, ln, _, _, _, _, _, _, _, _),
     file(fid, _, 1),
     !typedef_used(td).
 
 // Prototypes with NO definition in this TU (extern API surface — or a
 // missing implementation).
 .decl has_def(p:number)
-has_def(p) :- edge(p, _, R_DEFINITION, _).
+has_def(p) :- edge(p, _, Definition, _).
 .decl undefined_prototype(f:symbol, line:number)
 undefined_prototype(fn, ln) :-
-    node(p, K_FUNCTION, _, _, fn, fid, ln, _, _, _, 0, _, _, _, _),
+    node(p, FunctionDecl, _, _, fn, fid, ln, _, _, _, 0, _, _, _, _),
     file(fid, _, 1),
     !has_def(p).
 
