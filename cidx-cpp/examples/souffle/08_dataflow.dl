@@ -1,0 +1,109 @@
+// 08_dataflow.dl — flow-insensitive VALUE FLOW over the AST, closed
+// transitively: which values influence which variables?
+//
+// Tracked flows:
+//   1. initialization      `double t = ...u...;`          u -> t
+//   2. argument binding    `f(...u...)`                   u -> f's parameter
+//   3. return values       `T v = f(...);`                everything f
+//                                                         returns -> v
+//
+// Honest limits (this is an over-approximation, TU-scoped):
+//   * plain assignments `a = b` are NOT tracked — the dump does not record
+//     binary-operator opcodes (libclang exposes them via
+//     clang_getCursorBinaryOperatorKind; a candidate schema v3 node field),
+//     and treating EVERY BinaryOperator as a store would invent false flows.
+//   * no branch/path sensitivity; pointer aliasing is ignored.
+//
+//   cp <TU>.db ast.db && souffle 08_dataflow.dl
+#include "ast_prelude.dl"
+
+#define ReturnStmt 214
+
+// Self-or-descendant containment.
+.decl within(outer:number, inner:number)
+within(a, a) :- node(a, _, _, _, _, _, _, _, _, _, _, _, _, _, _).
+within(a, b) :- descendant(a, b).
+
+// Variable-like declarations: locals, globals, parameters.
+.decl variable(v:number, name:symbol)
+variable(v, n) :- node(v, VarDecl,  _, _, n, _, _, _, _, _, _, _, _, _, _).
+variable(v, n) :- node(v, ParmDecl, _, _, n, _, _, _, _, _, _, _, _, _, _).
+
+// A DECL_REF_EXPR site reading variable v.
+.decl reads_variable(site:number, v:number)
+reads_variable(r, v) :-
+    node(r, DeclRefExpr, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    edge(r, v, References, _), variable(v, _).
+
+// Resolve a call to the callee's DEFINITION (directly, or through the
+// prototype's definition edge).
+.decl callee_definition(call:number, f:number)
+callee_definition(c, d) :-
+    node(c, CallExpr, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    edge(c, d, References, _), function_definition(d, _).
+callee_definition(c, f) :-
+    node(c, CallExpr, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    edge(c, d, References, _), edge(d, f, Definition, _).
+
+// Parameter ordinal = rank among the function's ParmDecl children (child
+// positions are NOT ordinals — type references precede the parameters).
+.decl parameter_index(f:number, p:number, index:number)
+parameter_index(f, p, i) :-
+    function_definition(f, _), edge(f, p, Child, pp),
+    node(p, ParmDecl, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    i = count : { edge(f, q, Child, qq),
+                  node(q, ParmDecl, _, _, _, _, _, _, _, _, _, _, _, _, _),
+                  qq < pp }.
+
+// ---- the three flow rules ---------------------------------------------------
+.decl value_flow(from:number, to:number)
+
+// 1. initialization: a variable's init subtree reads u.
+value_flow(u, v) :-
+    variable(v, _), node(v, VarDecl, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    descendant(v, r), reads_variable(r, u).
+
+// 2. argument -> parameter: a CALL_EXPR's k-th child (k >= 1; child 0 is the
+// callee expression) reads u, binding it to parameter k-1 of the callee.
+value_flow(u, p) :-
+    node(c, CallExpr, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    edge(c, a, Child, k), k >= 1,
+    within(a, r), reads_variable(r, u),
+    callee_definition(c, f), i = k - 1, parameter_index(f, p, i).
+
+// 3. return flow: values read under f's ReturnStmt flow into any variable
+// initialized from a call to f.
+.decl function_returns(f:number, u:number)
+function_returns(f, u) :-
+    function_definition(f, _), descendant(f, ret),
+    node(ret, ReturnStmt, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    within(ret, r), reads_variable(r, u).
+value_flow(u, v) :-
+    node(v, VarDecl, _, _, _, _, _, _, _, _, _, _, _, _, _),
+    descendant(v, c), callee_definition(c, f), function_returns(f, u).
+
+// Transitive influence.
+.decl influences(src:number, dst:number)
+influences(a, b) :- value_flow(a, b).
+influences(a, b) :- value_flow(a, k), influences(k, b).
+
+// ---- readable projections ---------------------------------------------------
+.decl value_flow_named(from:symbol, from_line:number, to:symbol, to_line:number)
+value_flow_named(fn, fl, tn, tl) :-
+    value_flow(u, v), variable(u, fn), variable(v, tn),
+    node(u, _, _, _, _, _, fl, _, _, _, _, _, _, _, _),
+    node(v, _, _, _, _, _, tl, _, _, _, _, _, _, _, _).
+
+// Taint-style query: for every parameter of a main-file function, which
+// variables does it transitively influence?
+.decl parameter_influence(function:symbol, parameter:symbol,
+                          variable:symbol, line:number)
+parameter_influence(fn, pn, vn, ln) :-
+    function_definition(f, fn),
+    node(f, _, _, _, _, fid, _, _, _, _, _, _, _, _, _), file(fid, _, 1),
+    parameter_index(f, p, _), variable(p, pn),
+    influences(p, d), variable(d, vn), d != p,
+    node(d, _, _, _, _, _, ln, _, _, _, _, _, _, _, _).
+
+.output value_flow_named(IO=stdout)
+.output parameter_influence(IO=stdout)
