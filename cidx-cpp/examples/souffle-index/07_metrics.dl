@@ -1,0 +1,21 @@
+// Whole-graph fan-in/fan-out and architecture dependency counts.
+#include "cidx_base.dl"
+
+.decl fan_in(symbol:Sym, total:number)
+fan_in(s, n) :- calls(_, s), n = count : { calls(_, s) }.
+.decl fan_out(symbol:Sym, total:number)
+fan_out(s, n) :- calls(s, _), n = count : { calls(s, _) }.
+
+.decl direct_entity_dependency(src:Sym, dst:Sym)
+direct_entity_dependency(a, b) :- e_uses(a, b).
+direct_entity_dependency(a, b) :- e_creates(a, b).
+direct_entity_dependency(a, b) :- e_composes(a, b).
+direct_entity_dependency(a, b) :- e_aggregates(a, b).
+direct_entity_dependency(a, b) :- e_associates(a, b).
+.decl dependency_count(entity:Sym, total:number)
+dependency_count(e, n) :- direct_entity_dependency(e, _),
+                          n = count : { direct_entity_dependency(e, _) }.
+
+.output fan_in(IO=stdout)
+.output fan_out(IO=stdout)
+.output dependency_count(IO=stdout)

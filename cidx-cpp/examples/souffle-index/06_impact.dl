@@ -1,0 +1,12 @@
+// Reverse call closure: every caller affected by changing a callee.
+#include "cidx_base.dl"
+
+.decl impacts(changed:Sym, caller:Sym)
+impacts(changed, caller) :- calls(caller, changed).
+impacts(changed, caller) :- calls(caller, middle), impacts(changed, middle).
+
+.decl blast_radius(changed:Sym, callers:number)
+blast_radius(changed, n) :- impacts(changed, _), n = count : { impacts(changed, _) }.
+
+.output impacts(IO=stdout)
+.output blast_radius(IO=stdout)

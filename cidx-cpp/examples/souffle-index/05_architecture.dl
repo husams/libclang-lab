@@ -1,0 +1,17 @@
+// Layer-1 design/entity relations materialized by cidx resolve.
+#include "cidx_base.dl"
+
+.decl dependency(src:Sym, relation:symbol, dst:Sym)
+dependency(a, "composes", b) :- e_composes(a, b).
+dependency(a, "aggregates", b) :- e_aggregates(a, b).
+dependency(a, "associates", b) :- e_associates(a, b).
+dependency(a, "creates", b) :- e_creates(a, b).
+dependency(a, "uses", b) :- e_uses(a, b).
+dependency(a, "destroys", b) :- e_destroys(a, b).
+
+.decl depends_transitively(src:Sym, dst:Sym)
+depends_transitively(a, b) :- dependency(a, _, b).
+depends_transitively(a, b) :- dependency(a, _, k), depends_transitively(k, b).
+
+.output dependency(IO=stdout)
+.output depends_transitively(IO=stdout)

@@ -1,0 +1,118 @@
+// cidx_base.dl — REUSABLE prelude for cidx reasoning scripts.
+//
+// `#include "cidx_base.dl"` at the top of any reasoning .dl to get the full base
+// vocabulary (types, edge relations, common derived predicates) without repeating it.
+// All relations read the cidx index directly (dbname="index.db") via the NAME-keyed VIEWs
+// from cidx_views.sql — every edge is keyed by an ANNOTATED qualified name that keeps
+// overloads and template instances distinct, so you write rules/checks in real names:
+//   calls("main()", "app::scale(int)")              // overloads stay separate
+//   e_uses("cont::Wrapper<int>", "...")             // template instances stay separate
+//   method_of("cont::Wrapper<bool>::label()", ...)  // instance methods stay separate
+// (rare residual same-name symbols get a " @file:line" / " [n]" suffix; see cidx_views.sql).
+// Soufflé interns these strings internally, so reasoning stays fast. Results are written
+// back into the SAME index.db with names already in them — no id→name join needed.
+//
+// Your script then only writes its OWN rules + `.output`s. Example: see cidx.dl.
+
+// ============================================================ types
+// A node is a symbol's qualified name (COALESCE(qual_name,spelling,usr)). `Sym` is just
+// the built-in string type, named for intent.
+.type Sym <: symbol
+
+// ============================================================ symbol facts
+.decl symbol_fact(id:number, name:Sym, kind:symbol, type_info:symbol,
+                  file:symbol, line:number, is_definition:number,
+                  is_pure:number, is_static:number, is_instantiation:number,
+                  is_named_instance:number, linkage:symbol, access:symbol)
+.input symbol_fact(IO=sqlite, dbname="index.db")
+
+.decl template_arg_fact(owner:Sym, position:number, arg_kind:number,
+                        referenced:Sym, literal:symbol)
+.input template_arg_fact(IO=sqlite, dbname="index.db")
+
+.decl call_site_fact(caller:Sym, callee:Sym, file:symbol, line:number,
+                     col:number, conditional:number, occurrences:number)
+.input call_site_fact(IO=sqlite, dbname="index.db")
+
+// ============================================================ base edges (Layer 0)
+// edge.kind: 1 calls 2 inherits 3 contains 4 specializes 5 instantiates
+//            6 overrides 7 uses 8 field_of 9 method_of 17 friend
+.decl calls(caller:Sym, callee:Sym)
+.input calls(IO=sqlite, dbname="index.db")
+.decl inherits(derived:Sym, base:Sym)
+.input inherits(IO=sqlite, dbname="index.db")
+.decl overrides(method:Sym, base_method:Sym)
+.input overrides(IO=sqlite, dbname="index.db")
+.decl instantiates(instance:Sym, primary:Sym)
+.input instantiates(IO=sqlite, dbname="index.db")
+.decl uses(src:Sym, dst:Sym)
+.input uses(IO=sqlite, dbname="index.db")
+.decl field_of(field:Sym, record:Sym)
+.input field_of(IO=sqlite, dbname="index.db")
+.decl method_of(method:Sym, cls:Sym)
+.input method_of(IO=sqlite, dbname="index.db")
+
+// ============================================================ entity edges (Layer 1)
+// entity_edge.kind: 1 generalizes 2 implements 3 specializes 4 composes 5 aggregates
+//                   6 associates 7 creates 8 uses 9 destroys 10 befriends 11 instantiates
+.decl e_generalizes(sub:Sym, super:Sym)
+.input e_generalizes(IO=sqlite, dbname="index.db")
+.decl e_implements(impl:Sym, iface:Sym)
+.input e_implements(IO=sqlite, dbname="index.db")
+.decl e_composes(owner:Sym, part:Sym)
+.input e_composes(IO=sqlite, dbname="index.db")
+.decl e_aggregates(owner:Sym, part:Sym)
+.input e_aggregates(IO=sqlite, dbname="index.db")
+.decl e_associates(src:Sym, dst:Sym)
+.input e_associates(IO=sqlite, dbname="index.db")
+.decl e_creates(src:Sym, dst:Sym)
+.input e_creates(IO=sqlite, dbname="index.db")
+.decl e_uses(src:Sym, dst:Sym)
+.input e_uses(IO=sqlite, dbname="index.db")
+.decl e_destroys(src:Sym, dst:Sym)
+.input e_destroys(IO=sqlite, dbname="index.db")
+
+// ============================================================ common derived predicates
+// Reusable building blocks, all in names. Small/safe ones are computed eagerly; call
+// reachability is SEEDED (write the `seed` table before running) so it never builds the
+// full closure over a 12M-symbol graph.
+
+// transitive class hierarchy (all ancestors) over raw + design-level edges — small.
+.decl subtype(sub:Sym, super:Sym)
+subtype(s, p) :- inherits(s, p).
+subtype(s, p) :- e_generalizes(s, p).
+subtype(s, p) :- e_implements(s, p).
+subtype(s, p) :- subtype(s, k), subtype(k, p).
+
+// design-level dependency closure over the ENTITY graph — also small.
+.decl edep(a:Sym, b:Sym)
+edep(a, b) :- e_uses(a, b).
+edep(a, b) :- e_creates(a, b).
+edep(a, b) :- e_composes(a, b).
+edep(a, b) :- e_aggregates(a, b).
+edep(a, b) :- e_associates(a, b).
+edep(a, b) :- edep(a, k), edep(k, b).
+
+// SEEDED call reachability. `seed` is written by run.sh / query.sh.
+// reach(a,b) = "a transitively calls b", expanded only from seeds. Empty seed ⇒ empty.
+.decl seed(x:Sym)
+.input seed(IO=sqlite, dbname="index.db")
+.decl reach(a:Sym, b:Sym)
+reach(a, b) :- seed(a), calls(a, b).
+reach(a, b) :- reach(a, k), calls(k, b).
+
+// SEEDED CALLGRAPH EDGES — unlike reach (which flattens to a reachable *set* and loses
+// structure), these keep every (caller, callee) hop, so the result IS a renderable graph
+// (DOT/Mermaid). Both are SEEDED, so they expand only from the symbols you ask about.
+//
+// cg_out = forward call cone: edges in the subgraph the seed transitively CALLS
+//          ("the callgraph of function X" / what X depends on at runtime).
+.decl cg_out(caller:Sym, callee:Sym)
+cg_out(x, y) :- seed(x), calls(x, y).
+cg_out(x, y) :- cg_out(_, x), calls(x, y).
+
+// cg_in = reverse call cone: edges in the subgraph that transitively CALLS the seed
+//         ("who reaches X" / blast radius / impact of changing X).
+.decl cg_in(caller:Sym, callee:Sym)
+cg_in(x, y) :- seed(y), calls(x, y).
+cg_in(x, y) :- cg_in(y, _), calls(x, y).
