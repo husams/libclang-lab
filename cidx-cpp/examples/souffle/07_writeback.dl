@@ -1,22 +1,27 @@
 // 07_writeback.dl — MATERIALIZE derived relations back INTO ast.db so later
 // consumers (plain SQL, Python, another tool) just SELECT them — the
 // "reason once, query cheap forever" pattern from the cidx concept-DSL
-// design.  Writes create tables `calls` and `reach` in ast.db (plus
+// design.  Writes create tables `calls`, `reach`, and `call_symbol` in ast.db (plus
 // Soufflé's __SymbolTable); re-running replaces them.
 //
 //   cidx-astgraph --output ast.db <source> && souffle 07_writeback.dl
 //   sqlite3 ast.db 'SELECT * FROM calls LIMIT 5;'
-//   sqlite3 ast.db "SELECT caller FROM reach WHERE callee='shape_area';"
+//   sqlite3 ast.db 'SELECT caller_usr, callee_usr FROM call_symbol;'
 #include "ast_prelude.dl"
 
-.decl calls(caller:symbol, callee:symbol, line:number)
-calls(cn, en, ln) :-
-    direct_call(f, callee, ln), function_definition(f, cn),
-    node(callee, _, _, _, en, _, _, _, _, _, _, _, _, _, _).
+.decl calls(caller:NodeId, callee:NodeId, line:number)
+calls(f, callee, ln) :- direct_call(f, callee, ln).
 
-.decl reach(caller:symbol, callee:symbol)
+.decl reach(caller:NodeId, callee:NodeId)
 reach(a, b) :- calls(a, b, _).
 reach(a, b) :- calls(a, k, _), reach(k, b).
 
+// Portable presentation/materialization keyed by stable USRs rather than
+// ambiguous display names.
+.decl call_symbol(caller_usr:symbol, callee_usr:symbol, line:number)
+call_symbol(cu, du, ln) :-
+    calls(c, d, ln), node_symbol(c, cu, _, _), node_symbol(d, du, _, _).
+
 .output calls(IO=sqlite, dbname="ast.db")
 .output reach(IO=sqlite, dbname="ast.db")
+.output call_symbol(IO=sqlite, dbname="ast.db")

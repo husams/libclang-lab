@@ -4,43 +4,62 @@
 //   cidx-astgraph --output ast.db <source> && souffle 02_callgraph.dl
 #include "ast_prelude.dl"
 
-// Name-level call edges (with the call site's line).
-.decl calls(caller:symbol, callee:symbol, line:number)
-calls(cn, en, ln) :-
-    direct_call(f, callee, ln), function_definition(f, cn),
-    node(callee, _, _, _, en, _, _, _, _, _, _, _, _, _, _).
+// Canonical call graph: node identity is the key, never a display name.
+.decl calls(caller:NodeId, callee:NodeId, line:number)
+calls(f, callee, ln) :- direct_call(f, callee, ln).
+
+// Human-readable projection; USRs keep overloads and same-named functions
+// distinct even when their spellings are identical.
+.decl call_display(caller_usr:symbol, caller:symbol,
+                   callee_usr:symbol, callee:symbol, line:number)
+call_display(fu, fn, cu, cn, ln) :-
+    calls(f, c, ln), node_symbol(f, fu, fn, _), node_symbol(c, cu, cn, _).
 
 // Transitive reachability — "if I change B, who is affected?"
-.decl reach(a:symbol, b:symbol)
+.decl reach(a:NodeId, b:NodeId)
 reach(a, b) :- calls(a, b, _).
 reach(a, b) :- calls(a, k, _), reach(k, b).
 
+.decl reach_display(caller_usr:symbol, caller:symbol,
+                    callee_usr:symbol, callee:symbol)
+reach_display(au, an, bu, bn) :-
+    reach(a, b), node_symbol(a, au, an, _), node_symbol(b, bu, bn, _).
+
 // IMPACT of one function: everything that can transitively reach it.
 // Change the name to the symbol you are probing.
-.decl impacted_by_shape_area(caller:symbol)
-impacted_by_shape_area(c) :- reach(c, "shape_area").
+.decl impacted_by_shape_area(caller_usr:symbol, caller:symbol)
+impacted_by_shape_area(cu, cn) :-
+    reach(c, target), node_symbol(target, _, "shape_area", _),
+    node_symbol(c, cu, cn, _).
 
 // Direct + transitive callees of main — the program's live cone.
-.decl main_cone(callee:symbol)
-main_cone(c) :- reach("main", c).
+.decl main_cone(callee_usr:symbol, callee:symbol)
+main_cone(cu, cn) :-
+    function_definition(main, "main"), reach(main, c),
+    node_symbol(c, cu, cn, _).
 
 // (Mutually) recursive functions: they reach themselves.
-.decl recursive(f:symbol)
-recursive(f) :- reach(f, f).
+.decl recursive(function_usr:symbol, function:symbol)
+recursive(u, n) :- reach(f, f), node_symbol(f, u, n, _).
 
 // Entry points: defined here, call others, but nothing in this TU calls them.
-.decl entry_point(f:symbol)
-entry_point(f) :-
-    function_definition(id, f), calls(f, _, _), !referenced(id).
+.decl entry_point(id:NodeId)
+entry_point(id) :-
+    function_definition(id, _), calls(id, _, _), !referenced(id).
+
+.decl entry_point_display(function_usr:symbol, function:symbol)
+entry_point_display(u, n) :- entry_point(id), node_symbol(id, u, n, _).
 
 // Fan-out ranking material (sort with: sort -t'\t' -k2 -nr).
-.decl fan_out(f:symbol, n:number)
-fan_out(f, n) :- function_definition(_, f), n = count : { calls(f, _, _) }, n > 0.
+.decl fan_out(function_usr:symbol, function:symbol, calls:number)
+fan_out(u, n, c) :-
+    function_definition(id, _), node_symbol(id, u, n, _),
+    c = count : { calls(id, _, _) }, c > 0.
 
-.output calls(IO=stdout)
-.output reach(IO=stdout)
+.output call_display(IO=stdout)
+.output reach_display(IO=stdout)
 .output impacted_by_shape_area(IO=stdout)
 .output main_cone(IO=stdout)
 .output recursive(IO=stdout)
-.output entry_point(IO=stdout)
+.output entry_point_display(IO=stdout)
 .output fan_out(IO=stdout)

@@ -5,26 +5,27 @@
 //   cidx-astgraph --output ast.db <source> && souffle 04_deadcode.dl
 #include "ast_prelude.dl"
 
-// Functions defined here that nothing in this TU references.
+// Functions defined here that no call site in this TU reaches. This avoids
+// treating prototype->definition and canonicalization edges as real uses.
 .decl dead_function(f:symbol, line:number)
 dead_function(fn, ln) :-
     function_definition(id, fn),
-    node(id, _, _, _, _, fid, ln, _, _, _, _, _, _, _, _),
-    file(fid, _, 1),
-    !referenced(id), fn != "main".
+    node_in_main_file(id), node_location(id, [_, ln, _, _, _]),
+    !called_function(id), fn != "main".
 
 // Parameters never read inside their function's body.
 .decl unused_parameter(f:symbol, param:symbol)
 unused_parameter(fn, pn) :-
     function_definition(fid, fn), descendant(fid, p),
-    node(p, ParmDecl, _, _, pn, _, _, _, _, _, _, _, _, _, _), pn != "",
+    node_core(p, ParmDecl, _, _, pn, _), pn != "",
     !referenced(p).
 
 // Local/global variables never referenced after declaration.
 .decl unused_var(f:symbol, var:symbol, line:number)
 unused_var(fn, vn, ln) :-
     function_definition(fid, fn), descendant(fid, v),
-    node(v, VarDecl, _, _, vn, _, ln, _, _, _, _, _, _, _, _), vn != "",
+    node_core(v, VarDecl, _, _, vn, _), node_location(v, [_, ln, _, _, _]),
+    vn != "",
     !referenced(v).
 
 // Typedefs declared in the main file that nothing uses: no TYPE_REF cursor
@@ -33,12 +34,12 @@ unused_var(fn, vn, ln) :-
 .decl typedef_used(td:number)
 typedef_used(td) :- referenced(td).
 typedef_used(td) :-
-    node(c, k, _, t, _, _, _, _, _, _, _, _, _, _, _), k < 1000, t != 0,
+    node_core(c, k, _, t, _, _), k < 1000, t != 0,
     c != td, type_reach(t, u), edge(u, td, TypeDecl, _).
 .decl unused_typedef(name:symbol, line:number)
 unused_typedef(n, ln) :-
-    node(td, TypedefDecl, _, _, n, fid, ln, _, _, _, _, _, _, _, _),
-    file(fid, _, 1),
+    node_core(td, TypedefDecl, _, _, n, _), node_in_main_file(td),
+    node_location(td, [_, ln, _, _, _]),
     !typedef_used(td).
 
 // Prototypes with NO definition in this TU (extern API surface — or a
@@ -47,8 +48,8 @@ unused_typedef(n, ln) :-
 has_definition(p) :- edge(p, _, Definition, _).
 .decl undefined_prototype(f:symbol, line:number)
 undefined_prototype(fn, ln) :-
-    node(p, FunctionDecl, _, _, fn, fid, ln, _, _, _, 0, _, _, _, _),
-    file(fid, _, 1),
+    node_core(p, FunctionDecl, _, _, fn, 0), node_in_main_file(p),
+    node_location(p, [_, ln, _, _, _]),
     !has_definition(p).
 
 .output dead_function(IO=stdout)

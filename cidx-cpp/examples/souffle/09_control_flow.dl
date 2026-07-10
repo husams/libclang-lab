@@ -1,0 +1,57 @@
+// 09_control_flow.dl — structural control-flow inventory per main-file
+// function: branches, loops, returns, and their source locations.
+//
+// This is AST structure, not a CFG: it deliberately makes no path- or
+// reachability-sensitive claim.
+//
+//   cidx-astgraph --output ast.db <source> && souffle 09_control_flow.dl
+#include "ast_prelude.dl"
+
+.decl main_function_info(id:NodeId, usr:symbol, name:symbol)
+main_function_info(id, usr, name) :-
+    main_function(id, _), node_symbol(id, usr, name, _).
+
+.decl control_site(function:NodeId, kind:symbol, line:number)
+control_site(f, "if", line) :-
+    main_function_info(f, _, _), descendant(f, s),
+    node_core(s, IfStmt, _, _, _, _), node_location(s, [_, line, _, _, _]).
+control_site(f, "switch", line) :-
+    main_function_info(f, _, _), descendant(f, s),
+    node_core(s, SwitchStmt, _, _, _, _), node_location(s, [_, line, _, _, _]).
+control_site(f, "while", line) :-
+    main_function_info(f, _, _), descendant(f, s),
+    node_core(s, WhileStmt, _, _, _, _), node_location(s, [_, line, _, _, _]).
+control_site(f, "do", line) :-
+    main_function_info(f, _, _), descendant(f, s),
+    node_core(s, DoStmt, _, _, _, _), node_location(s, [_, line, _, _, _]).
+control_site(f, "for", line) :-
+    main_function_info(f, _, _), descendant(f, s),
+    node_core(s, ForStmt, _, _, _, _), node_location(s, [_, line, _, _, _]).
+control_site(f, "return", line) :-
+    main_function_info(f, _, _), descendant(f, s),
+    node_core(s, ReturnStmt, _, _, _, _), node_location(s, [_, line, _, _, _]).
+
+.decl control_site_display(function_usr:symbol, function:symbol,
+                           kind:symbol, line:number)
+control_site_display(usr, name, kind, line) :-
+    main_function_info(f, usr, name), control_site(f, kind, line).
+
+// Hoist the three loop forms before aggregation: Soufflé does not permit a
+// disjunction directly inside an aggregate body.
+.decl loop_site(function:NodeId, line:number)
+loop_site(f, line) :- control_site(f, "while", line).
+loop_site(f, line) :- control_site(f, "do", line).
+loop_site(f, line) :- control_site(f, "for", line).
+
+.decl control_summary(function_usr:symbol, function:symbol,
+                      ifs:number, switches:number, loops:number,
+                      returns:number)
+control_summary(usr, name, ifs, switches, loops, returns) :-
+    main_function_info(f, usr, name),
+    ifs = count : { control_site(f, "if", _) },
+    switches = count : { control_site(f, "switch", _) },
+    loops = count : { loop_site(f, _) },
+    returns = count : { control_site(f, "return", _) }.
+
+.output control_site_display(IO=stdout)
+.output control_summary(IO=stdout)

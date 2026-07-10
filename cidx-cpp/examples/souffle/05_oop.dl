@@ -7,29 +7,48 @@
 
 // Record definitions (class/struct), including class templates.
 .decl class_definition(id:number, name:symbol)
-class_definition(id, n) :- node(id, ClassDecl,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
-class_definition(id, n) :- node(id, StructDecl,     _, _, n, _, _, _, _, _, 1, _, _, _, _).
-class_definition(id, n) :- node(id, ClassTemplate, _, _, n, _, _, _, _, _, 1, _, _, _, _).
+class_definition(id, n) :- node_core(id, ClassDecl, _, _, n, 1).
+class_definition(id, n) :- node_core(id, StructDecl, _, _, n, 1).
+class_definition(id, n) :- node_core(id, ClassTemplate, _, _, n, 1).
+class_definition(id, n) :-
+    node_core(id, ClassTemplatePartialSpecialization, _, _, n, 1).
+
+// Keep hierarchy keys as node ids. Names are display data and can collide
+// across namespaces or overload sets.
+.decl class_like(id:NodeId, name:symbol)
+class_like(id, n) :- node_core(id, ClassDecl, _, _, n, _).
+class_like(id, n) :- node_core(id, StructDecl, _, _, n, _).
+class_like(id, n) :- node_core(id, ClassTemplate, _, _, n, _).
+class_like(id, n) :-
+    node_core(id, ClassTemplatePartialSpecialization, _, _, n, _).
 
 // DIRECT inheritance: a CXX_BASE_SPECIFIER child whose `references` edge
 // resolves the base class.
-.decl derives(derived:symbol, base:symbol)
-derives(dn, bn) :-
-    class_definition(d, dn), edge(d, bs, Child, _),
-    node(bs, CXXBaseSpecifier, _, _, _, _, _, _, _, _, _, _, _, _, _),
+.decl derives_id(derived:NodeId, base:NodeId)
+derives_id(d, b) :-
+    class_like(d, _), edge(d, bs, Child, _),
+    node_core(bs, CXXBaseSpecifier, _, _, _, _),
     edge(bs, b, References, _),
-    node(b, _, _, _, bn, _, _, _, _, _, _, _, _, _, _).
+    class_like(b, _).
 
 // Full ancestry (transitive).
+.decl ancestor_id(derived:NodeId, base:NodeId)
+ancestor_id(d, b) :- derives_id(d, b).
+ancestor_id(d, b) :- derives_id(d, k), ancestor_id(k, b).
+
+// Human-readable projections; query derives_id/ancestor_id when identity
+// matters.
+.decl derives(derived:symbol, base:symbol)
+derives(dn, bn) :- derives_id(d, b), class_like(d, dn), class_like(b, bn).
+
 .decl ancestor(derived:symbol, base:symbol)
-ancestor(d, b) :- derives(d, b).
-ancestor(d, b) :- derives(d, k), ancestor(k, b).
+ancestor(dn, bn) :- ancestor_id(d, b), class_like(d, dn), class_like(b, bn).
 
 // Methods per class, via the semantic_parent edge (works for methods
 // DEFINED out-of-line too — lexical placement is irrelevant).
 .decl method_of(class:symbol, method:symbol, access:number)
 method_of(cn, mn, acc) :-
-    node(m, CXXMethod, _, _, mn, _, _, _, _, _, _, acc, _, _, _),
+    node_core(m, CXXMethod, _, _, mn, _), node_access(m, acc),
     edge(m, c, SemanticParent, _), class_definition(c, cn).
 
 // Override pairs and the transitive override closure — "if I change the
@@ -37,10 +56,9 @@ method_of(cn, mn, acc) :-
 .decl overrides(derived_m:symbol, in_class:symbol, base_m:symbol, of_class:symbol)
 overrides(mn, cn, bn, bcn) :-
     edge(m, b, Overrides, _),
-    node(m, _, _, _, mn, _, _, _, _, _, _, _, _, _, _),
-    node(b, _, _, _, bn, _, _, _, _, _, _, _, _, _, _),
-    edge(m, c, SemanticParent, _), node(c, _, _, _, cn, _, _, _, _, _, _, _, _, _, _),
-    edge(b, bc, SemanticParent, _), node(bc, _, _, _, bcn, _, _, _, _, _, _, _, _, _, _).
+    node_core(m, _, _, _, mn, _), node_core(b, _, _, _, bn, _),
+    edge(m, c, SemanticParent, _), node_core(c, _, _, _, cn, _),
+    edge(b, bc, SemanticParent, _), node_core(bc, _, _, _, bcn, _).
 
 // Leaf overriders: implementations nothing further overrides (the concrete
 // dispatch targets of a hierarchy).
@@ -49,24 +67,25 @@ overridden_by_someone(b) :- edge(_, b, Overrides, _).
 .decl leaf_override(class:symbol, method:symbol)
 leaf_override(cn, mn) :-
     edge(m, _, Overrides, _), !overridden_by_someone(m),
-    node(m, _, _, _, mn, _, _, _, _, _, _, _, _, _, _),
-    edge(m, c, SemanticParent, _), node(c, _, _, _, cn, _, _, _, _, _, _, _, _, _, _).
+    node_core(m, _, _, _, mn, _),
+    edge(m, c, SemanticParent, _), node_core(c, _, _, _, cn, _).
 
 // Who constructs which class (CALL_EXPR resolving to a CONSTRUCTOR).
 .decl constructs(f:symbol, class:symbol, line:number)
 constructs(fn, cn, ln) :-
     direct_call(f, ctor, ln), function_definition(f, fn),
-    node(ctor, Constructor, _, _, cn, _, _, _, _, _, _, _, _, _, _).
+    node_core(ctor, Constructor, _, _, cn, _).
 
 // Template specializations/instantiation links present in the dump.
 .decl specializes(what:symbol, template:symbol)
 specializes(sn, tn) :-
     edge(s, t, Specializes, _),
-    node(s, _, _, _, sn, _, _, _, _, _, _, _, _, _, _),
-    node(t, _, _, _, tn, _, _, _, _, _, _, _, _, _, _), sn != "".
+    node_core(s, _, _, _, sn, _), node_core(t, _, _, _, tn, _), sn != "".
 
 .output derives(IO=stdout)
+.output derives_id(IO=stdout)
 .output ancestor(IO=stdout)
+.output ancestor_id(IO=stdout)
 .output method_of(IO=stdout)
 .output overrides(IO=stdout)
 .output leaf_override(IO=stdout)
