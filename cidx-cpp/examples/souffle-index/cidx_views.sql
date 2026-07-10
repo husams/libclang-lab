@@ -100,6 +100,11 @@ LEFT JOIN edge_site es ON es.edge_id=e.id
 LEFT JOIN file f ON f.id=es.file_id
 WHERE e.kind=1;
 
+-- Empty by default. run.sh replaces this with an exact-name one-row view for
+-- seeded recursive examples, keeping all EDB input inside index.db.
+DROP VIEW IF EXISTS query_seed;
+CREATE VIEW query_seed AS SELECT name FROM symdisp WHERE 0;
+
 -- base graph edges (annotated src name, annotated dst name)
 DROP VIEW IF EXISTS calls;     CREATE VIEW calls     AS SELECT ss.name AS a, ds.name AS b FROM edge e JOIN symdisp ss ON ss.id=e.src_id JOIN symdisp ds ON ds.id=e.dst_id WHERE e.kind=1;
 DROP VIEW IF EXISTS inherits;  CREATE VIEW inherits  AS SELECT ss.name AS a, ds.name AS b FROM edge e JOIN symdisp ss ON ss.id=e.src_id JOIN symdisp ds ON ds.id=e.dst_id WHERE e.kind=2;

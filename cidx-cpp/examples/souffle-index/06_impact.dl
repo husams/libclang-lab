@@ -1,8 +1,11 @@
-// Reverse call closure: every caller affected by changing a callee.
+// Seeded reverse call closure: callers affected by changing one selected symbol.
 #include "cidx_base.dl"
 
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
+
 .decl impacts(changed:Sym, caller:Sym)
-impacts(changed, caller) :- calls(caller, changed).
+impacts(changed, caller) :- query_seed(changed), calls(caller, changed).
 impacts(changed, caller) :- calls(caller, middle), impacts(changed, middle).
 
 .decl blast_radius(changed:Sym, callers:number)

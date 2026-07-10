@@ -1,5 +1,8 @@
-// Layer-1 design/entity relations materialized by cidx resolve.
+// Seeded Layer-1 dependency cone materialized by cidx resolve.
 #include "cidx_base.dl"
+
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
 
 .decl dependency(src:Sym, relation:symbol, dst:Sym)
 dependency(a, "composes", b) :- e_composes(a, b).
@@ -10,8 +13,12 @@ dependency(a, "uses", b) :- e_uses(a, b).
 dependency(a, "destroys", b) :- e_destroys(a, b).
 
 .decl depends_transitively(src:Sym, dst:Sym)
-depends_transitively(a, b) :- dependency(a, _, b).
-depends_transitively(a, b) :- dependency(a, _, k), depends_transitively(k, b).
+depends_transitively(a, b) :- query_seed(a), dependency(a, _, b).
+depends_transitively(a, b) :- depends_transitively(a, k), dependency(k, _, b).
 
-.output dependency(IO=stdout)
+.decl dependency_edge(src:Sym, relation:symbol, dst:Sym)
+dependency_edge(a, r, b) :- query_seed(a), dependency(a, r, b).
+dependency_edge(a, r, b) :- dependency_edge(_, _, a), dependency(a, r, b).
+
+.output dependency_edge(IO=stdout)
 .output depends_transitively(IO=stdout)

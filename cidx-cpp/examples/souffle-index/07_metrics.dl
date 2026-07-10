@@ -1,10 +1,13 @@
-// Whole-graph fan-in/fan-out and architecture dependency counts.
+// Metrics for one selected symbol/entity; avoids printing one row per symbol.
 #include "cidx_base.dl"
 
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
+
 .decl fan_in(symbol:Sym, total:number)
-fan_in(s, n) :- calls(_, s), n = count : { calls(_, s) }.
+fan_in(s, n) :- query_seed(s), n = count : { calls(_, s) }.
 .decl fan_out(symbol:Sym, total:number)
-fan_out(s, n) :- calls(s, _), n = count : { calls(s, _) }.
+fan_out(s, n) :- query_seed(s), n = count : { calls(s, _) }.
 
 .decl direct_entity_dependency(src:Sym, dst:Sym)
 direct_entity_dependency(a, b) :- e_uses(a, b).
@@ -13,7 +16,7 @@ direct_entity_dependency(a, b) :- e_composes(a, b).
 direct_entity_dependency(a, b) :- e_aggregates(a, b).
 direct_entity_dependency(a, b) :- e_associates(a, b).
 .decl dependency_count(entity:Sym, total:number)
-dependency_count(e, n) :- direct_entity_dependency(e, _),
+dependency_count(e, n) :- query_seed(e),
                           n = count : { direct_entity_dependency(e, _) }.
 
 .output fan_in(IO=stdout)

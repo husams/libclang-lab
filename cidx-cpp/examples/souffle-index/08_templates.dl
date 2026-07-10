@@ -1,11 +1,17 @@
-// Template-instance links and ordered template arguments across the application.
+// Template links and ordered arguments for one selected instance.
 #include "cidx_base.dl"
 
-.decl template_argument(owner:Sym, position:number, kind:symbol, value:symbol)
-template_argument(o, p, "type", r) :- template_arg_fact(o, p, 1, r, _).
-template_argument(o, p, "value", l) :- template_arg_fact(o, p, 2, _, l).
-template_argument(o, p, "template", r) :- template_arg_fact(o, p, 3, r, _).
-template_argument(o, p, "pack", l) :- template_arg_fact(o, p, 4, _, l).
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
 
-.output instantiates(IO=stdout)
+.decl selected_instantiation(instance:Sym, primary:Sym)
+selected_instantiation(i, p) :- query_seed(i), instantiates(i, p).
+
+.decl template_argument(owner:Sym, position:number, kind:symbol, value:symbol)
+template_argument(o, p, "type", r) :- query_seed(o), template_arg_fact(o, p, 1, r, _).
+template_argument(o, p, "value", l) :- query_seed(o), template_arg_fact(o, p, 2, _, l).
+template_argument(o, p, "template", r) :- query_seed(o), template_arg_fact(o, p, 3, r, _).
+template_argument(o, p, "pack", l) :- query_seed(o), template_arg_fact(o, p, 4, _, l).
+
+.output selected_instantiation(IO=stdout)
 .output template_argument(IO=stdout)

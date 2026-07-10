@@ -1,16 +1,20 @@
-// Full application class hierarchy and transitive override chains.
+// Seeded ancestry/override traversal, bounded to one class or method.
 #include "cidx_base.dl"
 
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
+
 .decl ancestor(derived:Sym, base:Sym)
-ancestor(d, b) :- inherits(d, b).
-ancestor(d, b) :- e_generalizes(d, b).
-ancestor(d, b) :- e_implements(d, b).
-ancestor(d, b) :- ancestor(d, k), ancestor(k, b).
+ancestor(d, b) :- query_seed(d), inherits(d, b).
+ancestor(d, b) :- query_seed(d), e_generalizes(d, b).
+ancestor(d, b) :- query_seed(d), e_implements(d, b).
+ancestor(d, b) :- ancestor(d, k), inherits(k, b).
+ancestor(d, b) :- ancestor(d, k), e_generalizes(k, b).
+ancestor(d, b) :- ancestor(d, k), e_implements(k, b).
 
 .decl override_chain(method:Sym, base_method:Sym)
-override_chain(m, b) :- overrides(m, b).
-override_chain(m, b) :- overrides(m, k), override_chain(k, b).
+override_chain(m, b) :- query_seed(m), overrides(m, b).
+override_chain(m, b) :- override_chain(m, k), overrides(k, b).
 
 .output ancestor(IO=stdout)
-.output overrides(IO=stdout)
 .output override_chain(IO=stdout)

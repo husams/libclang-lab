@@ -1,14 +1,17 @@
-// Cross-TU semantic uses and defined symbols with no incoming call/use edge.
+// Incoming cross-TU calls/uses for one selected symbol.
 #include "cidx_base.dl"
 
-.decl referenced(dst:Sym)
-referenced(d) :- calls(_, d).
-referenced(d) :- uses(_, d).
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
 
-.decl unreferenced_definition(name:Sym, kind:symbol, file:symbol, line:number)
-unreferenced_definition(n, k, f, l) :-
-    symbol_fact(_, n, k, _, f, l, 1, _, _, _, _, _, _),
-    !referenced(n).
+.decl incoming_reference(kind:symbol, source:Sym, target:Sym)
+incoming_reference("calls", s, d) :- query_seed(d), calls(s, d).
+incoming_reference("uses", s, d) :- query_seed(d), uses(s, d).
 
-.output uses(IO=stdout)
+.decl unreferenced_definition(name:Sym)
+unreferenced_definition(n) :- query_seed(n),
+    symbol_fact(_, n, _, _, _, _, 1, _, _, _, _, _, _),
+    !incoming_reference(_, _, n).
+
+.output incoming_reference(IO=stdout)
 .output unreferenced_definition(IO=stdout)

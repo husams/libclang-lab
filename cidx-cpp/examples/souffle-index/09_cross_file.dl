@@ -11,5 +11,4 @@ file_call(sf, tf, a, b) :- calls(a, b), symbol_file(a, sf), symbol_file(b, tf), 
 file_dependency(sf, tf, n) :- file_call(sf, tf, _, _),
                               n = count : { file_call(sf, tf, _, _) }.
 
-.output file_call(IO=stdout)
 .output file_dependency(IO=stdout)
