@@ -19,7 +19,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 RULE="${1:-}"
-DB="${2:-$HOME/.cache/cidx/index.db}"
+if [ -n "${2:-}" ]; then
+  DB="$2"
+elif [ -n "${CIDX_DB:-}" ]; then
+  DB="$CIDX_DB"
+else
+  DB="$HOME/.cache/cidx/index.db"
+fi
 
 [ -n "$RULE" ] || {
   echo "usage: $0 [--seed SYMBOL] [--profile FILE] [--jobs N] [--write] EXAMPLE.dl [index.db]" >&2
