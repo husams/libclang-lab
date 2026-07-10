@@ -1,0 +1,17 @@
+// Whole-application call graph, transitive reachability, recursion, and call sites.
+#include "cidx_base.dl"
+
+.decl reachable(caller:Sym, callee:Sym)
+reachable(a, b) :- calls(a, b).
+reachable(a, b) :- reachable(a, k), calls(k, b).
+
+.decl recursive(symbol:Sym)
+recursive(f) :- reachable(f, f).
+
+.decl call_location(caller:Sym, callee:Sym, file:symbol, line:number, conditional:number)
+call_location(a, b, f, l, c) :- call_site_fact(a, b, f, l, _, c, _).
+
+.output calls(IO=stdout)
+.output reachable(IO=stdout)
+.output recursive(IO=stdout)
+.output call_location(IO=stdout)

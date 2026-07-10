@@ -1,0 +1,11 @@
+// Template-instance links and ordered template arguments across the application.
+#include "cidx_base.dl"
+
+.decl template_argument(owner:Sym, position:number, kind:symbol, value:symbol)
+template_argument(o, p, "type", r) :- template_arg_fact(o, p, 1, r, _).
+template_argument(o, p, "value", l) :- template_arg_fact(o, p, 2, _, l).
+template_argument(o, p, "template", r) :- template_arg_fact(o, p, 3, r, _).
+template_argument(o, p, "pack", l) :- template_arg_fact(o, p, 4, _, l).
+
+.output instantiates(IO=stdout)
+.output template_argument(IO=stdout)

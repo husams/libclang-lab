@@ -1,0 +1,9 @@
+// Materialize a reusable whole-application reverse impact relation.
+// Run only through: examples/run.sh --write 10_writeback.dl [index.db]
+#include "cidx_base.dl"
+
+.decl souffle_impact(changed:Sym, caller:Sym)
+souffle_impact(changed, caller) :- calls(caller, changed).
+souffle_impact(changed, caller) :- calls(caller, middle), souffle_impact(changed, middle).
+
+.output souffle_impact(IO=sqlite, dbname="index.db")

@@ -1,0 +1,16 @@
+// Full application class hierarchy and transitive override chains.
+#include "cidx_base.dl"
+
+.decl ancestor(derived:Sym, base:Sym)
+ancestor(d, b) :- inherits(d, b).
+ancestor(d, b) :- e_generalizes(d, b).
+ancestor(d, b) :- e_implements(d, b).
+ancestor(d, b) :- ancestor(d, k), ancestor(k, b).
+
+.decl override_chain(method:Sym, base_method:Sym)
+override_chain(m, b) :- overrides(m, b).
+override_chain(m, b) :- overrides(m, k), override_chain(k, b).
+
+.output ancestor(IO=stdout)
+.output overrides(IO=stdout)
+.output override_chain(IO=stdout)

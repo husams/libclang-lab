@@ -1,0 +1,15 @@
+// Semantic file dependencies induced by cross-file call sites.
+#include "cidx_base.dl"
+
+.decl symbol_file(symbol:Sym, file:symbol)
+symbol_file(n, f) :- symbol_fact(_, n, _, _, f, _, _, _, _, _, _, _, _), f != "".
+
+.decl file_call(source:symbol, target:symbol, caller:Sym, callee:Sym)
+file_call(sf, tf, a, b) :- calls(a, b), symbol_file(a, sf), symbol_file(b, tf), sf != tf.
+
+.decl file_dependency(source:symbol, target:symbol, calls:number)
+file_dependency(sf, tf, n) :- file_call(sf, tf, _, _),
+                              n = count : { file_call(sf, tf, _, _) }.
+
+.output file_call(IO=stdout)
+.output file_dependency(IO=stdout)

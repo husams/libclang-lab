@@ -1,0 +1,14 @@
+// Cross-TU semantic uses and defined symbols with no incoming call/use edge.
+#include "cidx_base.dl"
+
+.decl referenced(dst:Sym)
+referenced(d) :- calls(_, d).
+referenced(d) :- uses(_, d).
+
+.decl unreferenced_definition(name:Sym, kind:symbol, file:symbol, line:number)
+unreferenced_definition(n, k, f, l) :-
+    symbol_fact(_, n, k, _, f, l, 1, _, _, _, _, _, _),
+    !referenced(n).
+
+.output uses(IO=stdout)
+.output unreferenced_definition(IO=stdout)
