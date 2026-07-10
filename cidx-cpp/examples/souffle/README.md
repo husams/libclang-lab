@@ -8,10 +8,21 @@ macros, containment/type-reach/call closures).
 ## Run
 
 ```bash
-cidx-astgraph path/to/file.c        # -> file.c.db  (source must be `cidx import`ed)
-cp file.c.db ast.db                 # Soufflé dbnames are fixed strings
+cidx-astgraph --output ast.db path/to/file.c  # source must be `cidx import`ed
 souffle 01_basics.dl                # any example; add -j8 for parallel eval
 ```
+
+## Native built-in analysis
+
+For the maintained call-graph rule, avoid process startup and receive
+identity-preserving JSON directly:
+
+```bash
+cidx-astgraph analyze --rule callgraph path/to/file.c
+```
+
+The output carries AST node ids and USRs; the standalone examples remain the
+right workflow for custom Datalog programs.
 
 C examples were validated on `manifests/shapes.c`; the OOP example needs a
 C++ dump (`manifests/geometry.cpp`).

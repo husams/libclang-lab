@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "astgraph/astgraph.hpp"
+#include "astgraph/souffle_runner.hpp"
 #include "clangx/libclang.hpp"
 #include "clangx/parse.hpp"
 #include "clangx/toolchain.hpp"
@@ -208,6 +209,45 @@ TEST_CASE("astgraph: semantic cross-reference edges are present") {
   CHECK(reachable ==
         q_int(db, "SELECT COUNT(DISTINCT dst_id) FROM edge WHERE rel_id=1"));
   CHECK(reachable > 20);
+}
+
+TEST_CASE("astgraph: native Souffle callgraph preserves USR identity") {
+  if (require_libclang() == nullptr)
+    return;
+  if (!ag::native_souffle_available()) {
+    MESSAGE("SKIP: cidx built without native Souffle support");
+    return;
+  }
+  const Dumped d =
+      dump_source("sample.cpp", kCppSample, {"-std=c++17"}, false);
+  const std::vector<ag::CallFact> calls = ag::run_callgraph(d.db_path, 1);
+  CHECK_FALSE(calls.empty());
+  bool saw_main_probe = false;
+  bool saw_probe_rank = false;
+  for (const ag::CallFact &call : calls) {
+    CHECK_FALSE(call.caller_usr.empty());
+    CHECK_FALSE(call.callee_usr.empty());
+    if (call.caller_name == "main" && call.callee_name == "probe")
+      saw_main_probe = true;
+    if (call.caller_name == "probe" && call.callee_name == "rank")
+      saw_probe_rank = true;
+  }
+  CHECK(saw_main_probe);
+  CHECK(saw_probe_rank);
+}
+
+TEST_CASE("astgraph: artifact key changes for semantic inputs") {
+  const std::string source = "/tmp/one/sample.cpp";
+  const std::vector<std::string> args = {"-std=c++17"};
+  ag::Options full;
+  ag::Options main_only;
+  main_only.main_only = true;
+  const std::string full_key = ag::artifact_key(source, args, std::nullopt, full);
+  CHECK(full_key != ag::artifact_key(source, args, std::nullopt, main_only));
+  CHECK(full_key !=
+        ag::artifact_key("/tmp/two/sample.cpp", args, std::nullopt, full));
+  CHECK(full_key != ag::artifact_key(source, {"-std=c++20"}, std::nullopt,
+                                     full));
 }
 
 TEST_CASE("astgraph: --main-only prunes header subtrees, keeps referenced "

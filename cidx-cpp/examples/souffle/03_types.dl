@@ -1,7 +1,7 @@
 // 03_types.dl — reasoning over the TYPE graph: sugar chains, pointer
 // structure, and type-based impact ("which functions touch type X?").
 //
-//   cp <TU>.db ast.db && souffle 03_types.dl
+//   cidx-astgraph --output ast.db <source> && souffle 03_types.dl
 #include "ast_prelude.dl"
 
 // The type of every named declaration — node.type_id joined to a spelling.

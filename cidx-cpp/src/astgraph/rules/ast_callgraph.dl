@@ -1,0 +1,54 @@
+// Native, generated Souffle rule for cidx-astgraph.
+//
+// This program intentionally has no .input/.output directives: the C++
+// runner supplies facts from a caller-selected AST SQLite DB and reads `call`
+// directly.  That avoids the standalone examples' fixed `dbname="ast.db"`
+// contract while preserving them for user-authored Datalog.
+
+.decl ast_node(id:number, kind_id:number, symbol_id:number, spelling:symbol,
+               line:number, is_definition:number)
+.decl ast_edge(src:number, dst:number, rel_id:number, pos:number)
+.decl ast_symbol(id:number, usr:symbol)
+
+// These input declarations retain the relations in the generated C++ program.
+// `run()` performs no file I/O; the native runner populates them directly.
+.input ast_node
+.input ast_edge
+.input ast_symbol
+
+// CXCursorKind values, fixed by libclang's C API.
+#define FunctionDecl 8
+#define CXXMethod 21
+#define Constructor 24
+#define Destructor 25
+#define CallExpr 103
+
+// astgraph relation_kind values.
+#define Child 1
+#define References 2
+
+.decl descendant(ancestor:number, node:number)
+descendant(a, n) :- ast_edge(a, n, Child, _).
+descendant(a, n) :- descendant(a, p), ast_edge(p, n, Child, _).
+
+.decl function(id:number, symbol_id:number, name:symbol)
+function(id, sid, name) :- ast_node(id, FunctionDecl, sid, name, _, 1).
+function(id, sid, name) :- ast_node(id, CXXMethod, sid, name, _, 1).
+function(id, sid, name) :- ast_node(id, Constructor, sid, name, _, 1).
+function(id, sid, name) :- ast_node(id, Destructor, sid, name, _, 1).
+
+// Canonical call facts preserve both the AST-node identities and the stable
+// USRs.  Name is presentation data only, never the join key.
+.decl call(caller_node:number, caller_usr:symbol, caller_name:symbol,
+           callee_node:number, callee_usr:symbol, callee_name:symbol,
+           line:number)
+call(caller, caller_usr, caller_name, callee, callee_usr, callee_name, line) :-
+    function(caller, caller_symbol, caller_name),
+    ast_symbol(caller_symbol, caller_usr),
+    descendant(caller, site),
+    ast_node(site, CallExpr, _, _, line, _),
+    ast_edge(site, callee, References, _),
+    ast_node(callee, _, callee_symbol, callee_name, _, _),
+    ast_symbol(callee_symbol, callee_usr).
+
+.output call

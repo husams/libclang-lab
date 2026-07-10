@@ -110,6 +110,10 @@ set_tests_properties(ast_clang_test PROPERTIES
 add_executable(astgraph_test astgraph_test.cpp)
 target_compile_options(astgraph_test PRIVATE -Wall -Wextra)
 target_link_libraries(astgraph_test PRIVATE cidx_core)
+if(CIDX_ASTGRAPH_SOUFFLE_ENABLED)
+  target_sources(astgraph_test PRIVATE
+    $<TARGET_OBJECTS:cidx_astgraph_souffle_rules>)
+endif()
 
 add_test(NAME astgraph_clang_test COMMAND astgraph_test --test-suite=clang)
 set_tests_properties(astgraph_clang_test PROPERTIES

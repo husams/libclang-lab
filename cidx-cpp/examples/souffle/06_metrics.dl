@@ -1,7 +1,7 @@
 // 06_metrics.dl — aggregation: size/complexity numbers per function.
 // Sort any output with e.g.:  souffle 06_metrics.dl | sort -t$'\t' -k2 -nr
 //
-//   cp <TU>.db ast.db && souffle 06_metrics.dl
+//   cidx-astgraph --output ast.db <source> && souffle 06_metrics.dl
 #include "ast_prelude.dl"
 
 // Main-file functions only (metrics over <vector> internals are noise).

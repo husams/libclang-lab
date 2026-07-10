@@ -13,13 +13,20 @@ them — we need a denser, per-TU fact base that Soufflé can read directly
 ## Decision
 
 A separate binary **`cidx-astgraph`** (src/astgraph/, linked from `cidx_core`)
-dumps one TU into **`<TU filename>.db`** (e.g. `shapes.c.db`).
+dumps one TU into a collision-safe **`<TU filename>.<identity>.db`** by
+default. `--output PATH` selects an explicit artifact path; publication is
+atomic, so a failed refresh preserves the previous complete DB.
 
 Configuration is **shared with cidx**: the source file must be registered in
 the cidx `index.db` (`cidx import`); its stored `compile_options` + `driver`
 run through the exact `cidx index` pipeline (`CompileDb::sanitize` →
 `resolve_options` → `Toolchain`/`Parser`). `--db PATH` overrides the index;
 `INDEXER_CACHE` is honoured via `resolve_cache_dir()`.
+
+The initial native analysis surface is `cidx-astgraph analyze --rule callgraph
+SOURCE`: CMake generates and embeds its fixed Soufflé program, then cidx
+streams facts from the selected AST DB and emits node/USR-identity JSON. This
+does not replace the external `souffle` workflow for arbitrary user rules.
 
 ### Schema (user-approved 2026-07-09, `meta.schema_version = 2`)
 
@@ -62,7 +69,8 @@ appear as shallow nodes via cross-ref edges (geometry.cpp → 372 nodes).
 
 * C++-only **by explicit user decision** (like model.py's Python-only status,
   this is exempt from the Py↔C++ parity rule).
-* `<TU>.db` is a derived artifact: rerunning truncates and rewrites it.
+* An AST DB is a derived artifact: a successful rerun atomically replaces its
+  selected output path.
 * Soufflé reads the tables in place — table names/arities match `.decl`s, no
   adapter views (unlike `cidx_views.sql` over index.db). Gotchas: `ord` and
   `contains` are reserved Soufflé identifiers — rename them in `.decl`s only.

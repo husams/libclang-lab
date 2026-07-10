@@ -4,7 +4,7 @@
 // design.  Writes create tables `calls` and `reach` in ast.db (plus
 // Soufflé's __SymbolTable); re-running replaces them.
 //
-//   cp <TU>.db ast.db && souffle 07_writeback.dl
+//   cidx-astgraph --output ast.db <source> && souffle 07_writeback.dl
 //   sqlite3 ast.db 'SELECT * FROM calls LIMIT 5;'
 //   sqlite3 ast.db "SELECT caller FROM reach WHERE callee='shape_area';"
 #include "ast_prelude.dl"
