@@ -9,24 +9,40 @@
 // them as attribute or relation names (the edge position column is `pos`).
 
 // ---------------------------------------------------------------------------
-// EDB — the astgraph tables
+// EDB — the astgraph tables.  Keep these flat because they mirror the SQLite
+// schema 1:1.  The compact derived predicates below are the ergonomic API for
+// rules; do not make user rules repeatedly unpack all 15 node columns.
 // ---------------------------------------------------------------------------
-.decl edge(src:number, dst:number, rel:number, pos:number)
+.type NodeId = number
+.type KindId = number
+.type SymbolId = number
+.type FileId = number
+.type RelationId = number
+.type SourceRange = [file:FileId, line:number, col:number,
+                     end_line:number, end_col:number]
+
+.decl edge(src:NodeId, dst:NodeId, rel:RelationId, pos:number)
 .input edge(IO=sqlite, dbname="ast.db")
 
-.decl node(id:number, kind_id:number, symbol_id:number, type_id:number,
-           spelling:symbol, file_id:number, line:number, col:number,
+.decl node(id:NodeId, kind_id:KindId, symbol_id:SymbolId, type_id:NodeId,
+           spelling:symbol, file_id:FileId, line:number, col:number,
            end_line:number, end_col:number, is_definition:number,
            access:number, is_const:number, is_volatile:number,
            is_restrict:number)
 .input node(IO=sqlite, dbname="ast.db")
 
-.decl symbol(id:number, usr:symbol, name:symbol, kind_id:number,
+.decl symbol(id:SymbolId, usr:symbol, name:symbol, kind_id:KindId,
              linkage:number)
 .input symbol(IO=sqlite, dbname="ast.db")
 
-.decl file(id:number, path:symbol, is_main:number)
+.decl file(id:FileId, path:symbol, is_main:number)
 .input file(IO=sqlite, dbname="ast.db")
+
+.decl node_kind(id:KindId, name:symbol, category:symbol)
+.input node_kind(IO=sqlite, dbname="ast.db")
+
+.decl relation_kind(id:RelationId, name:symbol)
+.input relation_kind(IO=sqlite, dbname="ast.db")
 
 // ---------------------------------------------------------------------------
 // Fixed catalogs as macros (see relation_kind / node_kind inside the DB).
@@ -68,11 +84,21 @@
 #define NamespaceDecl        22
 #define Constructor          24
 #define Destructor           25
+#define FunctionTemplate     30
 #define ClassTemplate        31
+#define ClassTemplatePartialSpecialization 32
 #define CXXBaseSpecifier     44
 #define DeclRefExpr          101
 #define MemberRefExpr        102
 #define CallExpr             103
+#define IfStmt               205
+#define SwitchStmt           206
+#define WhileStmt            207
+#define DoStmt               208
+#define ForStmt              209
+#define ReturnStmt           214
+#define TypeAliasDecl        600
+#define TypeAliasTemplateDecl 601
 
 // type kinds (1000 + CXTypeKind)
 #define PointerType          1101
@@ -84,28 +110,69 @@
 #define ElaboratedType       1119
 
 // ---------------------------------------------------------------------------
-// Common closures / concepts (the reusable IDB layer)
+// Common projections / concepts (the reusable IDB layer)
 // ---------------------------------------------------------------------------
 
+// The fields most AST rules need, in a stable and readable order.
+.decl node_core(id:NodeId, kind:KindId, symbol:SymbolId, type:NodeId,
+                spelling:symbol, definition:number)
+node_core(id, kind, sym, ty, sp, def) :-
+    node(id, kind, sym, ty, sp, _, _, _, _, _, def, _, _, _, _).
+
+// Location is a genuine compound value, so use a record here rather than
+// carrying five independent coordinates through every derived relation.
+.decl node_location(id:NodeId, location:SourceRange)
+node_location(id, [fid, line, col, end_line, end_col]) :-
+    node(id, _, _, _, _, fid, line, col, end_line, end_col, _, _, _, _, _).
+
+.decl node_in_main_file(id:NodeId)
+node_in_main_file(id) :-
+    node_location(id, [fid, _, _, _, _]), file(fid, _, 1).
+
+.decl node_access(id:NodeId, access:number)
+node_access(id, access) :-
+    node(id, _, _, _, _, _, _, _, _, _, _, access, _, _, _).
+
+.decl type_qualifiers(id:NodeId, is_const:number, is_volatile:number,
+                      is_restrict:number)
+type_qualifiers(id, is_const, is_volatile, is_restrict) :-
+    node(id, kind, _, _, _, _, _, _, _, _, _, _, is_const, is_volatile,
+         is_restrict), kind >= 1000.
+
+// USR is the durable identity across AST dumps.  Names are display data only.
+.decl node_symbol(id:NodeId, usr:symbol, name:symbol, linkage:number)
+node_symbol(id, usr, name, linkage) :-
+    node_core(id, _, sid, _, _, _), sid != 0,
+    symbol(sid, usr, name, _, linkage).
+
 // Structural containment: everything inside a subtree (rel = child).
-.decl descendant(anc:number, n:number)
+.decl descendant(anc:NodeId, n:NodeId)
 descendant(a, n) :- edge(a, n, Child, _).
 descendant(a, n) :- descendant(a, m), edge(m, n, Child, _).
 
 // Function-like DEFINITIONS (free functions, methods, ctors, dtors).
-.decl function_definition(id:number, name:symbol)
-function_definition(id, n) :- node(id, FunctionDecl,    _, _, n, _, _, _, _, _, 1, _, _, _, _).
-function_definition(id, n) :- node(id, CXXMethod,      _, _, n, _, _, _, _, _, 1, _, _, _, _).
-function_definition(id, n) :- node(id, Constructor, _, _, n, _, _, _, _, _, 1, _, _, _, _).
-function_definition(id, n) :- node(id, Destructor,  _, _, n, _, _, _, _, _, 1, _, _, _, _).
+.decl function_definition(id:NodeId, name:symbol)
+function_definition(id, n) :- node_core(id, FunctionDecl, _, _, n, 1).
+function_definition(id, n) :- node_core(id, CXXMethod, _, _, n, 1).
+function_definition(id, n) :- node_core(id, Constructor, _, _, n, 1).
+function_definition(id, n) :- node_core(id, Destructor, _, _, n, 1).
+
+// Main-file function definitions are the default scope for expensive example
+// analyses. Headers remain available when a rule explicitly opts into them.
+.decl main_function(id:NodeId, name:symbol)
+main_function(id, n) :- function_definition(id, n), node_in_main_file(id).
+
+.decl main_scope(id:NodeId)
+main_scope(id) :- main_function(id, _).
+main_scope(id) :- main_function(f, _), descendant(f, id).
 
 // Type-space nodes, and reachability over the type graph (reflexive), i.e.
 // "type a mentions type b" through sugar, pointers, arrays, results, args,
 // template arguments.
-.decl typenode(t:number)
-typenode(t) :- node(t, k, _, _, _, _, _, _, _, _, _, _, _, _, _), k >= 1000.
+.decl typenode(t:NodeId)
+typenode(t) :- node_core(t, k, _, _, _, _), k >= 1000.
 
-.decl type_reach(a:number, b:number)
+.decl type_reach(a:NodeId, b:NodeId)
 type_reach(t, t) :- typenode(t).
 type_reach(a, b) :- type_reach(a, k), edge(k, b, CanonicalType, _).
 type_reach(a, b) :- type_reach(a, k), edge(k, b, Pointee, _).
@@ -117,14 +184,37 @@ type_reach(a, b) :- type_reach(a, k), edge(k, b, TemplateArg, _).
 
 // A declaration is referenced — directly, or through a sibling declaration
 // that its definition/canonical edges connect it to.
-.decl referenced(d:number)
+.decl referenced(d:NodeId)
 referenced(d) :- edge(_, d, References, _).
 referenced(d) :- edge(_, p, References, _), edge(p, d, Definition, _).
 referenced(d) :- edge(_, p, References, _), edge(p, d, Canonical, _).
 
 // Direct call: a CALL_EXPR inside f's body, resolved via `references`.
-.decl direct_call(f:number, callee:number, line:number)
-direct_call(f, callee, ln) :-
+.decl direct_call_site(function:NodeId, site:NodeId, callee:NodeId,
+                       line:number)
+direct_call_site(f, site, callee, ln) :-
     function_definition(f, _), descendant(f, c),
-    node(c, CallExpr, _, _, _, _, ln, _, _, _, _, _, _, _, _),
-    edge(c, callee, References, _).
+    c = site, node_core(c, CallExpr, _, _, _, _),
+    node_location(c, [_, ln, _, _, _]), edge(c, callee, References, _).
+
+.decl direct_call(function:NodeId, callee:NodeId, line:number)
+direct_call(f, callee, ln) :- direct_call_site(f, _, callee, ln).
+
+// A call may reference a declaration/prototype while the Definition edge
+// points at the actual body. This is narrower than `referenced`, which also
+// includes canonical/definition bookkeeping edges.
+.decl called_function(id:NodeId)
+called_function(id) :- direct_call(_, id, _), function_definition(id, _).
+called_function(id) :-
+    direct_call(_, decl, _), edge(decl, id, Definition, _),
+    function_definition(id, _).
+
+// Cross-file semantic references, useful for dependency/API examples. Type
+// nodes have file_id=0 and are intentionally excluded.
+.decl file_reference(source:FileId, target:FileId,
+                     source_node:NodeId, target_node:NodeId)
+file_reference(sf, tf, s, t) :-
+    edge(s, t, References, _),
+    node_location(s, [sf, _, _, _, _]),
+    node_location(t, [tf, _, _, _, _]),
+    sf != 0, tf != 0, sf != tf.

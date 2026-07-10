@@ -1,0 +1,27 @@
+// 11_dependencies.dl — file-level semantic dependencies derived from
+// cross-file references in a single TU. This is not a textual include graph:
+// it reports which declarations in one contributing file are semantically
+// referenced by nodes in another.
+//
+//   cidx-astgraph --output ast.db <source> && souffle 11_dependencies.dl
+#include "ast_prelude.dl"
+
+.decl file_dependency(source:FileId, target:FileId, references:number)
+file_dependency(sf, tf, c) :-
+    file_reference(sf, tf, _, _),
+    c = count : { file_reference(sf, tf, _, _) }.
+
+.decl file_dependency_display(source:symbol, target:symbol,
+                              references:number)
+file_dependency_display(sp, tp, c) :-
+    file_dependency(sf, tf, c), file(sf, sp, _), file(tf, tp, _).
+
+// Referenced declarations that do not have a symbol/USR in this dump. These
+// are useful clues for implicit compiler entities and incomplete AST facts.
+.decl anonymous_reference(site:NodeId, target:NodeId, spelling:symbol)
+anonymous_reference(site, target, spelling) :-
+    edge(site, target, References, _),
+    node_core(target, _, 0, _, spelling, _), spelling != "".
+
+.output file_dependency_display(IO=stdout)
+.output anonymous_reference(IO=stdout)

@@ -1,0 +1,46 @@
+// 12_ast_inventory.dl — schema-aware AST quality and coverage inventory.
+// Useful before trusting a more ambitious analysis on a new toolchain.
+//
+//   cidx-astgraph --output ast.db <source> && souffle 12_ast_inventory.dl
+#include "ast_prelude.dl"
+
+.decl node_kind_inventory(kind:KindId, name:symbol, category:symbol,
+                          node_count:number)
+node_kind_inventory(k, n, c, cnt) :-
+    node_kind(k, n, c), cnt = count : { node(_, k, _, _, _, _, _, _, _, _,
+                                             _, _, _, _, _) }.
+
+.decl relation_inventory(relation:RelationId, name:symbol, edge_count:number)
+relation_inventory(r, n, cnt) :-
+    relation_kind(r, n), cnt = count : { edge(_, _, r, _) }.
+
+.decl main_file_nodes(node_count:number)
+main_file_nodes(cnt) :-
+    cnt = count : { node_in_main_file(_) }.
+
+.decl header_nodes(node_count:number)
+header_nodes(cnt) :-
+    cnt = count : { node(id, _, _, _, _, fid, _, _, _, _, _, _, _, _, _),
+                    file(fid, _, 0), id != 0 }.
+
+.decl locationless_cursors(id:NodeId, kind:KindId)
+locationless_cursors(id, k) :-
+    node_core(id, k, _, _, _, _), k < 1000,
+    node_location(id, [0, _, _, _, _]).
+
+.decl usrless_named_cursors(id:NodeId, kind:KindId, spelling:symbol)
+usrless_named_cursors(id, k, spelling) :-
+    node_core(id, k, 0, _, spelling, _), k < 1000, spelling != "".
+
+.decl reference_without_usr(site:NodeId, target:NodeId, spelling:symbol)
+reference_without_usr(site, target, spelling) :-
+    edge(site, target, References, _),
+    node_core(target, _, 0, _, spelling, _), spelling != "".
+
+.output node_kind_inventory(IO=stdout)
+.output relation_inventory(IO=stdout)
+.output main_file_nodes(IO=stdout)
+.output header_nodes(IO=stdout)
+.output locationless_cursors(IO=stdout)
+.output usrless_named_cursors(IO=stdout)
+.output reference_without_usr(IO=stdout)

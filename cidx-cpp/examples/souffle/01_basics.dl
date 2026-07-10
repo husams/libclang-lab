@@ -7,8 +7,7 @@
 .decl main_functions(name:symbol, line:number)
 main_functions(n, ln) :-
     function_definition(id, n),
-    node(id, _, _, _, _, fid, ln, _, _, _, _, _, _, _, _),
-    file(fid, _, 1).
+    node_in_main_file(id), node_location(id, [_, ln, _, _, _]).
 
 // Every record (struct/class/union) DEFINED in the main file.
 .decl main_records(kind:symbol, name:symbol, line:number)
@@ -17,23 +16,25 @@ main_records("class",  n, ln) :- record_definition(ClassDecl,  n, ln).
 main_records("union",  n, ln) :- record_definition(UnionDecl,  n, ln).
 .decl record_definition(k:number, name:symbol, line:number)
 record_definition(k, n, ln) :-
-    node(_, k, _, _, n, fid, ln, _, _, _, 1, _, _, _, _),
+    node_core(id, k, _, _, n, 1),
     (k = StructDecl ; k = ClassDecl ; k = UnionDecl),
-    file(fid, _, 1).
+    node_in_main_file(id), node_location(id, [_, ln, _, _, _]).
 
 // Global variables (VAR_DECL directly under the TU root, node id 1) and
 // their type spelling — the node.type_id column in action.
 .decl globals(name:symbol, type:symbol)
 globals(n, t) :-
     edge(1, v, Child, _),
-    node(v, VarDecl, _, tid, n, _, _, _, _, _, _, _, _, _, _),
-    node(tid, _, _, _, t, _, _, _, _, _, _, _, _, _, _).
+    node_core(v, VarDecl, _, tid, n, _),
+    node_core(tid, _, _, _, t, _).
 
-// Which headers did this TU pull in?
-.decl included_files(path:symbol)
-included_files(p) :- file(_, p, 0).
+// Which contributing files appear in this TU? This is source-location
+// coverage, not a textual include graph; see 11_dependencies.dl for semantic
+// cross-file references.
+.decl contributing_files(path:symbol)
+contributing_files(p) :- file(_, p, 0).
 
 .output main_functions(IO=stdout)
 .output main_records(IO=stdout)
 .output globals(IO=stdout)
-.output included_files(IO=stdout)
+.output contributing_files(IO=stdout)

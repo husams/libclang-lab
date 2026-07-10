@@ -1,0 +1,37 @@
+// 10_templates.dl — template arguments and specialization links exposed by
+// libclang's type/cursor APIs.
+//
+//   cidx-astgraph --output ast.db <source> && souffle 10_templates.dl
+//
+// Caveat: only TYPE template arguments are available through the CXType API.
+// Non-type template values and deduced member-template arguments are outside
+// this AST-graph relation set; see the libclang template-argument manual.
+#include "ast_prelude.dl"
+
+// A type node's ordered TYPE template arguments. `position` is zero-based.
+.decl template_argument(owner:NodeId, owner_spelling:symbol,
+                        position:number, argument:NodeId,
+                        argument_spelling:symbol)
+template_argument(owner, owner_spelling, pos, argument, argument_spelling) :-
+    edge(owner, argument, TemplateArg, pos),
+    node_core(owner, kind, _, _, owner_spelling, _), kind >= 1000,
+    node_core(argument, _, _, _, argument_spelling, _).
+
+// Cursor-level specialization edges: a specialization/instantiation refers to
+// its primary template.  Keep USRs for identity; names are display-only.
+.decl specialization(what:NodeId, what_usr:symbol, what_name:symbol,
+                     primary:NodeId, primary_usr:symbol, primary_name:symbol)
+specialization(what, wu, wn, primary, pu, pn) :-
+    edge(what, primary, Specializes, _),
+    node_symbol(what, wu, wn, _), node_symbol(primary, pu, pn, _).
+
+// Which main-file declarations use a type with template arguments?
+.decl main_template_use(declaration:NodeId, name:symbol,
+                        type:NodeId, type_spelling:symbol)
+main_template_use(decl, name, ty, spelling) :-
+    node_in_main_file(decl), node_core(decl, _, _, ty, name, _), ty != 0,
+    template_argument(ty, spelling, _, _, _).
+
+.output template_argument(IO=stdout)
+.output specialization(IO=stdout)
+.output main_template_use(IO=stdout)

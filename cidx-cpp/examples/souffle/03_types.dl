@@ -7,10 +7,10 @@
 // The type of every named declaration — node.type_id joined to a spelling.
 .decl decl_type(name:symbol, type:symbol)
 decl_type(n, t) :-
-    node(_, k, _, tid, n, _, _, _, _, _, _, _, _, _, _),
+    node_core(_, k, _, tid, n, _),
     (k = VarDecl ; k = ParmDecl ; k = FieldDecl),
     n != "", tid != 0,
-    node(tid, _, _, _, t, _, _, _, _, _, _, _, _, _, _).
+    node_core(tid, _, _, _, t, _).
 
 // TYPE-BASED IMPACT: functions whose body holds ANY node whose type chain
 // (through pointers, const sugar, typedefs, arrays, template args) reaches
@@ -19,18 +19,18 @@ decl_type(n, t) :-
 .decl touches_shape(f:symbol)
 touches_shape(fn) :-
     function_definition(fid, fn), descendant(fid, n),
-    node(n, _, _, t, _, _, _, _, _, _, _, _, _, _, _), t != 0,
+    node_core(n, _, _, t, _, _), t != 0,
     type_reach(t, s),
-    node(s, RecordType, _, _, sp, _, _, _, _, _, _, _, _, _, _),
+    node_core(s, RecordType, _, _, sp, _),
     match(".*Shape.*", sp).
 
 // Functions RETURNING a pointer: fn type -> result_type edge -> Pointer.
 .decl returns_pointer(f:symbol, ret:symbol)
 returns_pointer(fn, rt) :-
     function_definition(fid, fn),
-    node(fid, _, _, ft, _, _, _, _, _, _, _, _, _, _, _),
+    node_core(fid, _, _, ft, _, _),
     edge(ft, r, ResultType, _),
-    node(r, PointerType, _, _, rt, _, _, _, _, _, _, _, _, _, _).
+    node_core(r, PointerType, _, _, rt, _).
 
 // Pointer depth of every pointer type (char** = 2, char* = 1 ...).
 .decl has_pointee(t:number)
@@ -41,15 +41,14 @@ pointer_depth(t, d + 1) :- edge(t, p, Pointee, _), pointer_depth(p, d).
 .decl deep_pointers(type:symbol, depth:number)
 deep_pointers(sp, d) :-
     pointer_depth(t, d), d >= 2,
-    node(t, PointerType, _, _, sp, _, _, _, _, _, _, _, _, _, _).
+    node_core(t, PointerType, _, _, sp, _).
 
 // De-sugar every typedef used in the main file: alias -> canonical spelling.
 .decl typedef_resolves(alias:symbol, canonical:symbol)
 typedef_resolves(a, c) :-
-    node(td, TypedefDecl, _, _, a, fid, _, _, _, _, _, _, _, _, _),
-    file(fid, _, 1),
+    node_core(td, TypedefDecl, _, _, a, _), node_in_main_file(td),
     edge(td, u, UnderlyingType, _), type_reach(u, ct),
-    node(ct, ck, _, _, c, _, _, _, _, _, _, _, _, _, _),
+    node_core(ct, ck, _, _, c, _),
     ck >= 1000, ck != TypedefType, ck != ElaboratedType.
 
 // Const-qualified pointee parameters ("this function promises not to write
@@ -57,9 +56,9 @@ typedef_resolves(a, c) :-
 .decl readonly_pointer_param(f:symbol, param:symbol)
 readonly_pointer_param(fn, pn) :-
     function_definition(fid, fn), descendant(fid, p),
-    node(p, ParmDecl, _, pt, pn, _, _, _, _, _, _, _, _, _, _),
+    node_core(p, ParmDecl, _, pt, pn, _),
     edge(pt, pointee, Pointee, _), type_reach(pointee, q),
-    node(q, _, _, _, _, _, _, _, _, _, _, _, 1, _, _).
+    type_qualifiers(q, 1, _, _).
 
 .output decl_type(IO=stdout)
 .output touches_shape(IO=stdout)
