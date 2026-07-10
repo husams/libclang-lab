@@ -12,6 +12,7 @@ dependencies = [
     "libclang>=18.1.1; sys_platform == 'darwin'",
     "clang>=21.1.7; sys_platform != 'darwin'",
     "ipython>=9.14.1",
+    "z3-solver>=4.13",
 ]
 
 [project.scripts]
