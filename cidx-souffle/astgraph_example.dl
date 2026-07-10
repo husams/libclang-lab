@@ -1,11 +1,10 @@
 // astgraph_example.dl — Datalog reasoning over a cidx-astgraph per-TU dump.
 //
 // Usage:
-//   cidx-astgraph <source>            # produces <source-name>.db
-//   cp <source-name>.db ast.db        # souffle dbnames are fixed strings
+//   cidx-astgraph --output ast.db <source>
 //   souffle astgraph_example.dl
 //
-// The <TU>.db tables ARE the EDB — no adapter views needed: astgraph writes
+// The ast.db tables ARE the EDB — no adapter views needed: astgraph writes
 // NULL-free tables whose names/arities match the .decl blocks below.
 // Kind ids: node_kind.id = CXCursorKind (1..999) or 1000+CXTypeKind;
 // relation ids: 1=child 2=references 3=definition ... (see relation_kind).

@@ -27,12 +27,15 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include "clang-c/Index.h"
 
 #include "cli/args.hpp"       // kVersion (meta.generator provenance)
 #include "cli/kind_names.hpp" // Python CursorKind.name table (cidx parity)
 #include "storage/sqlite.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
 #include "util/json_min.hpp"
 
 namespace cidx {
@@ -190,6 +193,12 @@ public:
     put_meta("libclang", cxs(::clang_getClangVersion()));
     put_meta("main_only", main_only_ ? "1" : "0");
     put_meta("kind_scheme", "cursor=CXCursorKind; type=1000+CXTypeKind");
+    put_meta("source_md5", md5_of(source).value_or(""));
+    put_meta("options_sha1",
+             sha1_flags_hash(AstCacheKey{source, args, driver}));
+    put_meta("artifact_key", artifact_key(
+                                source, args, driver,
+                                Options{.main_only = main_only_}));
   }
 
   void seed_relation_kinds() {
@@ -516,26 +525,51 @@ CXChildVisitResult walk_visitor(CXCursor c, CXCursor /*parent*/,
 
 } // namespace
 
+std::string artifact_key(const std::string &source_path,
+                         const std::vector<std::string> &args,
+                         const std::optional<std::string> &driver,
+                         const Options &opts) {
+  const AstCacheKey key{source_path, args, driver};
+  return sha1_hex(sha1_cache_key(key) + std::string("\0main_only=", 11) +
+                  (opts.main_only ? "1" : "0"));
+}
+
 DumpStats dump_tu(const ParsedTu &tu, const std::string &out_db_path,
                   const Options &opts, const std::string &source_path,
                   const std::vector<std::string> &args,
                   const std::optional<std::string> &driver) {
-  // The dump is a derived artifact regenerated wholesale: truncate any
-  // previous run's DB (plus a stale rollback journal) before writing.
-  std::remove(out_db_path.c_str());
-  std::remove((out_db_path + "-journal").c_str());
+  // Publish atomically: write beside the requested destination and rename only
+  // after SQLite has committed and closed. This preserves a previous complete
+  // artifact when traversal or storage fails.
+  const std::string temp_path = out_db_path + ".tmp-" +
+                                std::to_string(static_cast<long long>(::getpid()));
+  std::remove(temp_path.c_str());
+  std::remove((temp_path + "-journal").c_str());
 
-  Dumper dumper(out_db_path, opts);
-  dumper.write_meta(source_path, args, driver);
-  dumper.seed_relation_kinds();
+  DumpStats stats;
+  try {
+    {
+      Dumper dumper(temp_path, opts);
+      dumper.write_meta(source_path, args, driver);
+      dumper.seed_relation_kinds();
 
-  const CXCursor root = ::clang_getTranslationUnitCursor(tu.tu);
-  const int64_t root_id = dumper.intern_cursor(root);
-  WalkFrame frame{&dumper, root_id, 0};
-  ::clang_visitChildren(root, walk_visitor, &frame);
-  dumper.rethrow_if_failed();
-  dumper.drain();
-  return dumper.finish();
+      const CXCursor root = ::clang_getTranslationUnitCursor(tu.tu);
+      const int64_t root_id = dumper.intern_cursor(root);
+      WalkFrame frame{&dumper, root_id, 0};
+      ::clang_visitChildren(root, walk_visitor, &frame);
+      dumper.rethrow_if_failed();
+      dumper.drain();
+      stats = dumper.finish();
+    }
+    if (std::rename(temp_path.c_str(), out_db_path.c_str()) != 0) {
+      throw CidxError("cannot publish AST database at " + out_db_path);
+    }
+  } catch (...) {
+    std::remove(temp_path.c_str());
+    std::remove((temp_path + "-journal").c_str());
+    throw;
+  }
+  return stats;
 }
 
 } // namespace astgraph

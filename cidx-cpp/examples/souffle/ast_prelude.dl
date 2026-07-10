@@ -1,8 +1,7 @@
 // ast_prelude.dl — shared EDB declarations + closures for reasoning over a
 // cidx-astgraph per-TU dump (schema v2).  #include this from every example:
 //
-//   cidx-astgraph <source>      # -> <source name>.db
-//   cp <source name>.db ast.db  # souffle dbnames are fixed strings
+//   cidx-astgraph --output ast.db <source>
 //   souffle 0N_<example>.dl
 //
 // The dump's tables are read IN PLACE (names/arities match, no NULLs).

@@ -1,7 +1,7 @@
 // 05_oop.dl — C++ object model: class hierarchy, methods, overrides,
-// construction sites.  Run on a C++ dump (e.g. geometry.cpp.db).
+// construction sites.  Run on a C++ dump (e.g. ast.db from geometry.cpp).
 //
-//   cidx-astgraph manifests/geometry.cpp && cp geometry.cpp.db ast.db
+//   cidx-astgraph --output ast.db manifests/geometry.cpp
 //   souffle 05_oop.dl
 #include "ast_prelude.dl"
 

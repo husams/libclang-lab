@@ -292,6 +292,52 @@ target_compile_options(cidx_core PRIVATE
 target_compile_definitions(cidx_core PUBLIC
   "CIDX_LIBCLANG_PATH=\"${CIDX_LIBCLANG_LIB}\"")
 
+# Optional native Souffle support for maintained astgraph analyses.  Each rule
+# is generated at build time and embedded as an object, while user-authored
+# Datalog remains the standalone `souffle` CLI workflow.
+option(CIDX_ASTGRAPH_SOUFFLE "Build native Souffle astgraph analyses" ON)
+if(CIDX_ASTGRAPH_SOUFFLE)
+  find_program(CIDX_SOUFFLE_EXECUTABLE NAMES souffle)
+  # Homebrew ships a nested include root; prefer it to the parent include dir
+  # so generated <souffle/...> includes select one consistent header tree.
+  find_path(CIDX_SOUFFLE_INCLUDE_DIR NAMES souffle/CompiledSouffle.h
+    HINTS /opt/homebrew/opt/souffle/include/souffle)
+  if(CIDX_SOUFFLE_EXECUTABLE AND CIDX_SOUFFLE_INCLUDE_DIR)
+    set(_cidx_astgraph_rule_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/astgraph")
+    set(_cidx_astgraph_callgraph_cpp
+      "${_cidx_astgraph_rule_dir}/ast_callgraph.cpp")
+    add_custom_command(
+      OUTPUT "${_cidx_astgraph_callgraph_cpp}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${_cidx_astgraph_rule_dir}"
+      COMMAND "${CIDX_SOUFFLE_EXECUTABLE}" -g "${_cidx_astgraph_callgraph_cpp}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/src/astgraph/rules/ast_callgraph.dl"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/astgraph/rules/ast_callgraph.dl"
+      VERBATIM)
+    # Souffle 2.5's generated runtime is C++17-compatible but is not C++23
+    # clean on current libc++; keep this narrow bridge out of cidx_core.
+    add_library(cidx_astgraph_souffle_rules OBJECT
+      src/astgraph/souffle_runner.cpp
+      "${_cidx_astgraph_callgraph_cpp}")
+    set_target_properties(cidx_astgraph_souffle_rules PROPERTIES
+      CXX_STANDARD 17
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS OFF)
+    target_compile_definitions(cidx_astgraph_souffle_rules PRIVATE
+      CIDX_HAVE_ASTGRAPH_SOUFFLE=1
+      __EMBEDDED_SOUFFLE__)
+    target_include_directories(cidx_astgraph_souffle_rules PRIVATE
+      "${CIDX_SOUFFLE_INCLUDE_DIR}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set(CIDX_ASTGRAPH_SOUFFLE_ENABLED ON)
+    message(STATUS "cidx: native astgraph Souffle = ${CIDX_SOUFFLE_EXECUTABLE}")
+  else()
+    message(WARNING "cidx: Souffle not found; native astgraph analyses disabled")
+  endif()
+endif()
+if(NOT CIDX_ASTGRAPH_SOUFFLE_ENABLED)
+  target_sources(cidx_core PRIVATE src/astgraph/souffle_stub.cpp)
+endif()
+
 # A2.1: the stdc++fs workaround for GNU < 9 is removed — minimum is now gcc 13
 # where <filesystem> is in libstdc++ proper with no extra link needed.
 
@@ -321,6 +367,10 @@ endif()
 add_executable(cidx-astgraph src/astgraph/main.cpp)
 target_compile_options(cidx-astgraph PRIVATE -Wall -Wextra)
 target_link_libraries(cidx-astgraph PRIVATE cidx_core)
+if(CIDX_ASTGRAPH_SOUFFLE_ENABLED)
+  target_sources(cidx-astgraph PRIVATE
+    $<TARGET_OBJECTS:cidx_astgraph_souffle_rules>)
+endif()
 if(CIDX_STATIC AND NOT APPLE)
   target_link_options(cidx-astgraph PRIVATE -static-libstdc++ -static-libgcc)
 endif()

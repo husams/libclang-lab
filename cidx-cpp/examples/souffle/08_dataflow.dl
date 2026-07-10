@@ -14,7 +14,7 @@
 //     and treating EVERY BinaryOperator as a store would invent false flows.
 //   * no branch/path sensitivity; pointer aliasing is ignored.
 //
-//   cp <TU>.db ast.db && souffle 08_dataflow.dl
+//   cidx-astgraph --output ast.db <source> && souffle 08_dataflow.dl
 #include "ast_prelude.dl"
 
 #define ReturnStmt 214

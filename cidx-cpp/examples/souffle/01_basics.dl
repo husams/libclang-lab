@@ -1,6 +1,6 @@
 // 01_basics.dl — first contact with a dump: what's in this TU?
 //
-//   cp <TU>.db ast.db && souffle 01_basics.dl
+//   cidx-astgraph --output ast.db <source> && souffle 01_basics.dl
 #include "ast_prelude.dl"
 
 // Function definitions declared in the TU's MAIN file, with their location.

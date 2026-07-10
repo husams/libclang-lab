@@ -1,7 +1,7 @@
 // 02_callgraph.dl — derive a call graph from AST primitives, then reason
 // over it: reachability, impact, recursion, entry points, fan-out ranking.
 //
-//   cp <TU>.db ast.db && souffle 02_callgraph.dl
+//   cidx-astgraph --output ast.db <source> && souffle 02_callgraph.dl
 #include "ast_prelude.dl"
 
 // Name-level call edges (with the call site's line).

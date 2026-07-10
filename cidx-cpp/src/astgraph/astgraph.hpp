@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "astgraph/schema.hpp"
 #include "clangx/parse.hpp"
 
 namespace cidx {
@@ -30,8 +31,6 @@ namespace astgraph {
 // v2 (2026-07-09): node.type_id column added — a cursor's own type is a
 // PROPERTY of the node (mirroring clang_getCursorType being a cursor
 // accessor), not an edge; the has_type relation (old id 9) is retired.
-constexpr int kSchemaVersion = 2;
-
 // CXTypeKind k is stored in node_kind / node.kind_id as kTypeKindBase + k so
 // the two libclang enum spaces never collide (CXCursorKind tops out < 1000).
 constexpr int kTypeKindBase = 1000;
@@ -77,8 +76,17 @@ struct DumpStats {
   int64_t files = 0;
 };
 
-// Create (truncating any existing file) `out_db_path` and dump `tu` into it.
-// `source_path` / `args` / `driver` are recorded in `meta` for provenance.
+// Stable identity of a dump's semantic inputs. Used for collision-safe default
+// filenames and recorded in metadata; changing source, flags, driver, or
+// main-only mode produces a different key.
+std::string artifact_key(const std::string &source_path,
+                         const std::vector<std::string> &args,
+                         const std::optional<std::string> &driver,
+                         const Options &opts);
+
+// Atomically replace `out_db_path` with a new dump of `tu`. A failed dump keeps
+// any previous artifact intact. `source_path` / `args` / `driver` are recorded
+// in metadata for provenance.
 // Throws StorageError / CidxError on failure.
 DumpStats dump_tu(const ParsedTu &tu, const std::string &out_db_path,
                   const Options &opts, const std::string &source_path,

@@ -2,7 +2,7 @@
 // All verdicts are TU-scoped ("dead in this translation unit") — for
 // repo-wide truth, join the symbol's USR against cidx index.db.
 //
-//   cp <TU>.db ast.db && souffle 04_deadcode.dl
+//   cidx-astgraph --output ast.db <source> && souffle 04_deadcode.dl
 #include "ast_prelude.dl"
 
 // Functions defined here that nothing in this TU references.
