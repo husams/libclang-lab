@@ -40,10 +40,24 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
 
+# dnf refreshes the metadata index of EVERY enabled repo before installing even
+# one package, so a single broken third-party repo (e.g. a devcontainer base
+# image's packages-microsoft-com-prod with a rotated/mismatched GPG key) aborts
+# the whole run. cidx needs nothing from those repos — its packages come from
+# baseos/appstream/crb — so skip any repo that fails to load and drop the known
+# Microsoft one outright. This does NOT update/upgrade anything; it only scopes
+# which repos each 'dnf install' is allowed to consult.
+dnf_install() {
+  $SUDO dnf -y \
+    --setopt='*.skip_if_unavailable=1' \
+    --disablerepo='*microsoft*' \
+    install "$@"
+}
+
 # --- dependencies ------------------------------------------------------------
 if [ "${SKIP_DEPS:-0}" != "1" ]; then
   echo "==> installing build dependencies (dnf)"
-  $SUDO dnf -y install dnf-plugins-core
+  dnf_install dnf-plugins-core
   # CRB / CodeReady Builder (some deps live there). Repo id differs by distro;
   # try each, never fail the run if it cannot be toggled.
   $SUDO dnf config-manager --set-enabled crb 2>/dev/null \
@@ -51,7 +65,7 @@ if [ "${SKIP_DEPS:-0}" != "1" ]; then
     || $SUDO subscription-manager repos --enable "codeready-builder-for-rhel-9-$(arch)-rpms" 2>/dev/null \
     || $SUDO crb enable 2>/dev/null \
     || echo "   (could not enable CRB automatically — continuing)"
-  $SUDO dnf -y install \
+  dnf_install \
     "gcc-toolset-${GCC_TOOLSET}" "gcc-toolset-${GCC_TOOLSET}-libstdc++-devel" \
     cmake make git tar xz unzip which \
     clang-devel llvm-devel
@@ -80,7 +94,7 @@ fetch_sqlite_src() {
   if [ "$got_zip" -eq 0 ]; then
     # GitHub mirror: build the amalgamation from the tag (needs tcl to run
     # tool/mksqlite3c.tcl via ./configure && make sqlite3.c).
-    [ "${SKIP_DEPS:-0}" = "1" ] || $SUDO dnf -y install git tcl file >/dev/null
+    [ "${SKIP_DEPS:-0}" = "1" ] || dnf_install git tcl file >/dev/null
     git clone --depth 1 -b "$SQLITE_GIT_TAG" "$SQLITE_GIT_URL" "$out/src"
     ( cd "$out/src" && ./configure >/dev/null && make sqlite3.c >/dev/null )
     cp "$out/src/sqlite3.c" "$out/src/sqlite3.h" "$out/"
