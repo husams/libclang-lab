@@ -1,0 +1,52 @@
+// Complete finite call-path subgraph between one source and one target.
+// Cycles are represented once as graph edges; cyclic walks are not enumerated.
+#include "cidx_base.dl"
+
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
+.decl query_target(name:Sym)
+.input query_target(IO=sqlite, dbname="index.db")
+
+// Everything reachable forward from the source, including the source.
+.decl from_source(node:Sym)
+from_source(n) :- query_seed(n).
+from_source(n) :- from_source(p), calls(p, n).
+
+// Everything that can reach the target, including the target.
+.decl to_target(node:Sym)
+to_target(n) :- query_target(n).
+to_target(n) :- calls(n, p), to_target(p).
+
+// Intersection of the forward and reverse cones: precisely the finite
+// subgraph lying on at least one source-to-target route.
+.decl on_path(node:Sym)
+on_path(n) :- from_source(n), to_target(n).
+
+.decl route_edge(caller:Sym, callee:Sym)
+route_edge(a, b) :- calls(a, b), from_source(a), to_target(b).
+
+// Presentation relations retain the collision-safe identity and add the full
+// callable signature (return type, parameters and stored qualifiers).
+.decl path_node(node:Sym, full_signature:symbol)
+path_node(n, sig) :- on_path(n), callable_fact(n, sig).
+
+.decl path_edge(caller:Sym, caller_signature:symbol,
+                callee:Sym, callee_signature:symbol)
+path_edge(a, asig, b, bsig) :-
+    route_edge(a, b), callable_fact(a, asig), callable_fact(b, bsig).
+
+.decl path_location(caller:Sym, callee:Sym, file:symbol,
+                    line:number, conditional:number)
+path_location(a, b, f, l, c) :-
+    route_edge(a, b), call_site_fact(a, b, f, l, _, c, _).
+
+.decl path_exists(source:Sym, source_signature:symbol,
+                  target:Sym, target_signature:symbol)
+path_exists(s, ssig, t, tsig) :-
+    query_seed(s), query_target(t), from_source(t),
+    callable_fact(s, ssig), callable_fact(t, tsig).
+
+.output path_exists(IO=stdout)
+.output path_node(IO=stdout)
+.output path_edge(IO=stdout)
+.output path_location(IO=stdout)

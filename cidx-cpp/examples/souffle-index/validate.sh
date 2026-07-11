@@ -44,8 +44,11 @@ architecture_seed="$(sqlite3 "$DB" 'SELECT a FROM e_uses UNION SELECT a FROM e_c
 impact_seed="$(sqlite3 "$DB" 'SELECT b FROM calls ORDER BY b LIMIT 1;')"
 metric_seed="$(sqlite3 "$DB" 'SELECT name FROM symdisp ORDER BY name LIMIT 1;')"
 template_seed="$(sqlite3 "$DB" 'SELECT a FROM instantiates ORDER BY a LIMIT 1;')"
+IFS=$'\t' read -r path_source path_target <<EOF
+$(sqlite3 -separator $'\t' "$DB" 'SELECT a,b FROM calls WHERE a IN (SELECT name FROM callable_fact) AND b IN (SELECT name FROM callable_fact) ORDER BY a,b LIMIT 1;')
+EOF
 
-for required in call_source reference_target hierarchy_seed architecture_seed impact_seed metric_seed template_seed; do
+for required in call_source reference_target hierarchy_seed architecture_seed impact_seed metric_seed template_seed path_source path_target; do
   [ -n "${!required}" ] || {
     echo "error: index has no suitable seed for $required" >&2
     exit 4
@@ -65,6 +68,12 @@ run_case 06 "$impact_seed" 06_impact.dl
 run_case 07 "$metric_seed" 07_metrics.dl
 run_case 08 "$template_seed" 08_templates.dl
 run_case 09 "" 09_cross_file.dl
+
+"$RUN" --seed "$path_source" --target "$path_target" \
+  11_all_paths.dl "$DB" >"$OUT/11.out"
+printf 'PASS 11 %-24s rows=%s source=%s target=%s\n' \
+  11_all_paths.dl "$(wc -l <"$OUT/11.out" | tr -d ' ')" \
+  "$path_source" "$path_target"
 
 # Write-back is validated only against a disposable copy.
 WRITE_DIR="$OUT/writeback"

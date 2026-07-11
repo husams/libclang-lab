@@ -27,7 +27,7 @@ The documentation is split into chapters under [`docs/`](docs/README.md):
 - [`run.sh`](docs/01-runner.md)
 - [`cidx_views.sql`](docs/02-database-views.md)
 - [`cidx_base.dl`](docs/03-base-relations.md)
-- one chapter for every numbered experiment
+- one chapter for every numbered experiment, including all call-path edges
 
 Start with the [documentation table of contents](docs/README.md).
 
@@ -37,6 +37,7 @@ Start with the [documentation table of contents](docs/README.md).
 ./validate.sh
 ```
 
-The validator selects exact seeds from the database, runs examples 01-09,
-generates a callgraph profile, and runs example 10 only against a disposable
-copy. Pass a database explicitly with `./validate.sh /path/to/index.db`.
+The validator selects exact seeds and path endpoints from the database, runs
+every read-only example, generates a callgraph profile, and runs example 10
+only against a disposable copy. Pass a database explicitly with
+`./validate.sh /path/to/index.db`.

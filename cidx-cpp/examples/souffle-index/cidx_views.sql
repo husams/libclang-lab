@@ -79,6 +79,28 @@ JOIN symdisp d ON d.id=s.id
 LEFT JOIN symbol_kind k ON k.id=s.kind
 LEFT JOIN file f ON f.id=COALESCE(s.file_id, s.decl_file_id);
 
+-- Callable identity -> canonical full signature. display_name only contains
+-- name+parameters; type_info carries return type plus cv/ref/noexcept qualifiers.
+-- Keep identity and presentation separate so existing seeds remain stable.
+DROP VIEW IF EXISTS callable_fact;
+CREATE VIEW callable_fact AS
+SELECT d.name,
+  CASE
+    WHEN COALESCE(s.type_info, '') = '' OR instr(s.type_info, ' (') = 0
+      THEN d.name
+    WHEN k.name IN ('constructor', 'destructor')
+      THEN COALESCE(s.qual_name, s.spelling, d.name)
+           || substr(s.type_info, instr(s.type_info, ' (') + 1)
+    ELSE substr(s.type_info, 1, instr(s.type_info, ' (') - 1)
+         || ' ' || COALESCE(s.qual_name, s.spelling, d.name)
+         || substr(s.type_info, instr(s.type_info, ' (') + 1)
+  END AS signature
+FROM symbol s
+JOIN symdisp d ON d.id=s.id
+LEFT JOIN symbol_kind k ON k.id=s.kind
+WHERE k.name IN ('function', 'function-template', 'method', 'constructor',
+                 'destructor', 'conversion-function');
+
 DROP VIEW IF EXISTS template_arg_fact;
 CREATE VIEW template_arg_fact AS
 SELECT o.name AS owner, a.position, a.arg_kind,
@@ -104,6 +126,8 @@ WHERE e.kind=1;
 -- seeded recursive examples, keeping all EDB input inside index.db.
 DROP VIEW IF EXISTS query_seed;
 CREATE VIEW query_seed AS SELECT name FROM symdisp WHERE 0;
+DROP VIEW IF EXISTS query_target;
+CREATE VIEW query_target AS SELECT name FROM symdisp WHERE 0;
 
 -- base graph edges (annotated src name, annotated dst name)
 DROP VIEW IF EXISTS calls;     CREATE VIEW calls     AS SELECT ss.name AS a, ds.name AS b FROM edge e JOIN symdisp ss ON ss.id=e.src_id JOIN symdisp ds ON ds.id=e.dst_id WHERE e.kind=1;

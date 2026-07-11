@@ -24,6 +24,7 @@ script does, how the code works, and how to run it.
 11. [Template instances: `08_templates.dl`](11-templates.md)
 12. [Cross-file dependencies: `09_cross_file.dl`](12-cross-file.md)
 13. [Materialized impact: `10_writeback.dl`](13-writeback.md)
+14. [All call-path edges: `11_all_paths.dl`](14-all-paths.md)
 
 ## Common model
 

@@ -26,6 +26,9 @@
                   is_named_instance:number, linkage:symbol, access:symbol)
 .input symbol_fact(IO=sqlite, dbname="index.db")
 
+.decl callable_fact(name:Sym, signature:symbol)
+.input callable_fact(IO=sqlite, dbname="index.db")
+
 .decl template_arg_fact(owner:Sym, position:number, arg_kind:number,
                         referenced:Sym, literal:symbol)
 .input template_arg_fact(IO=sqlite, dbname="index.db")

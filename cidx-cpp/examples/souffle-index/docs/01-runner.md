@@ -18,6 +18,7 @@ The option loop accepts:
 | Option | Effect |
 |---|---|
 | `--seed SYMBOL` | exact collision-safe symbol used by bounded experiments |
+| `--target SYMBOL` | exact destination used by the all-paths experiment |
 | `--profile FILE` | writes Souffle's JSON execution profile |
 | `--jobs N` | selects a worker count or `auto` |
 | `--write` | authorizes the materializing experiment |
@@ -34,6 +35,9 @@ exits instead of silently returning an empty result.
 Finally it assembles `-I`, `-j`, and optional `-p` arguments, changes into the
 database directory, and starts Souffle. Changing directory lets the SQLite
 connector open the real database directly.
+
+`11_all_paths.dl` requires both `--seed` (source) and `--target` (destination).
+The runner stores them in the `query_seed` and `query_target` views.
 
 ## How to run it
 

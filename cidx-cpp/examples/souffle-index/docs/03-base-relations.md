@@ -11,7 +11,8 @@ reachability, and forward/reverse call cones.
 
 The prelude has three input families:
 
-- symbol/site facts: `symbol_fact`, `template_arg_fact`, `call_site_fact`;
+- symbol/site facts: `symbol_fact`, `callable_fact`, `template_arg_fact`,
+  `call_site_fact`;
 - Layer-0 edges: calls, inheritance, overrides, instantiation, uses and
   ownership;
 - Layer-1 edges: generalization, implementation, composition, aggregation,
@@ -20,6 +21,10 @@ The prelude has three input families:
 `subtype` closes raw inheritance and design-level generalization/implementation
 transitively. `edep` closes design dependencies transitively. `reach`, `cg_out`,
 and `cg_in` demonstrate seeded fixpoint patterns.
+
+`callable_fact` maps the collision-safe graph identity to a full callable
+signature. Rules should continue joining graph edges by identity and add the
+signature only to presentation/output relations.
 
 Each `.input` uses `IO=sqlite, dbname="index.db"`; therefore the process must
 run from the directory containing the database. Souffle interns symbol strings,
